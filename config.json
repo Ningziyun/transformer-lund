@@ -1,0 +1,139 @@
+{
+    "Transformer": {
+        "num_epochs": 50,
+        "data_path": "inputFiles/top_benchmark/discretized/train_top_pt40_eta30_phi30_lower001.h5",
+        "seed": 19950701,
+        "log_dir": "output/Transformers/final_repo/models/top_large",
+        "batch_size": 100,
+        "num_events": 600000,
+        "num_const": 100,
+        "num_bins": [
+            41,
+            31,
+            31
+        ],
+        "logging_steps": 50,
+        "checkpoint_steps": 30000,
+        "lr": 5e-4,
+        "num_layers": 8,
+        "hidden_dim": 256,
+        "num_heads": 4,
+        "dropout": 0.1,
+        "start_token": true,
+        "end_token": true
+    },
+    "Sampling": {
+        "model_name": "model_last.pt",
+        "savetags": [
+            "test_100",
+            "train_100",
+            "test_top5k_100",
+            "train_top5k_100"
+        ],
+        "num_samples": [
+            100000,
+            200000,
+            100000,
+            200000
+        ],
+        "batchsize": 100,
+        "num_const": [
+            100,
+            100,
+            100,
+            100
+        ],
+        "seed": [
+            2865480,
+            4117434,
+            3574330,
+            2531755
+        ],
+        "trunc": [
+            false,
+            false,
+            5000,
+            5000
+        ]
+    },
+    "ParticleNet": {
+        "config_loc": "output/Transformers/final_repo",
+        "graphnet": {
+            "activation": "LeakyReLU",
+            "k": 16,
+            "channels": [
+                [
+                    64,
+                    64,
+                    64
+                ],
+                [
+                    128,
+                    128,
+                    128
+                ],
+                [
+                    256,
+                    256,
+                    256
+                ]
+            ],
+            "classifier": [
+                256,
+                128,
+                2
+            ],
+            "dropout": 0.1,
+            "static": false
+        },
+        "data": {
+            "bg_file": "inputFiles/top_benchmark/discretized/train_top_pt40_eta30_phi30_lower001.h5",
+            "n_jets": 200000,
+            "n_const": 100,
+            "bg_key": "discretized",
+            "sig_key": "discretized",
+            "seed": 4102074,
+            "bg_noise": false,
+            "sig_noise": false
+        },
+        "training": {
+            "batch_size": 256,
+            "epochs": 75,
+            "validation_split": 0.1,
+            "validation_freq": 1,
+            "verbose": 2
+        },
+        "logging": {
+            "logfolder": "logs/top_large"
+        },
+        "mask": true
+    },
+    "Jobscripts": {
+        "Transformer": {
+            "filename": "jobscripts/jobscript_trafo.sh",
+            "jobname": "top_large",
+            "out_file": "output/out/top_large_trafo",
+            "runtime": 500,
+            "mem_req": 4,
+            "dir": "output/Transformers/final_repo",
+            "env": "torchProd"
+        },
+        "Sampling": {
+            "filename": "jobscripts/jobscript_sample.sh",
+            "jobname": "top_large_sample",
+            "out_file": "output/out/top_large_sample",
+            "runtime": 120,
+            "mem_req": 3,
+            "dir": "output/Transformers/final_repo",
+            "env": "torchProd"
+        },
+        "ParticleNet": {
+            "jobname": "top_large_pnet",
+            "out_file": "output/out/top_large_pnet",
+            "runtime": 330,
+            "mem_req": 3,
+            "dir": "output/Transformers/final_repo/particlenet",
+            "env": "monoJet"
+        }
+    }
+}

@@ -1,0 +1,52 @@
+{
+  "graphnet": {
+    "activation": "LeakyReLU",
+    "k": 16,
+    "channels": [
+      [
+        64,
+        64,
+        64
+      ],
+      [
+        128,
+        128,
+        128
+      ],
+      [
+        256,
+        256,
+        256
+      ]
+    ],
+    "classifier": [
+      256,
+      128,
+      2
+    ],
+    "dropout": 0.1,
+    "static": false
+  },
+  "data": {
+    "sig_file": "/home/thorben/Projects/Transformers/physics_transformers/notebooks/train_qcd_many_bins.h5",
+    "bg_file": "/home/thorben/Projects/Transformers/physics_transformers/notebooks/train_qcd_many_bins.h5",
+    "n_jets": 100000,
+    "n_const": 50,
+    "bg_key": "raw",
+    "sig_key": "discretized",
+    "seed": 0,
+    "bg_noise": false,
+    "sig_noise": true
+  },
+  "training": {
+    "batch_size": 256,
+    "epochs": 75,
+    "validation_split": 0.1,
+    "validation_freq": 1,
+    "verbose": 1
+  },
+  "logging": {
+    "logfolder": "logs/test"
+  },
+  "mask": true
+}

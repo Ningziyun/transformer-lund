@@ -1,0 +1,52 @@
+{
+  "graphnet": {
+    "activation": "LeakyReLU",
+    "k": 16,
+    "channels": [
+      [
+        64,
+        64,
+        64
+      ],
+      [
+        128,
+        128,
+        128
+      ],
+      [
+        256,
+        256,
+        256
+      ]
+    ],
+    "classifier": [
+      256,
+      128,
+      2
+    ],
+    "dropout": 0.1,
+    "static": false
+  },
+  "data": {
+    "sig_file": "inputFiles/Transformers/qcd_lowerq/samples_train_100.npz",
+    "bg_file": "inputFiles/top_benchmark/discretized/val_qcd_pt40_eta30_phi30_lower001.h5",
+    "n_jets": 10000,
+    "n_const": 100,
+    "bg_key": "discretized",
+    "sig_key": "discretized",
+    "seed": 0,
+    "bg_noise": false,
+    "sig_noise": false
+  },
+  "training": {
+    "batch_size": 256,
+    "epochs": 75,
+    "validation_split": 0.1,
+    "validation_freq": 1,
+    "verbose": 1
+  },
+  "logging": {
+    "logfolder": "logs/test"
+  },
+  "mask": true
+}
