@@ -199,7 +199,19 @@ class JetTransformer(Module):
             return 13 * torch.tanh(0.1 * logits)
         else:
             return logits
+    
+    # New loss Function
+    def loss(self, logits, true_bin, padding_mask):
+        # logits: [B,T,C], true_bin: [B,T], padding_mask: [B,T] (True=有效)
+        B, T, C = logits.shape
+        logits = logits[:, :-1, :].reshape(-1, C)
+        targets = true_bin[:, 1:].reshape(-1)
+        mask = padding_mask[:, 1:].reshape(-1)          # 只保留有效位置
 
+        ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
+        ce = ce[mask]
+        return ce.mean()
+    '''
     def loss(self, logits, true_bin):
         # ignore final logits
         logits = logits[:, :-1].reshape(-1, self.total_bins)
@@ -209,6 +221,7 @@ class JetTransformer(Module):
 
         loss = self.criterion(logits, true_bin)
         return loss
+    '''
 
     def probability(
         self,
