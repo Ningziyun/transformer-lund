@@ -113,13 +113,24 @@ def parse_input():
     parser.add_argument(
         "--num_events", type=int, default=10000, help="Number of events for training"
     )
+    # NEW: how many feature channels the model expects (step-3)
+    parser.add_argument(
+        "--num_features", type=int, default=3,
+        help="Number of feature channels in each time step (e.g. 3 for pt/eta/phi, 2 for kt/deltaR)."
+    )
     parser.add_argument(
         "--num_bins",
         type=int,
-        nargs=3,
+        nargs='+', # Origin was 3 (step-3)
         default=[41, 31, 31],
         help="Number of bins per feature",
     )
+    # Validate consistency between num_features and num_bins (step-3)
+    if len(args.num_bins) != args.num_features:
+        raise ValueError(
+            f"--num_bins expects {args.num_features} integers (got {len(args.num_bins)}). "
+            "Make sure the order of bins matches the column order in your HDF file."
+        )
     parser.add_argument(
         "--start_token",
         action="store_true",

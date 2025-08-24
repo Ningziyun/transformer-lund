@@ -19,7 +19,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Running on device: {device}")
 
-    num_features = 3
+    num_features = args.num_features # Origin was 3(Step-3)
     num_bins = tuple(args.num_bins)
 
     print(f"Using bins: {num_bins}")
