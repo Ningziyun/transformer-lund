@@ -239,11 +239,8 @@ def discretize_data(
         const_pt_disc[const_pt == 0] = -1
         d_eta_disc[const_pt == 0] = -1
         d_phi_disc[const_pt == 0] = -1
-        #const_pt_disc[const_pt == 0] = 0
-        #d_eta_disc[const_pt == 0] = 0
-        #d_phi_disc[const_pt == 0] = 0
         return const_pt_disc, d_eta_disc, d_phi_disc
-    '''
+
     def get_df(pt, eta, phi):
         stacked = np.stack([pt, eta, phi], -1)
         stacked = stacked.reshape((-1, 600))
@@ -254,18 +251,7 @@ def discretize_data(
         ]
         df = pd.DataFrame(stacked, columns=cols)
         return df
-    '''
-    def get_df(pt, eta):
-        stacked = np.stack([pt, eta], -1)
-        stacked = stacked.reshape((-1, 400))
-        cols = [
-            item
-            for sublist in [f"PT_{i},Eta_{i}".split(",") for i in range(200)]
-            for item in sublist
-        ]
-        df = pd.DataFrame(stacked, columns=cols)
-        return df
-    
+
     print(f"Input: {input_file}\nOutput: {output_file}")
 
     data = read_input()
@@ -322,10 +308,8 @@ def discretize_data(
     print(f"phi bin range: {d_phi_disc[const_pt!=0].min()} {d_phi_disc.max()}\n")
 
     # Collect continuous data in dataframe
-    #raw = get_df(const_pt, d_eta, d_phi)
-    raw = get_df(const_pt, d_eta)
-    #disc = get_df(const_pt_disc, d_eta_disc, d_phi_disc)
-    disc = get_df(const_pt_disc, d_eta_disc)
+    raw = get_df(const_pt, d_eta, d_phi)
+    disc = get_df(const_pt_disc, d_eta_disc, d_phi_disc)
 
     # Write dataframes into compressed hdf5 file
     raw.to_hdf(output_file, key="raw", mode="w", complevel=9)

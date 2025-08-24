@@ -116,7 +116,7 @@ def parse_input():
     parser.add_argument(
         "--num_bins",
         type=int,
-        nargs='+', # origin =3
+        nargs=3,
         default=[41, 31, 31],
         help="Number of bins per feature",
     )
@@ -170,8 +170,6 @@ def parse_input():
     parser.add_argument(
         "--tanh", action="store_true", help="Apply tanh as final activation"
     )
-    # Extra arguement, to control the input number of features
-    parser.add_argument("--num_features", type=int, default=3, help="Number of features")
     args = parser.parse_args()
     return args
 
@@ -200,7 +198,7 @@ def set_seeds(seed):
 def load_data(
     path,
     n_events,
-    num_features=3, # origin = 3
+    num_features=3,
     num_bins=(41, 31, 31),
     num_const=20,
     reverse=False,

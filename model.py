@@ -49,6 +49,8 @@ class JetTransformerClassifier(Module):
         dropout=0.1,
     ):
         super(JetTransformerClassifier, self).__init__()
+        '''
+        Step 1 Delete
         self.num_features = num_features
         self.dropout = dropout
 
@@ -59,6 +61,28 @@ class JetTransformerClassifier(Module):
                 for l in range(num_features)
             ]
         )
+        '''
+        # Step 1 Add
+        self.num_features = num_features
+        self.num_bins = num_bins            # keep per-feature bin counts
+        self.dropout = dropout
+
+        # Reserve one PAD slot per feature (padding_idx equals the original n_bins)
+        self.pad_idx = tuple(b for b in num_bins)
+
+        # learn embedding for each bin of each feature dim (+1 for PAD)
+        self.feature_embeddings = ModuleList(
+            [
+                Embedding(
+                    embedding_dim=hidden_dim,
+                    num_embeddings=num_bins[l] + 1,  # +1 for PAD slot
+                    padding_idx=num_bins[l]          # PAD index is the extra slot
+                )
+                for l in range(num_features)
+            ]
+        )
+
+        # Step 1 End
 
         # build transformer layers
         self.layers = ModuleList(
@@ -90,11 +114,29 @@ class JetTransformerClassifier(Module):
         causal_mask = seq_idx.view(-1, 1) < seq_idx.view(1, -1)
         padding_mask = ~padding_mask
 
-        # project x to initial embedding
-        x[x < 0] = 0
-        emb = self.feature_embeddings[0](x[:, :, 0])
-        for i in range(1, self.num_features):
-            emb += self.feature_embeddings[i](x[:, :, i])
+        # Step 1 add
+        # --- sanitize indices and map invalid values to PAD (detect NaNs before casting) ---
+        x_f = x  # keep float view for NaN detection if x is float
+        x = x.long()
+
+        emb = None
+        for i in range(self.num_features):
+            idx = x[:, :, i]
+
+            # detect NaNs from the original float tensor (if available)
+            nan_mask = torch.isnan(x_f[:, :, i].float()) if x_f.dtype.is_floating_point else torch.zeros_like(idx, dtype=torch.bool)
+
+            # invalid if < 0, >= n_bins[i], or NaN
+            bad = (idx < 0) | (idx >= self.num_bins[i]) | nan_mask
+
+            # map invalid values to PAD slot
+            pad_val = torch.full_like(idx, self.pad_idx[i])
+            idx = torch.where(bad, pad_val, idx)
+
+            e = self.feature_embeddings[i](idx)
+            emb = e if emb is None else emb + e
+        # --- end sanitize ---
+        # Step 1 End
 
         # apply transformer layer
         for layer in self.layers:
@@ -138,6 +180,7 @@ class JetTransformer(Module):
         self.tanh = tanh
         print(f"Bins: {self.total_bins}")
         '''
+        Step1-delete
         # learn embedding for each bin of each feature dim
         self.feature_embeddings = ModuleList(
             [
@@ -146,16 +189,24 @@ class JetTransformer(Module):
             ]
         )
         '''
-        # learn embedding for each bin (+1 for PAD) of each feature dim
-        self.pad_ids = []
-        self.feature_embeddings = ModuleList()
-        for l in range(num_features):
-            # 为 PAD 再多开 1 个 embedding，PAD 的索引 = num_bins[l]
-            self.feature_embeddings.append(
-                Embedding(embedding_dim=hidden_dim, num_embeddings=num_bins[l] + 1)
-            )
-            self.pad_ids.append(num_bins[l])
-        self.pad_ids = torch.tensor(self.pad_ids)
+        # Step-1 Adding
+        # Reserve one PAD slot per feature (padding_idx = original n_bins)
+        self.pad_idx = tuple(b for b in num_bins)  # PAD index for each feature
+
+        # Learn embedding for each feature (+1 for PAD). We keep logits size = prod(num_bins),
+        # i.e., PAD is never a class; PAD is only for inputs/targets masking.
+        self.feature_embeddings = ModuleList(
+            [
+                Embedding(
+                    embedding_dim=hidden_dim,
+                    num_embeddings=num_bins[l] + 1,  # +1 for PAD slot
+                    padding_idx=num_bins[l]          # PAD index is the extra slot
+                )
+                for l in range(num_features)
+            ]
+        )
+        # Step-1 End
+
 
         # build transformer layers
         self.layers = ModuleList(
@@ -180,7 +231,15 @@ class JetTransformer(Module):
             self.out_proj = Linear(hidden_dim, self.total_bins)
         else:
             self.out_proj = EmbeddingProductHead(hidden_dim, num_features, num_bins)
+        '''
+        Step-2 Delete
         self.criterion = CrossEntropyLoss()
+        '''
+        # Step-2 Adding
+        # Ignore invalid / PAD targets in the loss (we do not have a PAD class in the logits)
+        self.ignore_index = -100
+        self.criterion = CrossEntropyLoss(ignore_index=self.ignore_index)
+        # Step-2 End
 
     def forward(self, x, padding_mask):
         # construct causal mask to restrict attention to preceding elements
@@ -189,20 +248,35 @@ class JetTransformer(Module):
         causal_mask = seq_idx.view(-1, 1) < seq_idx.view(1, -1)
         padding_mask = ~padding_mask
         '''
+        Step-1 Delete
         # project x to initial embedding
         x[x < 0] = 0
-        '''
-        # 把 PAD(-1) 映射到对应维度的 PAD id（= num_bins[l]）
-        pad_ids = self.pad_ids.to(x.device)
-        for f in range(self.num_features):
-            xf = x[:, :, f]
-            x[:, :, f] = torch.where(xf < 0, pad_ids[f], xf)
-
-        emb = self.feature_embeddings[0](x[:, :, 0])
-
         emb = self.feature_embeddings[0](x[:, :, 0])
         for i in range(1, self.num_features):
             emb += self.feature_embeddings[i](x[:, :, i])
+        '''
+        # Step-1 Adding
+        # --- sanitize indices and map invalid values to PAD before embedding ---
+        # NOTE: PAD is the (original) upper bound num_bins[i], thanks to +1 embeddings above.
+        x_f = x  # keep float view for NaN detection if upstream passed floats
+        x = x.long()  # Embedding requires int64 indices
+
+        emb = None
+        for i in range(self.num_features):
+            idx = x[:, :, i]
+
+            # invalid if < 0, >= n_bins[i], or NaN (detected on the float view)
+            nan_mask = torch.isnan(x_f[:, :, i].float()) if x_f.dtype.is_floating_point else torch.zeros_like(idx, dtype=torch.bool)
+            bad = (idx < 0) | (idx >= self.num_bins[i]) | nan_mask
+
+            # map all invalid values to the PAD slot
+            pad_val = torch.full_like(idx, self.pad_idx[i])
+            idx = torch.where(bad, pad_val, idx)
+
+            e = self.feature_embeddings[i](idx)
+            emb = e if emb is None else emb + e
+        # --- end sanitize ---
+        # Step-1 End
 
         # apply transformer layer
         for layer in self.layers:
@@ -219,19 +293,9 @@ class JetTransformer(Module):
             return 13 * torch.tanh(0.1 * logits)
         else:
             return logits
-    
-    # New loss Function
-    def loss(self, logits, true_bin, padding_mask):
-        # logits: [B,T,C], true_bin: [B,T], padding_mask: [B,T] (True=有效)
-        B, T, C = logits.shape
-        logits = logits[:, :-1, :].reshape(-1, C)
-        targets = true_bin[:, 1:].reshape(-1)
-        mask = padding_mask[:, 1:].reshape(-1)          # 只保留有效位置
 
-        ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
-        ce = ce[mask]
-        return ce.mean()
     '''
+    Step-2 Delete
     def loss(self, logits, true_bin):
         # ignore final logits
         logits = logits[:, :-1].reshape(-1, self.total_bins)
@@ -242,6 +306,33 @@ class JetTransformer(Module):
         loss = self.criterion(logits, true_bin)
         return loss
     '''
+    # Step-2 Adding
+    def loss(self, logits, true_bin):
+        # logits: (B, T, total_bins); we ignore the last step (teacher forcing next-token)
+        logits = logits[:, :-1].reshape(-1, self.total_bins)
+
+        # shift targets to the right to align with logits
+        true_bin = true_bin[:, 1:].reshape(-1)
+
+        # --- map invalid targets to ignore_index ---
+        # Any target < 0, >= total_bins, or NaN should be ignored (padded steps, bad triples)
+        if true_bin.dtype.is_floating_point:
+            nan_mask = torch.isnan(true_bin)
+            true_bin = true_bin.long()
+        else:
+            nan_mask = torch.zeros_like(true_bin, dtype=torch.bool)
+
+        bad = (true_bin < 0) | (true_bin >= self.total_bins) | nan_mask
+        true_bin = torch.where(
+            bad,
+            torch.full_like(true_bin, self.ignore_index),  # send to ignore_index
+            true_bin,
+        )
+        # --- end map ---
+
+        return self.criterion(logits, true_bin)
+    # Step-2 End
+
 
     def probability(
         self,
@@ -300,12 +391,12 @@ class JetTransformer(Module):
         if not trunc is None and trunc >= 1:
             trunc = torch.tensor(trunc, dtype=torch.long)
 
-        jets = -torch.ones((len(starts), len_seq, self.num_features), dtype=torch.long, device=device) # origin 3
+        jets = -torch.ones((len(starts), len_seq, 3), dtype=torch.long, device=device)
         true_bins = torch.zeros((len(starts), len_seq), dtype=torch.long, device=device)
 
         # Set start bins and constituents
         num_prior_bins = torch.cumprod(torch.tensor([1, 41, 31]), -1).to(device)
-        bins = (starts * num_prior_bins.reshape(1, 1, -1)).sum(axis=2) # origin -1 is 3
+        bins = (starts * num_prior_bins.reshape(1, 1, 3)).sum(axis=2)
         true_bins[:, 0] = bins
         jets[:, 0] = starts
         padding_mask = jets[:, :, 0] != -1
@@ -347,31 +438,23 @@ class JetTransformer(Module):
 
     def sample(self, starts, device, len_seq, trunc=None):
         def select_idx():
+            # Select bin at random according to probabilities
             rand = torch.rand((len(jets), 1), device=device)
             preds_cum = torch.cumsum(preds, -1)
-            preds_cum[:, -1] += 0.01
+            preds_cum[:, -1] += 0.01  # If rand = 1, sort it to the last bin
             idx = torch.searchsorted(preds_cum, rand).squeeze(1)
             return idx
 
         if not trunc is None and trunc >= 1:
             trunc = torch.tensor(trunc, dtype=torch.long)
 
-        # jets/true_bins 用模型里配置的特征数
-        jets = -torch.ones((len(starts), 1, self.num_features), dtype=torch.long, device=device)
+        jets = -torch.ones((len(starts), 1, 3), dtype=torch.long, device=device)
         true_bins = torch.zeros((len(starts), 1), dtype=torch.long, device=device)
 
-        # ------- 关键：prior bins 按 num_features 动态计算 -------
-        # prior[k] = ∏_{j<k} num_bins[j]，长度 = self.num_features
-        prior_list = [1] + list(self.num_bins[:-1])
-        num_prior_bins = torch.cumprod(torch.tensor(prior_list, device=device), dim=0)
-
-        # starts 形状应为 [B, self.num_features]
-        assert starts.shape[-1] == self.num_features, \
-            f"starts last dim = {starts.shape[-1]} != num_features = {self.num_features}"
-
-        # 把起始 tuple 映射为联合索引
-        bins0 = (starts * num_prior_bins.view(1, -1)).sum(-1)   # [B]
-        true_bins[:, 0] = bins0
+        # Set start bins and constituents
+        num_prior_bins = torch.cumprod(torch.tensor([1, self.num_bins[0], self.num_bins[1]]), -1).to(device)
+        bins = (starts * num_prior_bins.reshape(1, 1, 3)).sum(axis=2)
+        true_bins[:, 0] = bins
         jets[:, 0] = starts
         padding_mask = jets[:, :, 0] != -1
 
@@ -381,13 +464,16 @@ class JetTransformer(Module):
             for particle in range(len_seq - 1):
                 if all(finished):
                     break
-
+                # Get probabilities for the next particles
                 preds = self.forward(jets, padding_mask)[:, particle]
-                preds = torch.nn.functional.softmax(preds, dim=-1)
+                preds = torch.nn.functional.softmax(preds[:, :], dim=-1)
 
+                # Remove low probs
                 if not trunc is None:
                     if trunc < 1:
-                        preds = torch.where(preds < trunc, torch.zeros_like(preds), preds)
+                        preds = torch.where(
+                            preds < trunc, torch.zeros(1, device=device), preds
+                        )
                     else:
                         preds, indices = torch.topk(preds, trunc, -1, sorted=False)
 
@@ -396,37 +482,30 @@ class JetTransformer(Module):
                 idx = select_idx()
                 if not trunc is None and trunc >= 1:
                     idx = indices[torch.arange(len(indices)), idx]
-
                 finished[idx == self.total_bins] = True
 
-                '''
-                # 将联合索引还原为各个特征的 bin
-                vals = self.idx_to_bins(idx)
-                vals[finished] = 0  # 已结束的样本写 0（pad）
-                '''
-                vals = self.idx_to_bins(idx)
-                vals[finished] = self.pad_ids.to(vals.device)  # 已结束位置写 PAD id
-               
-                # 追加到序列
+                # Get tuple from found bin and set next particle properties
                 true_bins = torch.concat((true_bins, idx.view(-1, 1)), dim=1)
-                jets = torch.concat((jets, vals.view(-1, 1, self.num_features)), dim=1)
+                bins = self.idx_to_bins(idx)
+                bins[finished] = 0
+                jets = torch.concat((jets, bins.view(-1, 1, self.num_features)), dim=1)
                 padding_mask = torch.concat((padding_mask, ~finished.view(-1, 1)), dim=1)
 
         return jets, true_bins
 
 
+    def idx_to_bins(self, x):
+        pT = x % self.num_bins[0]
 
-    def idx_to_bins(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B] 联合索引 → 返回 [B, num_features] 的每维取值
-        vals = []
-        rem = x.clone()
-        for k in range(self.num_features):
-            base = self.num_bins[k]
-            v = rem % base
-            vals.append(v)
-            rem = torch.div(rem - v, base, rounding_mode="trunc")
-        return torch.stack(vals, dim=-1)
+        # Step 1 Adding
+        device = x.device
+        nb0 = torch.tensor(self.num_bins[0], device=device)
+        nb01 = torch.prod(torch.tensor(self.num_bins[:2], device=device))
 
+        eta = torch.div((x - pT), nb0, rounding_mode="trunc") % torch.div(nb01, nb0, rounding_mode="trunc")
+        phi = torch.div((x - pT - nb0 * eta), nb01, rounding_mode="trunc")
+        # Step 1 End
+        return torch.stack((pT, eta, phi), dim=-1)
 
 
 class CNNclass(Module):

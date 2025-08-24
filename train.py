@@ -19,7 +19,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Running on device: {device}")
 
-    num_features = args.num_features # origin 3
+    num_features = 3
     num_bins = tuple(args.num_bins)
 
     print(f"Using bins: {num_bins}")
@@ -102,7 +102,7 @@ if __name__ == "__main__":
 
             with torch.cuda.amp.autocast():
                 logits = model(x, padding_mask)
-                loss = model.loss(logits, true_bin, padding_mask) # Adding padding_mask here
+                loss = model.loss(logits, true_bin)
                 with torch.no_grad():
                     perplexity = model.probability(
                         logits,
@@ -152,7 +152,7 @@ if __name__ == "__main__":
                     x,
                     padding_mask,
                 )
-                loss = model.loss(logits, true_bin, padding_mask) # Adding padding_mask here 
+                loss = model.loss(logits, true_bin)
                 perplexity = model.probability(
                     logits, padding_mask, true_bin, perplexity=True, logarithmic=False
                 )
