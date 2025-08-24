@@ -15,7 +15,7 @@ from torch.nn import (
 class EmbeddingProductHead(Module):
     def __init__(self, hidden_dim=256, num_features=3, num_bins=(41, 41, 41)):
         super(EmbeddingProductHead, self).__init__()
-        assert num_features == 3
+        # assert num_features == 3, removed in step-3
         self.num_features = num_features
         self.num_bins = num_bins
         self.hidden_dim = hidden_dim
@@ -391,12 +391,22 @@ class JetTransformer(Module):
         if not trunc is None and trunc >= 1:
             trunc = torch.tensor(trunc, dtype=torch.long)
 
-        jets = -torch.ones((len(starts), len_seq, 3), dtype=torch.long, device=device)
+        jets = -torch.ones((len(starts), len_seq, self.num_features), dtype=torch.long, device=device) # 3 to self.num_features, Change in step-3
         true_bins = torch.zeros((len(starts), len_seq), dtype=torch.long, device=device)
 
         # Set start bins and constituents
-        num_prior_bins = torch.cumprod(torch.tensor([1, 41, 31]), -1).to(device)
-        bins = (starts * num_prior_bins.reshape(1, 1, 3)).sum(axis=2)
+        '''
+        Deleted in step-3
+        num_prior_bins = torch.cumprod(torch.tensor([1, 41, 31]), -1).to(device) 
+        bins = (starts * num_prior_bins.reshape(1, 1, 3)).sum(axis=2) 
+        '''
+        # New adding in step-3
+        radices = torch.tensor(self.num_bins, device=device)                 # [b0, b1, ..., b{F-1}]
+        num_prior_bins = torch.cumprod(
+            torch.cat([torch.tensor([1], device=device), radices[:-1]]), dim=0
+        )                                                                    # [1, b0, b0*b1, ...]
+        bins = (starts * num_prior_bins.view(1, 1, -1)).sum(dim=2)
+        # step-3 end  
         true_bins[:, 0] = bins
         jets[:, 0] = starts
         padding_mask = jets[:, :, 0] != -1
@@ -448,12 +458,22 @@ class JetTransformer(Module):
         if not trunc is None and trunc >= 1:
             trunc = torch.tensor(trunc, dtype=torch.long)
 
-        jets = -torch.ones((len(starts), 1, 3), dtype=torch.long, device=device)
+        jets = -torch.ones((len(starts), 1, self.num_features), dtype=torch.long, device=device) # 3 to self.num_features, changed in step-3
         true_bins = torch.zeros((len(starts), 1), dtype=torch.long, device=device)
 
         # Set start bins and constituents
+        # New adding in step-3
+        radices = torch.tensor(self.num_bins, device=device)
+        num_prior_bins = torch.cumprod(
+            torch.cat([torch.tensor([1], device=device), radices[:-1]]), dim=0
+        )
+        bins = (starts * num_prior_bins.view(1, 1, -1)).sum(dim=2)
+        # Step-3 end
+        '''
+        Deleted in step-3
         num_prior_bins = torch.cumprod(torch.tensor([1, self.num_bins[0], self.num_bins[1]]), -1).to(device)
         bins = (starts * num_prior_bins.reshape(1, 1, 3)).sum(axis=2)
+        '''
         true_bins[:, 0] = bins
         jets[:, 0] = starts
         padding_mask = jets[:, :, 0] != -1
@@ -493,7 +513,8 @@ class JetTransformer(Module):
 
         return jets, true_bins
 
-
+    '''
+    Deleted in step-3
     def idx_to_bins(self, x):
         pT = x % self.num_bins[0]
 
@@ -506,6 +527,17 @@ class JetTransformer(Module):
         phi = torch.div((x - pT - nb0 * eta), nb01, rounding_mode="trunc")
         # Step 1 End
         return torch.stack((pT, eta, phi), dim=-1)
+    '''
+    
+    def idx_to_bins(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (...,) flat index
+        y = x.clone()
+        coords = []
+        for b in self.num_bins:          # remainder per dimension
+            coords.append(y % b)
+            y = y // b
+        return torch.stack(coords, dim=-1)  # shape: (..., F)
+
 
 
 class CNNclass(Module):

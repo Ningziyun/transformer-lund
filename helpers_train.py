@@ -125,12 +125,6 @@ def parse_input():
         default=[41, 31, 31],
         help="Number of bins per feature",
     )
-    # Validate consistency between num_features and num_bins (step-3)
-    if len(args.num_bins) != args.num_features:
-        raise ValueError(
-            f"--num_bins expects {args.num_features} integers (got {len(args.num_bins)}). "
-            "Make sure the order of bins matches the column order in your HDF file."
-        )
     parser.add_argument(
         "--start_token",
         action="store_true",
@@ -182,6 +176,12 @@ def parse_input():
         "--tanh", action="store_true", help="Apply tanh as final activation"
     )
     args = parser.parse_args()
+    # Validate consistency between num_features and num_bins (step-3)
+    if len(args.num_bins) != args.num_features:
+        raise ValueError(
+            f"--num_bins expects {args.num_features} integers (got {len(args.num_bins)}). "
+            "Make sure the order of bins matches the column order in your HDF file."
+        )
     return args
 
 
