@@ -137,7 +137,7 @@ class JetTransformer(Module):
         self.classifier = classifier
         self.tanh = tanh
         print(f"Bins: {self.total_bins}")
-
+        '''
         # learn embedding for each bin of each feature dim
         self.feature_embeddings = ModuleList(
             [
@@ -145,6 +145,17 @@ class JetTransformer(Module):
                 for l in range(num_features)
             ]
         )
+        '''
+        # learn embedding for each bin (+1 for PAD) of each feature dim
+        self.pad_ids = []
+        self.feature_embeddings = ModuleList()
+        for l in range(num_features):
+            # 为 PAD 再多开 1 个 embedding，PAD 的索引 = num_bins[l]
+            self.feature_embeddings.append(
+                Embedding(embedding_dim=hidden_dim, num_embeddings=num_bins[l] + 1)
+            )
+            self.pad_ids.append(num_bins[l])
+        self.pad_ids = torch.tensor(self.pad_ids)
 
         # build transformer layers
         self.layers = ModuleList(
@@ -177,9 +188,18 @@ class JetTransformer(Module):
         seq_idx = torch.arange(seq_len, dtype=torch.long, device=x.device)
         causal_mask = seq_idx.view(-1, 1) < seq_idx.view(1, -1)
         padding_mask = ~padding_mask
-
+        '''
         # project x to initial embedding
         x[x < 0] = 0
+        '''
+        # 把 PAD(-1) 映射到对应维度的 PAD id（= num_bins[l]）
+        pad_ids = self.pad_ids.to(x.device)
+        for f in range(self.num_features):
+            xf = x[:, :, f]
+            x[:, :, f] = torch.where(xf < 0, pad_ids[f], xf)
+
+        emb = self.feature_embeddings[0](x[:, :, 0])
+
         emb = self.feature_embeddings[0](x[:, :, 0])
         for i in range(1, self.num_features):
             emb += self.feature_embeddings[i](x[:, :, i])
@@ -379,10 +399,14 @@ class JetTransformer(Module):
 
                 finished[idx == self.total_bins] = True
 
+                '''
                 # 将联合索引还原为各个特征的 bin
                 vals = self.idx_to_bins(idx)
                 vals[finished] = 0  # 已结束的样本写 0（pad）
-
+                '''
+                vals = self.idx_to_bins(idx)
+                vals[finished] = self.pad_ids.to(vals.device)  # 已结束位置写 PAD id
+               
                 # 追加到序列
                 true_bins = torch.concat((true_bins, idx.view(-1, 1)), dim=1)
                 jets = torch.concat((jets, vals.view(-1, 1, self.num_features)), dim=1)

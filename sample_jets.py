@@ -109,6 +109,20 @@ pt_bins = np.load(args.preprocessingDir+"/pt_bins_" + args.preprocessingBins + "
 eta_bins = np.load(args.preprocessingDir+"/eta_bins_" + args.preprocessingBins + ".npy")
 #phi_bins = np.load(args.preprocessingDir+"/phi_bins_" + args.preprocessingBins + ".npy")
 
+# New Adding Function
+def centers_to_edges(b):
+    b = np.asarray(b, dtype=np.float64)
+    step = np.diff(b)
+    left  = b[0]  - step[0]/2.0
+    right = b[-1] + step[-1]/2.0
+    mids  = (b[:-1] + b[1:]) / 2.0
+    return np.concatenate(([left], mids, [right]))  # 长度 = nBins + 1
+
+pt_edges  = centers_to_edges(pt_bins)
+eta_edges = centers_to_edges(eta_bins)
+# New Adding Ends
+
+
 for jet in jets:
     constit_pt_binned = []
     constit_eta_binned = []
@@ -129,26 +143,51 @@ for jet in jets:
         #constit_phi_binned.append(constit[2])
 
     mask = constit_pt_binned == 0
-
+    '''
     constit_pt_tmp = (constit_pt_binned - np.random.uniform(0.0, 1.0, size=np.array(constit_pt_binned).shape)) * (
         pt_bins[1] - pt_bins[0]
     ) + pt_bins[0]
     constit_eta_tmp = (constit_eta_binned - np.random.uniform(0.0, 1.0, size=np.array(constit_eta_binned).shape)) * (
         eta_bins[1] - eta_bins[0]
     ) + eta_bins[0]
+    
+    #constit_phi_tmp = (constit_phi_binned - np.random.uniform(0.0, 1.0, size=np.array(constit_phi_binned).shape)) * (
+    #    phi_bins[1] - phi_bins[0]
+    #) + phi_bins[0]
     '''
-    constit_phi_tmp = (constit_phi_binned - np.random.uniform(0.0, 1.0, size=np.array(constit_phi_binned).shape)) * (
-        phi_bins[1] - phi_bins[0]
-    ) + phi_bins[0]
-    '''
+    # New Add
+    idx_pt  = np.asarray(constit_pt_binned,  dtype=np.int64)
+    idx_eta = np.asarray(constit_eta_binned, dtype=np.int64)
+
+    # 只保留合法索引（< nBins）；若你的 PAD 是 -1，也会被下面的条件自动剔除
+    valid_pt  = (idx_pt  >= 0) & (idx_pt  < len(pt_bins))
+    valid_eta = (idx_eta >= 0) & (idx_eta < len(eta_bins))
+    valid = valid_pt & valid_eta
+
+    u1 = np.random.uniform(0.0, 1.0, size=idx_pt.shape)
+    u2 = np.random.uniform(0.0, 1.0, size=idx_eta.shape)
+
+    constit_pt_tmp  = np.empty_like(u1, dtype=np.float64)
+    constit_eta_tmp = np.empty_like(u2, dtype=np.float64)
+
+    constit_pt_tmp[valid]  = pt_edges[idx_pt[valid]]  + u1[valid]*(pt_edges[idx_pt[valid]+1]  - pt_edges[idx_pt[valid]])
+    constit_eta_tmp[valid] = eta_edges[idx_eta[valid]] + u2[valid]*(eta_edges[idx_eta[valid]+1] - eta_edges[idx_eta[valid]])
+    # New add end
 
     # Probably this could be handled better, but it works fine for now
+    '''
     for i in range(len(constit_pt_tmp)):
       constit_pt.push_back(math.exp(constit_pt_tmp[i]))
       constit_eta.push_back(constit_eta_tmp[i])
       #constit_phi.push_back(constit_phi_tmp[i])
+    '''
+    for i in np.where(valid)[0]:
+        constit_pt.push_back(constit_pt_tmp[i])  # 若训练的是 ln(pt/kt)，保留 exp；否则去掉 exp
+        constit_eta.push_back(constit_eta_tmp[i])
+
 
     tree.Fill()
+
 
 file.WriteObject(tree, "tree")
 file.Close()
