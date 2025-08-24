@@ -238,7 +238,19 @@ class JetTransformer(Module):
         # Step-2 Adding
         # Ignore invalid / PAD targets in the loss (we do not have a PAD class in the logits)
         self.ignore_index = -100
+        '''
+        Step-7 Avoid Padding2
         self.criterion = CrossEntropyLoss(ignore_index=self.ignore_index)
+        '''
+        # Step-7 Adiing
+        # Ignore padding targets (encoded as -1) in the loss
+        self.ignore_index = -1  # <-- make sure this exists
+        self.criterion = torch.nn.CrossEntropyLoss(
+            ignore_index=self.ignore_index,
+            weight=getattr(self, "class_weights", None)  # optional: class weights if you use them
+        )
+        # Use ignore_index=-1 so that padded positions (target=-1) do not contribute to the loss.
+        # Step-7 End
         # Step-2 End
 
     def forward(self, x, padding_mask):
@@ -368,7 +380,53 @@ class JetTransformer(Module):
 
         # select probs of true bins
         sel_idx = torch.arange(probs.shape[0], dtype=torch.long, device=probs.device)
+        '''
+        Step-7 Avoid Padding2
         probs = probs[sel_idx, true_bin].view(batch_size, padded_seq_len - 1)
+        '''
+        # Step7 Adding
+        # probs: [B*T, C]; true_bin: [B*T] with possible values -1 (pad) or 0..C-1,
+        # but some pipelines may emit EOS as C (== self.total_bins). We must guard both sides.
+
+        # valid if within [0, C-1]
+        valid = (true_bin >= 0) & (true_bin < self.total_bins)
+
+        # clamp to [0, C-1] ONLY for safe indexing; invalid positions will be neutralized after
+        safe_true = true_bin.clamp(0, self.total_bins - 1)
+
+        # gather per-step probability of the labeled class
+        picked = probs.gather(dim=1, index=safe_true.unsqueeze(1)).squeeze(1)  # [B*T]
+
+        # neutralize invalid (padding or EOS==C etc.) positions so they don't affect metrics
+        picked = torch.where(valid, picked, torch.ones_like(picked))
+
+
+        # reshape back if needed
+        picked = picked.view(batch_size, padded_seq_len - 1)
+        # Never index with -1. Mask padded positions and substitute a neutral value (1.0 for prob, 0.0 for log-prob).
+        
+        # reshape back to [B, T-1]
+        picked = picked.view(batch_size, padded_seq_len - 1)
+
+        # Use the per-step true-class probabilities for downstream metrics
+        probs = picked  # <-- switch to the masked, per-step probs
+
+        # (Optional) Redundant mask: picked already set padded steps to 1.0, but we can keep this for safety
+        probs = probs.masked_fill(~padding_mask[:, 1:], 1.0)
+
+        # Perplexity applies a 1/len normalization on the product (equivalently, per-token geometric mean)
+        if perplexity:
+            probs = probs ** (1 / seq_len.float().view(-1, 1))
+
+        # Aggregate over time: log-sum or product
+        if logarithmic:
+            probs = torch.log(probs.clamp_min(1e-12)).sum(dim=1)
+        else:
+            probs = probs.prod(dim=1)
+        # Step-7 End
+        return probs
+        '''
+        Step-7 Deleted
         probs[~padding_mask[:, 1:]] = 1.0
         if perplexity:
             probs = probs ** (1 / seq_len.float().view(-1, 1))
@@ -378,6 +436,7 @@ class JetTransformer(Module):
         else:
             probs = probs.prod(dim=1)
         return probs
+        '''
 
     def sample_old(self, starts, device, len_seq, trunc=None):
         def select_idx():
@@ -528,7 +587,7 @@ class JetTransformer(Module):
         # Step 1 End
         return torch.stack((pT, eta, phi), dim=-1)
     '''
-    
+
     def idx_to_bins(self, x: torch.Tensor) -> torch.Tensor:
         # x: (...,) flat index
         y = x.clone()

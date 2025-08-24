@@ -106,6 +106,8 @@ def discretize_tree(
 
         #path = os.path.join(bins_dir, f"{name}_bins_{tag}.npy")
         path = os.path.join(bins_dir, f"var{fi+1}_bin.npy")
+        '''
+        Step-6 quantile Deleted
         if os.path.exists(path):
             bins = np.load(path)
             print(f"[bins] Loaded {path} (len={len(bins)})")
@@ -113,14 +115,46 @@ def discretize_tree(
             bins = np.linspace(lo, hi, nBins[fi])
             np.save(path, bins)
             print(f"[bins] Saved  {path} (len={len(bins)})  range=({lo:.4g},{hi:.4g})")
+        '''
+        # Step-6 Adding
+        if os.path.exists(path):
+            bins = np.load(path)
+            print(f"[bins] Loaded {path} (len={len(bins)})")
+        else:
+            # Build equal-frequency (quantile) bin boundaries.
+            # We need (nBins + 1) boundaries so that each discrete bin k has
+            # a left edge bins[k-1] and a right edge bins[k].
+            qs = np.linspace(0.0, 1.0, nBins[fi] + 1, dtype=np.float32)
+            bins = np.quantile(valid, qs).astype(np.float32)
+
+            # Enforce strictly increasing boundaries to avoid zero-width bins due to ties
+            eps = 1e-8
+            bins = np.maximum.accumulate(bins + eps * np.arange(len(bins), dtype=np.float32))
+
+            np.save(path, bins)
+            print(f"[bins] Saved {path} (len={len(bins)}) [quantile] "
+                f"range=({bins[0]:.4g},{bins[-1]:.4g})")
+        # Step-6 End
         all_bins.append(bins)
+
 
     # 4) Discretization
     disc_feats = []
     for fi, bins in enumerate(all_bins):
+        '''
+        Step-6 quantile Deleted
         disc = np.digitize(stacked[..., fi], bins).astype(np.int32)
         disc = np.minimum(disc, len(bins) - 1)  # ★ Important: prevent out-of-bounds
         disc = disc.astype(np.int16)
+        '''
+        # Step-6 Adding
+        # With (nBins+1) boundaries, np.digitize(..., bins, right=True) returns indices in [0 .. nBins].
+        disc = np.digitize(stacked[..., fi], bins, right=True).astype(np.int16)
+        # Clamp to 1..nBins (0 = underflow -> 1; nBins+? overflow -> nBins)
+        disc = np.clip(disc, 1, len(bins) - 1)
+        # Mark padding positions as -1
+        disc[stacked[..., fi] == pad_val] = -1
+        # Step-6 End
         disc[stacked[..., fi] == pad_val] = -1
         disc_feats.append(disc)
     disc_stacked = np.stack(disc_feats, axis=-1)  # (N, L, F)  ← must keep
