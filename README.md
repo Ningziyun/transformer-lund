@@ -17,23 +17,23 @@ pip install -r requirements.txt
 **Discretizing**
 
 To perform the training, the input files must be discretized. 
-This can be performed by running the discretization script, where the first argument is the path to the original h5 files.
+This can be performed by running the discretization script, where the first argument is the path to the original root files.
 
 ```
-source discretize.sh inputFiles/top_benchmark
+Python discretize_auto.py --data_path inputFiles/qcd_lund.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9
 ```
 
 
 
 To train a model run:
 ```
-python train.py  --data_path inputFiles/top_benchmark/discretized/train_qcd_pt80_eta60_phi60_lower001.h5
+python train.py  --num_epochs 5 --num_features 2 --num_bins 41 31 --data_path inputFiles/discretized/qcd_lund_lundTree_kt_deltaR.h5
 ```
 
 To process the results:
 
 ```
-python sample_jets.py --model_dir models/test_1/
+python sample_jets_auto.py --num_samples 10000 --model_dir models/test/
 ```
 
 
@@ -41,6 +41,15 @@ python sample_jets.py --model_dir models/test_1/
 
 
 Input files for this code can be found at https://zenodo.org/records/2603256
+
+
+**Data Setup**
+
+
+To process the input root after download the Input Files:
+```
+source date_setup.sh
+```
 
 
 **CITATION**

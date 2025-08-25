@@ -1,6 +1,8 @@
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
+import os             
+import ROOT           
 
 from model import JetTransformer
 
@@ -86,12 +88,18 @@ if __name__ == "__main__":
         print("Loaded optimizer")
 
     logger = SummaryWriter(args.log_dir)
+    # Step-8 Adding Lost Function
+    epoch_loss_list = []  # store average training loss per epoch
+    # Step-8 Ending
     global_step = args.global_step
     loss_list = []
     perplexity_list = []
     for epoch in range(args.num_epochs):
         model.train()
-
+        # Step-8 Adding Lost Function
+        # --- collect per-step training loss within this epoch ---
+        epoch_losses = []  # loss of all steps in this epoch
+        # Step-8 Ending
         for x, padding_mask, true_bin in tqdm(
             train_loader, total=len(train_loader), desc=f"Training Epoch {epoch + 1}"
         ):
@@ -103,6 +111,10 @@ if __name__ == "__main__":
             with torch.cuda.amp.autocast():
                 logits = model(x, padding_mask)
                 loss = model.loss(logits, true_bin)
+                # Step-8 Adding (collect per-step loss for this epoch)
+                # Record current step loss as a Python float to reduce tensor overhead
+                epoch_losses.append(loss.item())
+                # Step-8 Ending
                 with torch.no_grad():
                     perplexity = model.probability(
                         logits,
@@ -136,6 +148,13 @@ if __name__ == "__main__":
                 save_model(model, args.log_dir, f"checkpoint_{global_step + 1}")
 
             global_step += 1
+        # Step-8 Adding (compute and record epoch-level average training loss)
+        # Compute the mean of all per-step losses collected in this epoch
+        avg_train_loss = float(np.mean(epoch_losses)) if len(epoch_losses) > 0 else float("nan")
+        epoch_loss_list.append(avg_train_loss)
+        # Optionally also log an epoch-level curve to TensorBoard
+        logger.add_scalar("Train/Epoch_Avg_Loss", avg_train_loss, epoch)
+        # Step-8 Ending
 
         model.eval()
         with torch.no_grad():
@@ -164,3 +183,23 @@ if __name__ == "__main__":
 
         save_model(model, args.log_dir, "last")
         save_opt_states(opt, scheduler, scaler, args.log_dir)
+        
+    # Step-8 Adding (dump per-epoch average training loss to ROOT)
+    # This writes a separate ROOT file and does NOT interfere with any other ROOT outputs.
+    out_path = os.path.join(args.log_dir, "epoch_losses.root")
+    f = ROOT.TFile(out_path, "RECREATE")
+    tree = ROOT.TTree("loss_tree", "Per-epoch average training loss")
+
+    # Use a 1-element numpy array as a C-like buffer for the branch
+    loss_val = np.zeros(1, dtype=np.float32)
+    tree.Branch("train_loss", loss_val, "train_loss/F")
+
+    # One entry per epoch
+    for l in epoch_loss_list:
+        loss_val[0] = l
+        tree.Fill()
+
+    tree.Write()
+    f.Close()
+    print(f"[Done] Saved per-epoch losses to {out_path}")
+    # Step-8 Ending
