@@ -112,6 +112,7 @@ class JetTransformerClassifier(Module):
         seq_len = x.shape[1]
         seq_idx = torch.arange(seq_len, dtype=torch.long, device=x.device)
         causal_mask = seq_idx.view(-1, 1) < seq_idx.view(1, -1)
+        # Convert to PyTorch convention: src_key_padding_mask expects True=PAD.
         padding_mask = ~padding_mask
 
         # Step 1 add
@@ -258,6 +259,7 @@ class JetTransformer(Module):
         seq_len = x.shape[1]
         seq_idx = torch.arange(seq_len, dtype=torch.long, device=x.device)
         causal_mask = seq_idx.view(-1, 1) < seq_idx.view(1, -1)
+        # Convert to PyTorch convention: src_key_padding_mask expects True=PAD.
         padding_mask = ~padding_mask
         '''
         Step-1 Delete
@@ -318,6 +320,7 @@ class JetTransformer(Module):
         loss = self.criterion(logits, true_bin)
         return loss
     '''
+    '''
     # Step-2 Adding
     def loss(self, logits, true_bin):
         # logits: (B, T, total_bins); we ignore the last step (teacher forcing next-token)
@@ -344,6 +347,32 @@ class JetTransformer(Module):
 
         return self.criterion(logits, true_bin)
     # Step-2 End
+    '''
+    # --- Step 9 ---
+    def loss(self, logits, true_bin, padding_mask=None):
+        # Align logits and targets (ignore the final prediction step)
+        logits = logits[:, :-1].reshape(-1, self.total_bins)
+        true = true_bin[:, 1:].reshape(-1)
+
+        # If a padding mask is provided (True = valid steps in your dataloader),
+        # ignore padded positions by setting them to ignore_index.
+        if padding_mask is not None:
+            # padding_mask: (B, T) with True for valid tokens in your pipeline
+            pad = (~padding_mask[:, 1:]).reshape(-1)  # True at padded steps
+            true = true.clone()
+            true[pad] = self.ignore_index  # do not learn from padding
+
+        # Also drop obviously invalid labels (NaN / out-of-range) to be robust
+        if true.dtype.is_floating_point:
+            nan_mask = torch.isnan(true)
+            true = true.long()
+        else:
+            nan_mask = torch.zeros_like(true, dtype=torch.bool)
+        bad = (true < 0) | (true >= self.total_bins) | nan_mask
+        true = torch.where(bad, torch.full_like(true, self.ignore_index), true)
+
+        return self.criterion(logits, true)
+    # Step-9 Ending
 
 
     def probability(
@@ -494,7 +523,7 @@ class JetTransformer(Module):
                 idx = select_idx()
                 if not trunc is None and trunc >= 1:
                     idx = indices[torch.arange(len(indices)), idx]
-                finished[idx == self.total_bins] = True
+                finished[idx == self.total_bins-1] = True
 
                 # Get tuple from found bin and set next particle properties
                 true_bins[~finished, particle + 1] = idx[~finished]
@@ -561,12 +590,18 @@ class JetTransformer(Module):
                 idx = select_idx()
                 if not trunc is None and trunc >= 1:
                     idx = indices[torch.arange(len(indices)), idx]
-                finished[idx == self.total_bins] = True
+                finished[idx == self.total_bins-1] = True
 
                 # Get tuple from found bin and set next particle properties
                 true_bins = torch.concat((true_bins, idx.view(-1, 1)), dim=1)
                 bins = self.idx_to_bins(idx)
+                '''
+                step-9 deleted
                 bins[finished] = 0
+                '''
+                # step-9 adding
+                bins[finished] = -1
+                # step-9 ending
                 jets = torch.concat((jets, bins.view(-1, 1, self.num_features)), dim=1)
                 padding_mask = torch.concat((padding_mask, ~finished.view(-1, 1)), dim=1)
 

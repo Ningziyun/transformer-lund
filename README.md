@@ -20,14 +20,15 @@ To perform the training, the input files must be discretized.
 This can be performed by running the discretization script, where the first argument is the path to the original root files.
 
 ```
-Python discretize_auto.py --data_path inputFiles/qcd_lund.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9
+Python discretize_auto.py --data_path inputFiles/qcd_lund.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
+
 ```
 
 
 
 To train a model run:
 ```
-python train.py  --num_epochs 5 --num_features 2 --num_bins 41 31 --data_path inputFiles/discretized/qcd_lund_lundTree_kt_deltaR.h5
+python train.py  --num_epochs 5 --num_features 2 --num_bins 41 31 --data_path inputFiles/discretized/qcd_lund_lundTree_kt_deltaR_train.h5
 ```
 
 To process the results:

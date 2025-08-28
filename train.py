@@ -110,7 +110,13 @@ if __name__ == "__main__":
 
             with torch.cuda.amp.autocast():
                 logits = model(x, padding_mask)
+                '''
+                Step-9 Deleted
                 loss = model.loss(logits, true_bin)
+                '''
+                # Step 9 Adding
+                loss = model.loss(logits, true_bin, padding_mask=padding_mask)
+                # Step 9 Ending
                 # Step-8 Adding (collect per-step loss for this epoch)
                 # Record current step loss as a Python float to reduce tensor overhead
                 epoch_losses.append(loss.item())
@@ -171,7 +177,13 @@ if __name__ == "__main__":
                     x,
                     padding_mask,
                 )
+                '''
+                Step-9 Deleted
                 loss = model.loss(logits, true_bin)
+                '''
+                # Step 9 Adding
+                loss = model.loss(logits, true_bin, padding_mask=padding_mask)
+                # Step 9 Ending
                 perplexity = model.probability(
                     logits, padding_mask, true_bin, perplexity=True, logarithmic=False
                 )
