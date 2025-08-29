@@ -163,6 +163,11 @@ class JetTransformerClassifier(Module):
         self.flat = torch.nn.Flatten()
         self.out = Linear(hidden_dim * 100, 1)
         self.criterion = torch.nn.functional.binary_cross_entropy_with_logits
+        # Step-12 Adding
+        self.focal_gamma = 1.2        # gentle focal; 1.0–1.5 works well
+        self.label_smoothing = 0.04   # mild smoothing to reduce peaky bias
+        # Step-12 Ending
+
 
     def forward(self, x, padding_mask):
         # construct causal mask to restrict attention to preceding elements
