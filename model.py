@@ -13,6 +13,8 @@ from torch.nn import (
 
 
 class EmbeddingProductHead(Module):
+    '''
+    Step-10 Deleting
     def __init__(self, hidden_dim=256, num_features=3, num_bins=(41, 41, 41)):
         super(EmbeddingProductHead, self).__init__()
         # assert num_features == 3, removed in step-3
@@ -23,7 +25,26 @@ class EmbeddingProductHead(Module):
         self.linear = Linear(hidden_dim, self.combined_bins * hidden_dim)
         self.act = torch.nn.Softplus()
         self.logit_scale = torch.nn.Parameter(torch.tensor(1.0))
+    class EmbeddingProductHead(Module):
+    '''
+    # Adding In step-10
+    def __init__(self, hidden_dim=256, num_features=None, num_bins=(41, 41, 41)):
+        super().__init__()
+        # Support arbitrary number of features (2D/3D/...):
+        # infer the number of features from num_bins if not provided.
+        self.num_bins = tuple(num_bins)
+        self.num_features = len(self.num_bins) if num_features is None else num_features
+        self.hidden_dim = hidden_dim
 
+        # We will output logits for all features concatenated: (B, T, sum(num_bins))
+        self.combined_bins = int(np.sum(self.num_bins))
+        self.linear = Linear(hidden_dim, self.combined_bins * hidden_dim)
+        self.act = torch.nn.Softplus()
+        self.logit_scale = torch.nn.Parameter(torch.tensor(1.0))
+    # Step-10 ending
+
+    '''
+    deleted step-10
     def forward(self, emb):
         batch_size, seq_len, _ = emb.shape
         bin_emb = self.act(self.linear(emb))
@@ -36,6 +57,42 @@ class EmbeddingProductHead(Module):
         logits = bin_emb_xy @ bin_emb_z.transpose(2, 3)
         logits = self.logit_scale.exp() * logits.view(batch_size, seq_len, -1)
         return logits
+    '''
+    # Step-10 Adding
+    def forward(self, emb):  # emb: (B, T, H)
+        B, T, H = emb.shape
+        # Project to per-bin embeddings for all features at once
+        bin_emb = self.act(self.linear(emb))                     # (B,T,∑bins*H)
+        bin_emb = bin_emb.view(B, T, self.combined_bins, H)      # (B,T,∑bins,H)
+
+        # Split along the "bin" dimension into N feature-specific blocks
+        parts = torch.split(bin_emb, self.num_bins, dim=2)       # tuple length = num_features
+        assert len(parts) == self.num_features, \
+            "num_bins does not match the number of features."
+
+        # For each feature i, compute scores s_i(b) = <emb, bin_emb_i(b)>
+        # s_i shape: (B, T, b_i)
+        s_list = [torch.einsum('bth,btch->btc', emb, p) for p in parts]
+
+        # Combine N feature scores into the product-space logits of shape (B, T, ∏ b_i)
+        # We use an additive composition in logit space:
+        #   L[c1,...,cN] = s1[c1] + s2[c2] + ... + sN[cN]
+        # Then flatten to (B, T, ∏ b_i) to match CrossEntropyLoss over total_bins.
+        logits_nd = s_list[0]
+        for k in range(1, len(s_list)):
+            # broadcast-add a new axis for the next feature
+            logits_nd = logits_nd.unsqueeze(-1) + s_list[k].unsqueeze(-2)
+            # result grows its last dimension each step: (B,T,b1, ..., bk)
+
+        # reshape from (B,T,b1,...,bN) -> (B,T,∏b_i)
+        logits = logits_nd.view(B, T, -1)
+
+        # Optional learnable scale on logits (kept from your original head)
+        return self.logit_scale.exp() * logits
+        # NOTE:
+        # - This path supports 2D/3D/... by construction.
+        # - Output size matches self.total_bins = prod(num_bins), so your CE target stays unchanged.
+    # Step-10 Ending
 
 
 class JetTransformerClassifier(Module):
