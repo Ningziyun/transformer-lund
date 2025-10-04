@@ -91,6 +91,10 @@ if __name__ == "__main__":
     # Step-8 Adding Lost Function
     epoch_loss_list = []  # store average training loss per epoch
     # Step-8 Ending
+    # Step-11 Adding Lost Funtion
+    # --- collect validation-step training loss within this epoch ---
+    epoch_val_loss_list = []
+    # Step-11 Ending
     global_step = args.global_step
     loss_list = []
     perplexity_list = []
@@ -192,6 +196,11 @@ if __name__ == "__main__":
 
             logger.add_scalar("Val/Loss", np.mean(val_loss), global_step)
             logger.add_scalar("Val/Perplexity", np.mean(val_perplexity), global_step)
+            # Step-11 Adding
+            avg_val_loss = float(np.mean(val_loss)) if len(val_loss) > 0 else float("nan")
+            epoch_val_loss_list.append(avg_val_loss)
+            logger.add_scalar("Val/Epoch_Avg_Loss", avg_val_loss, epoch)
+            # Step-11 End
 
         save_model(model, args.log_dir, "last")
         save_opt_states(opt, scheduler, scaler, args.log_dir)
@@ -215,3 +224,23 @@ if __name__ == "__main__":
     f.Close()
     print(f"[Done] Saved per-epoch losses to {out_path}")
     # Step-8 Ending
+    # Step-11 Adding — dump per-epoch average validation loss to ROOT
+    # This writes a separate ROOT file for validation and mirrors the training-loss output.
+    out_path_val = os.path.join(args.log_dir, "epoch_losses_val.root")
+    f_val = ROOT.TFile(out_path_val, "RECREATE")
+    tree_val = ROOT.TTree("val_loss_tree", "Per-epoch average validation loss")
+
+    # Use a 1-element numpy array as a C-like buffer for the branch
+    val_loss_val = np.zeros(1, dtype=np.float32)
+    tree_val.Branch("val_loss", val_loss_val, "val_loss/F")
+
+    # One entry per epoch
+    for l in epoch_val_loss_list:
+        val_loss_val[0] = l
+        tree_val.Fill()
+
+    tree_val.Write()
+    f_val.Close()
+    print(f"[Done] Saved per-epoch validation losses to {out_path_val}")
+    # Step-11 Ending
+
