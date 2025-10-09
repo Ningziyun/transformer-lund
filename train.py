@@ -98,6 +98,15 @@ if __name__ == "__main__":
     global_step = args.global_step
     loss_list = []
     perplexity_list = []
+    # Step-12 Terminate Conditions
+    # --- Early Stopping state (tracked across epochs) ---
+    # best_val: best (lowest) validation loss observed so far
+    # epochs_no_improve: number of consecutive epochs without sufficient improvement
+    # stop_epoch: the epoch index (1-based) at which training stopped (for logging)
+    best_val = float("inf")
+    epochs_no_improve = 0
+    stop_epoch = None
+    # Step-12 End
     for epoch in range(args.num_epochs):
         model.train()
         # Step-8 Adding Lost Function
@@ -204,6 +213,28 @@ if __name__ == "__main__":
 
         save_model(model, args.log_dir, "last")
         save_opt_states(opt, scheduler, scaler, args.log_dir)
+        # Step-12 Termination Codition
+        # --- Early Stopping check (runs at the end of each epoch) ---
+        # If validation loss improved by more than --min_delta, reset patience and
+        # optionally save a "best" checkpoint; otherwise increase the no-improve counter.
+        if args.early_stop:
+            improved = (best_val - avg_val_loss) > args.min_delta
+            if improved:
+                best_val = avg_val_loss
+                epochs_no_improve = 0
+                # Keep a separate "best" checkpoint when improvement happens
+                save_model(model, args.log_dir, "best")
+                save_opt_states(opt, scheduler, scaler, args.log_dir)
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= args.patience:
+                    stop_epoch = epoch + 1  # 1-based for readability
+                    print(f"[EarlyStop] No Val/Loss improvement > {args.min_delta} "
+                          f"for {args.patience} consecutive epochs. "
+                          f"Stopping at epoch {stop_epoch}.")
+                    break
+        # Step-12 Ending
+
         
     # Step-8 Adding (dump per-epoch average training loss to ROOT)
     # This writes a separate ROOT file and does NOT interfere with any other ROOT outputs.
@@ -243,4 +274,22 @@ if __name__ == "__main__":
     f_val.Close()
     print(f"[Done] Saved per-epoch validation losses to {out_path_val}")
     # Step-11 Ending
+    # Step-12 Termination Condition
+    # --- Record final stopping epoch to arguments.txt for reproducibility ---
+    # If early stopping did not trigger, we consider the training stopped at
+    # the final planned epoch count.
+    if stop_epoch is None:
+        stop_epoch = len(epoch_loss_list)
+
+    args_file = os.path.join(args.log_dir, "arguments.txt")
+    try:
+        with open(args_file, "a") as f:
+            # Use aligned keys for readability (same format as earlier)
+            f.write(f"{'stopped_epoch':20s} {stop_epoch}\n")
+            # best_val may remain inf if no validation loop ran (defensive)
+            best_val_print = best_val if np.isfinite(best_val) else float('nan')
+            f.write(f"{'best_val_loss':20s} {best_val_print:.6f}\n")
+    except Exception as e:
+        print(f"[Warn] Could not append stopped_epoch to {args_file}: {e}")
+    # Step-12 Ending
 

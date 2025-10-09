@@ -175,6 +175,30 @@ def parse_input():
     parser.add_argument(
         "--tanh", action="store_true", help="Apply tanh as final activation"
     )
+    # Step-12 Terminate Conditions
+    # Early Stopping
+    # --- Early Stopping options ---
+    # Enable early stopping on validation loss. If enabled, training will stop
+    # when validation loss does not improve by more than --min_delta for
+    # --patience consecutive epochs.
+    parser.add_argument(
+        "--early_stop",
+        action="store_true",
+        help="Enable early stopping based on validation loss."
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=5,
+        help="Number of epochs with no sufficient improvement before stopping."
+    )
+    parser.add_argument(
+        "--min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum absolute improvement in validation loss to reset patience."
+    )
+    # End of Step-12
     args = parser.parse_args()
     # Validate consistency between num_features and num_bins (step-3)
     if len(args.num_bins) != args.num_features:
@@ -182,6 +206,7 @@ def parse_input():
             f"--num_bins expects {args.num_features} integers (got {len(args.num_bins)}). "
             "Make sure the order of bins matches the column order in your HDF file."
         )
+    # End Step-3
     return args
 
 
