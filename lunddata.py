@@ -6,7 +6,12 @@ import math
 import ljpHelpers
 
 
-def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root", nImages=30, minDr=0.0, maxDr=10.0, minKt=-1, maxKt=8, minZ=0.5, maxZ=6.5, nBinsKt=25, nBinsDr=25, nBinsZ=40):
+# Added logMode and swapAxes options
+def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
+             nImages=30, minDr=0.0, maxDr=10.0, minKt=-1, maxKt=8,
+             minZ=0.5, maxZ=6.5, nBinsKt=25, nBinsDr=25, nBinsZ=40,
+             logMode=False, swapAxes=False):
+
    # Set branch addresses and branch pointers
    if (not tree):
      return;
@@ -18,10 +23,11 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root", nIm
    newfile = ROOT.TFile.Open(os.path.join(outdir, outname), "RECREATE");
    # Output TTree and variables
    lundTree = ROOT.TTree("lundTree", "Jet declustering kt and deltaR")
-   kt_vec = ROOT.std.vector('float')()
    deltaR_vec = ROOT.std.vector('float')()
-   lundTree.Branch("kt", kt_vec)
+   kt_vec = ROOT.std.vector('float')()
    lundTree.Branch("deltaR", deltaR_vec)
+   lundTree.Branch("kt", kt_vec)
+
 
    # Index for how many jets have been analyzed
    njet = 0;
@@ -72,9 +78,23 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root", nIm
 
      for k in range(len(lundPlane)):
        # Fill the tree with declustered information
-       if (lundPlane[k].delta_R > 0 and lundPlane[k].z > 0):       
-         deltaR_vec.push_back(lundPlane[k].delta_R)
-         kt_vec.push_back(lundPlane[k].kt)
+      # Compute according to user options
+       if (lundPlane[k].delta_R > 0 and lundPlane[k].z > 0):
+           if logMode:
+               dr_val = math.log(1.0 / lundPlane[k].delta_R)
+               kt_val = math.log(lundPlane[k].kt)
+           else:
+               dr_val = lundPlane[k].delta_R
+               kt_val = lundPlane[k].kt
+
+    # Optionally swap the axes
+    if swapAxes:
+        deltaR_vec.push_back(kt_val)
+        kt_vec.push_back(dr_val)
+    else:
+        deltaR_vec.push_back(dr_val)
+        kt_vec.push_back(kt_val)
+
 
      if len(kt_vec) > 0:
         lundTree.Fill()
@@ -92,6 +112,9 @@ import argparse
 parser = argparse.ArgumentParser(description='Process benchmarks.')
 parser.add_argument("--filename", help="", default="fileList.txt")
 parser.add_argument("--treename", help="", default="tree")
+parser.add_argument("--logMode", action="store_true", help="If set, output log(kt) and log(1/deltaR)")
+parser.add_argument("--swapAxes", action="store_true", help="If set, swap the order of kt and deltaR in output")
+
 
 opt = parser.parse_args()
 
@@ -121,5 +144,6 @@ with open(opt.filename) as infile:
       continue;
 
     # Always write to inputFiles/qcd_lund.root
-    loopFile("ignored.root", tree);
+    loopFile("ignored.root", tree, logMode=opt.logMode, swapAxes=opt.swapAxes);
+
     file.Close();
