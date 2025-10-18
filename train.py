@@ -222,6 +222,9 @@ if __name__ == "__main__":
             if improved:
                 best_val = avg_val_loss
                 epochs_no_improve = 0
+                # Step-13
+                best_epoch = epoch + 1
+                # Step-13 Ending
                 # Keep a separate "best" checkpoint when improvement happens
                 save_model(model, args.log_dir, "best")
                 save_opt_states(opt, scheduler, scaler, args.log_dir)
@@ -286,9 +289,27 @@ if __name__ == "__main__":
         with open(args_file, "a") as f:
             # Use aligned keys for readability (same format as earlier)
             f.write(f"{'stopped_epoch':20s} {stop_epoch}\n")
+            # Step-13: Record best modle epoch
+            f.write(f"{'best_epoch':20s} {best_epoch}\n")
+            # Step-13: Engding
             # best_val may remain inf if no validation loop ran (defensive)
             best_val_print = best_val if np.isfinite(best_val) else float('nan')
             f.write(f"{'best_val_loss':20s} {best_val_print:.6f}\n")
+            # Step-13: Record model parameter statistics ---
+            # Count the total number of trainable parameters in the model
+            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            # Get the total number of training samples (if available)
+            try:
+                num_train_samples = len(train_loader.dataset)
+            except AttributeError:
+                num_train_samples = args.num_events  # fallback to argument value
+            # Compute parameter-to-data ratio (parameters per sample)
+            param_data_ratio = total_params / max(1, num_train_samples)
+            # Write these statistics to the arguments.txt file
+            f.write(f"{'total_parameters':20s} {total_params}\n")
+            f.write(f"{'num_train_samples':20s} {num_train_samples}\n")
+            f.write(f"{'param_data_ratio':20s} {param_data_ratio:.6f}\n")
+            # Step-13 Ending
     except Exception as e:
         print(f"[Warn] Could not append stopped_epoch to {args_file}: {e}")
     # Step-12 Ending
