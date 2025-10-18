@@ -10,7 +10,7 @@ import ljpHelpers
 def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
              nImages=30, minDr=0.0, maxDr=10.0, minKt=-1, maxKt=8,
              minZ=0.5, maxZ=6.5, nBinsKt=25, nBinsDr=25, nBinsZ=40,
-             logMode=False, swapAxes=False):
+             logMode=True, swapAxes=False,mode="kt"):
 
    # Set branch addresses and branch pointers
    if (not tree):
@@ -21,12 +21,28 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
 
    # The output file with the tree
    newfile = ROOT.TFile.Open(os.path.join(outdir, outname), "RECREATE");
-   # Output TTree and variables
+   # Output TTree and variables   
    lundTree = ROOT.TTree("lundTree", "Jet declustering kt and deltaR")
    deltaR_vec = ROOT.std.vector('float')()
-   kt_vec = ROOT.std.vector('float')()
-   lundTree.Branch("deltaR", deltaR_vec)
-   lundTree.Branch("kt", kt_vec)
+   val_vec = ROOT.std.vector('float')()
+   # --- Determine dynamic branch names ---
+   if logMode:
+       dr_branch_name = "log(1/deltaR)"
+   else:
+       dr_branch_name = "deltaR"
+
+   if mode == "z":
+       val_branch_name = "log(z)" if logMode else "z"
+   else:
+       val_branch_name = "log(kt)" if logMode else "kt"
+   # --- Swap branch assignment if requested ---
+   if swapAxes:
+       lundTree.Branch(val_branch_name, deltaR_vec)
+       lundTree.Branch(dr_branch_name, val_vec)
+   else:
+       lundTree.Branch(dr_branch_name, deltaR_vec)
+       lundTree.Branch(val_branch_name, val_vec)
+
 
 
    # Index for how many jets have been analyzed
@@ -79,21 +95,30 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
      for k in range(len(lundPlane)):
        # Fill the tree with declustered information
       # Compute according to user options
-       if (lundPlane[k].delta_R > 0 and lundPlane[k].z > 0):
-           if logMode:
-               dr_val = math.log(1.0 / lundPlane[k].delta_R)
-               kt_val = math.log(lundPlane[k].kt)
-           else:
-               dr_val = lundPlane[k].delta_R
-               kt_val = lundPlane[k].kt
 
-    # Optionally swap the axes
-    if swapAxes:
-        deltaR_vec.push_back(kt_val)
-        kt_vec.push_back(dr_val)
-    else:
-        deltaR_vec.push_back(dr_val)
-        kt_vec.push_back(kt_val)
+       if (lundPlane[k].delta_R > 0 and lundPlane[k].z > 0):
+        # Compute according to user options
+         if logMode:
+             dr_val = math.log(1.0 / lundPlane[k].delta_R)
+             if mode == "z":
+                val = math.log(lundPlane[k].z)
+             else:
+                val = math.log(lundPlane[k].kt)
+         else:
+             dr_val = lundPlane[k].delta_R
+             if mode == "z":
+                val = lundPlane[k].z
+             else:
+                val = lundPlane[k].kt
+
+
+     # Push values to match branch name order
+     if swapAxes:
+         deltaR_vec.push_back(val)
+         val_vec.push_back(dr_val)
+     else:
+         deltaR_vec.push_back(dr_val)
+         val_vec.push_back(val)
 
 
      if len(kt_vec) > 0:
@@ -112,8 +137,11 @@ import argparse
 parser = argparse.ArgumentParser(description='Process benchmarks.')
 parser.add_argument("--filename", help="", default="fileList.txt")
 parser.add_argument("--treename", help="", default="tree")
-parser.add_argument("--logMode", action="store_true", help="If set, output log(kt) and log(1/deltaR)")
+parser.add_argument("--logMode", action="store_true", help="If set, output log(kt or z) and log(1/deltaR)")
 parser.add_argument("--swapAxes", action="store_true", help="If set, swap the order of kt and deltaR in output")
+parser.add_argument("--mode", type=str, choices=["kt", "z"], default="kt",
+                    help="Select variable to pair with deltaR: 'kt' (default) or 'z'")
+
 
 
 opt = parser.parse_args()
@@ -144,6 +172,7 @@ with open(opt.filename) as infile:
       continue;
 
     # Always write to inputFiles/qcd_lund.root
-    loopFile("ignored.root", tree, logMode=opt.logMode, swapAxes=opt.swapAxes);
+    loopFile("ignored.root", tree, logMode=opt.logMode, swapAxes=opt.swapAxes, mode=opt.mode);
+
 
     file.Close();
