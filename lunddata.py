@@ -10,7 +10,7 @@ import ljpHelpers
 def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
              nImages=30, minDr=0.0, maxDr=10.0, minKt=-1, maxKt=8,
              minZ=0.5, maxZ=6.5, nBinsKt=25, nBinsDr=25, nBinsZ=40,
-             logMode=True, swapAxes=False,mode="kt"):
+             logMode=False, swapAxes=False,mode="kt"):
 
    # Set branch addresses and branch pointers
    if (not tree):
@@ -18,23 +18,52 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
      
    if not os.path.exists(outdir):
      os.makedirs(outdir)
-
+   """
    # The output file with the tree
-   newfile = ROOT.TFile.Open(os.path.join(outdir, outname), "RECREATE");
+   # --- safer open mode: create if not exist, else append ---
+   outpath = os.path.join(outdir, outname)
+   if os.path.exists(outpath):
+       newfile = ROOT.TFile.Open(outpath, "UPDATE")   # append to existing file
+   else:
+       newfile = ROOT.TFile.Open(outpath, "RECREATE") # create new file
+
    # Output TTree and variables   
    lundTree = ROOT.TTree("lundTree", "Jet declustering kt and deltaR")
    deltaR_vec = ROOT.std.vector('float')()
    val_vec = ROOT.std.vector('float')()
+   """
+   # --- safer open mode: create if not exist, else append ---
+   outpath = os.path.join(outdir, outname)
+   newfile = ROOT.TFile.Open(outpath, "UPDATE")
+
+   # --- determine branch names once ---
+   if logMode:
+       dr_branch_name = "log_1_over_deltaR"
+   else:
+       dr_branch_name = "deltaR"
+   if mode == "z":
+       val_branch_name = "log_1_over_z" if logMode else "z"
+   else:
+       val_branch_name = "log_kt" if logMode else "kt"
+
+   # --- define local branch buffers (per-call) ---
+   deltaR_vec = ROOT.std.vector('float')()
+   val_vec = ROOT.std.vector('float')()
+
+   # --- get or create the output tree ---
+   # Always create a new TTree, let ROOT auto-index as ;1, ;2, ...
+   lundTree = ROOT.TTree("lundTree", "Jet declustering kt and deltaR")
+
    # --- Determine dynamic branch names ---
    if logMode:
-       dr_branch_name = "log(1/deltaR)"
+       dr_branch_name = "log_1_over_deltaR"
    else:
        dr_branch_name = "deltaR"
 
    if mode == "z":
-       val_branch_name = "log(z)" if logMode else "z"
+       val_branch_name = "log_z" if logMode else "z"
    else:
-       val_branch_name = "log(kt)" if logMode else "kt"
+       val_branch_name = "log_kt" if logMode else "kt"
    # --- Swap branch assignment if requested ---
    if swapAxes:
        lundTree.Branch(val_branch_name, deltaR_vec)
@@ -101,7 +130,7 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
          if logMode:
              dr_val = math.log(1.0 / lundPlane[k].delta_R)
              if mode == "z":
-                val = math.log(lundPlane[k].z)
+                val = math.log(1.0 / lundPlane[k].z)
              else:
                 val = math.log(lundPlane[k].kt)
          else:
@@ -111,21 +140,19 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
              else:
                 val = lundPlane[k].kt
 
+         # Push values to match branch name order
+         if swapAxes:
+             deltaR_vec.push_back(val)
+             val_vec.push_back(dr_val)
+         else:
+             deltaR_vec.push_back(dr_val)
+             val_vec.push_back(val)
 
-     # Push values to match branch name order
-     if swapAxes:
-         deltaR_vec.push_back(val)
-         val_vec.push_back(dr_val)
-     else:
-         deltaR_vec.push_back(dr_val)
-         val_vec.push_back(val)
-
-
-     if len(kt_vec) > 0:
+     if len(val_vec) > 0:
         lundTree.Fill()
-        kt_vec.clear()
+        val_vec.clear()
         deltaR_vec.clear()
-      # Normalize by the number of jets analyzed
+
 
    # Write the tree to the output file
    newfile.cd()
@@ -159,7 +186,7 @@ with open(opt.filename) as infile:
     line = line.rstrip('\n')
 
     tree = ROOT.TTree();
-
+    '''
     try:
       file = ROOT.TFile(line);
       tree = file.Get(opt.treename);
@@ -173,6 +200,21 @@ with open(opt.filename) as infile:
 
     # Always write to inputFiles/qcd_lund.root
     loopFile("ignored.root", tree, logMode=opt.logMode, swapAxes=opt.swapAxes, mode=opt.mode);
+    '''
+    try:
+        file = ROOT.TFile(line)
+        # --- NEW: automatically iterate through all TTrees in the file ---
+        keys = file.GetListOfKeys()
+        for key in keys:
+            obj = key.ReadObj()
+            # Only process objects that are TTrees
+            if isinstance(obj, ROOT.TTree):
+                print(f"Processing tree: {obj.GetName()} in {line}")
+                loopFile("ignored.root", obj, logMode=opt.logMode, swapAxes=opt.swapAxes, mode=opt.mode)
+    except Exception as e:
+        print(f"Failed to read file {line}: {e}")
+        continue
+
 
 
     file.Close();
