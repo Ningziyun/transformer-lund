@@ -70,7 +70,7 @@ python lunddata.py --swapAxes
 One ROOT file path per line; lines beginning with '''#''' are ignored
 ```
 /path/to/sample_A.root
-/path/to/subdir/sample_B.root
+#/path/to/subdir/sample_B.root
 ```
 
 **plot.py**
