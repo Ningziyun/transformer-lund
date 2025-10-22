@@ -64,7 +64,9 @@ python lunddata.py --swapAxes
 ```
 
 **Plot the Results**
+
 **Input Files (`fileList.txt` example)**
+
 One ROOT file path per line; lines beginning with '''#''' are ignored
 ```
 /path/to/sample_A.root
@@ -72,6 +74,7 @@ One ROOT file path per line; lines beginning with '''#''' are ignored
 ```
 
 **plot.py**
+
 # Main Lund-plane plotter. Reads one or multiple ROOT files, extracts kt and ΔR (or their logarithms), and produces 2D histograms (log(1/ΔR) vs log(kt)).
 ```
 python plot.py --file_list fileList.txt --zmin 0 --zmax 0.025 --maxN 10
