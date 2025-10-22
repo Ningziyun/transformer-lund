@@ -82,7 +82,7 @@ python plot.py --file_list fileList.txt --zmin 0 --zmax 0.025 --maxN 10
 
 **plot_1dhist.py**
 
-Draws 1D histograms of scalar observables (e.g. jet pT, η, or custom quantities). Supports overlaid comparisons across multiple ROOT or NumPy inputs.
+Draws 1D histograms of scalar observables (e.g. jet pT, η, or custom quantities). Supports overlaid comparisons across multiple ROOT or NumPy inputs. --mode for kdr(kt, deltaR) or kin (pt, eta, phi).
 ```
 python plot_1dhist.py --file_list fileList.txt --mode kdr --maxN 10
 ```
