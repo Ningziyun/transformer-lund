@@ -1,4 +1,4 @@
-numpy==1.26.4
+numpy
 pandas
 tables
 torch
@@ -7,4 +7,12 @@ tensorboard
 matplotlib
 scikit-learn
 pyroot
-protobuf==3.20
+protobuf
+h5py 
+hdf5plugin
+torchinfo
+
+root
+uproot 
+pandas
+fastjet
