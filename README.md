@@ -21,7 +21,7 @@ This can be performed by running the discretization script, where the first argu
 To produce the qcd_lund.root file after download the Input files, process the code in Data Setup part.
 
 ```
-Python discretize_auto.py --data_path inputFiles/qcd_lund.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
+Python discretize_auto.py --data_path inputFiles/qcd_lund_cut.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
 
 ```
 
@@ -29,7 +29,7 @@ Python discretize_auto.py --data_path inputFiles/qcd_lund.root --nBins 41 31 --t
 
 To train a model run:
 ```
-python train.py  --num_epochs 5 --num_features 2 --num_bins 41 31 --data_path inputFiles/discretized/qcd_lund_lundTree_kt_deltaR_train.h5
+python train.py  --num_epochs 5 --num_features 2 --num_bins 41 31 --data_path inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5
 ```
 
 To process the results:
@@ -53,15 +53,21 @@ To process the input root after download the Input Files:
 source date_setup.sh
 ```
 
-Use --logMode in data_detup.sh to output in log(1/deltaR) and log(kt) format, and deleta --logMode to produce deltaR and kt.
+Use --logMode for lunddata.py in data_detup.sh to output in log(1/deltaR) and log(kt) format, and deleta --logMode to produce deltaR and kt.
 ```
 python lunddata.py --logMode
 ```
 
-Add --swapAxes to switch the tree order of root file from deltaR and kt to kt and deltaR.
+Add --swapAxes for lunddata.py to switch the tree order of root file from deltaR and kt to kt and deltaR.
 ```
 python lunddata.py --swapAxes
 ```
+
+Use lund_select.py to cut the output. --xmim --xmax is the cut on kt, --ymin --ymax is the cut on deltaR. 
+```
+python lund_select.py --in inputFiles/qcd_lund.root --out inputFiles/qcd_lund_cut.root --mode cut --xmin 0 --xmax 8 --ymin -1 --ymax 8 --mode swap
+```
+Could also use --mode top10 to select first 10 emissions, --mode shuffle to shuffle the order of emissions
 
 **Plot the Results**
 
