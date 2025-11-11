@@ -154,7 +154,15 @@ def parse_input():
     parser.add_argument(
         "--weight_decay", type=float, default=0.00001, help="weight decay"
     )
-
+    # Step-15 Scheduler
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default="cos",
+        choices=["cos", "lin", "exp"],
+        help="Type of learning rate scheduler to use (cos, lin, exp)."
+    )
+    # Ending of Step-15
     parser.add_argument(
         "--hidden_dim", type=int, default=256, help="Hidden dim of the model"
     )

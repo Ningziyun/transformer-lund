@@ -27,6 +27,12 @@ parser.add_argument("--trunc", type=float, default=None)
 parser.add_argument("--preprocessingDir", type=str, default="preprocessing_bins")
 # kept for backward-compatibility but not used in the new naming
 parser.add_argument("--preprocessingBins", type=str, default="unused")
+#---Step-14---
+# --- added: optional manual prefix for preprocessing_bins ---
+parser.add_argument("--bin_prefix", type=str, default=None,
+                    help="Optional prefix for preprocessing_bins (e.g. 'log_kt_deltaR'). "
+                         "If not provided, automatically inferred from arguments.txt or fallback to var{i}_bin.npy.")
+#---End-Step-14---
 
 args = parser.parse_args()
 set_seeds(args.seed)
@@ -107,6 +113,8 @@ print(f"Time per jet: {(time.time() - start) / float(len(jets)):.6f} s")
 print(f"Total time: {int(time.time() - start)} s for {len(jets)} jets")
 print(f"Feature dimension F = {F}")
 
+'''
+Step-14 Deleted
 # --- load per-feature bin edges: var1_bin.npy, var2_bin.npy, ... ---
 bin_edges = []
 for i in range(F):
@@ -114,6 +122,56 @@ for i in range(F):
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Missing bin file: {path}")
     bin_edges.append(np.load(path))
+'''
+#---Step-14---
+# --- determine bin prefix before loading ---
+# Before:
+# bin_edges = []
+# for i in range(F):
+#     path = os.path.join(args.preprocessingDir, f"var{i+1}_bin.npy")
+#     if not os.path.isfile(path):
+#         raise FileNotFoundError(f"Missing bin file: {path}")
+#     bin_edges.append(np.load(path))
+# After:
+bin_prefix = None
+
+# 1. manual input mode (highest priority)
+if args.bin_prefix:
+    bin_prefix = args.bin_prefix
+    print(f"[bin_prefix] Using manual prefix: {bin_prefix}")
+
+# 2. automatic mode: read arguments.txt under model_dir
+else:
+    arg_path = os.path.join(args.model_dir, "arguments.txt")
+    if os.path.isfile(arg_path):
+        try:
+            with open(arg_path, "r") as f:
+                for line in f:
+                    if line.strip().startswith("data_path"):
+                        # example line: data_path            inputFiles/log_kt_deltaR_train.h5
+                        val = line.strip().split()[-1]
+                        base = os.path.splitext(os.path.basename(val))[0]
+                        bin_prefix = base.replace("_train", "").replace("_val", "")
+                        print(f"[bin_prefix] Auto-detected from arguments.txt: {bin_prefix}")
+                        break
+        except Exception as e:
+            print(f"[bin_prefix] Failed to read arguments.txt: {e}")
+
+# 3. fallback: no prefix
+if bin_prefix is None:
+    print("[bin_prefix] No prefix detected, falling back to var{i}_bin.npy mode.")
+
+# --- load bin edges ---
+bin_edges = []
+for i in range(F):
+    if bin_prefix:
+        path = os.path.join(args.preprocessingDir, f"{bin_prefix}_var{i+1}_bin.npy")
+    else:
+        path = os.path.join(args.preprocessingDir, f"var{i+1}_bin.npy")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Missing bin file: {path}")
+    bin_edges.append(np.load(path))
+#---Step-14-End---
 '''
 Step-6 quantile Deleted
 # precompute uniform bin width (bins were saved with np.linspace)

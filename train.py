@@ -80,7 +80,19 @@ if __name__ == "__main__":
     opt = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
+    '''
+    Step-15 Delete
     scheduler = get_cos_scheduler(args.num_epochs, len(train_loader), opt)
+    '''
+    # Step-15 Allow choose different scheduler
+    # Select scheduler type based on args.scheduler
+    if args.scheduler == "lin":
+        scheduler = get_lin_scheduler(args.num_epochs, len(train_loader), args.lr_decay, opt)
+    elif args.scheduler == "exp":
+        scheduler = get_exp_scheduler(args.num_epochs, len(train_loader), opt)
+    elif args.scheduler =="cos":
+        scheduler = get_cos_scheduler(args.num_epochs, len(train_loader), opt)
+    # Ending Step-15
     scaler = torch.cuda.amp.GradScaler()
 
     if args.contin:

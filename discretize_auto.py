@@ -112,6 +112,14 @@ def discretize_tree(
     bins_dir = "preprocessing_bins"
     os.makedirs(bins_dir, exist_ok=True)
 
+    # --Step 14--- ADDED: derive base name (strip _train/_val if present) ---
+    # Before:
+    # bins_dir = "preprocessing_bins"
+    # os.makedirs(bins_dir, exist_ok=True)
+    base_prefix = os.path.splitext(os.path.basename(out_h5))[0]
+    base_prefix = base_prefix.replace("_train", "").replace("_val", "")
+    # --Step 14--- END ADDED ---
+
     # -------------------------- Step-8 Adding --------------------------
     # When split_train_val=True, we MUST compute bins ONLY from the train slice.
     # This ensures preprocessing_bins reflect the training distribution.
@@ -136,9 +144,10 @@ def discretize_tree(
             lo, hi = np.min(valid), np.max(valid)
         if lo == hi:
             hi = lo + 1e-6
-
-        path = os.path.join(bins_dir, f"var{fi+1}_bin.npy")
-
+        # --Step-14 Modified
+        #path = os.path.join(bins_dir, f"var{fi+1}_bin.npy")
+        path = os.path.join(bins_dir, f"{base_prefix}_var{fi+1}_bin.npy")  # use base prefix
+        # --Step-14 End
         if split_train_val:
             # Step-8 Adding: ALWAYS (re)build bins from TRAIN slice, and overwrite with the SAME filename.
             qs = np.linspace(0.0, 1.0, nBins[fi] + 1, dtype=np.float32)
