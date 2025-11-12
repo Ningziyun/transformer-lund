@@ -23,8 +23,8 @@ Setup the directory structure and download the files as such for the rest of the
 mkdir inputFiles/top_benchmark
 cd inputFiles/top_benchmark
 wget https://zenodo.org/records/2603256/files/train.h5
-wget https://zenodo.org/records/2603256/files/test.h5?download=1
-wget https://zenodo.org/records/2603256/files/val.h5?download=1
+wget https://zenodo.org/records/2603256/files/test.h5
+wget https://zenodo.org/records/2603256/files/val.h5
 cd ..
 ```
 
@@ -35,26 +35,32 @@ source data_setup.sh
 ```
 This calls the scripts `discretize.sh` (which is a wrapper around `preprocess.py`), `addEnergy.py` and `lunddata.py` in sequence
 
+`preprocess.py` runs the original paper pt/eta discretization and outputs to a /discretized directory of the original, and outputs a root tree of pt/eta/phi to `./originalJets_*.root`
 
-Use --logMode in data_detup.sh to output in log(1/deltaR) and log(kt) format, and deleta --logMode to produce deltaR and kt.
+
+Use --logMode for lunddata.py in data_setup.sh to output in log(1/deltaR) and log(kt) format, and remove --logMode to produce deltaR and kt. Overwites the `originalJets_*.root`
 ```
 python lunddata.py --logMode
 ```
 
-Add --swapAxes to switch the tree order of root file from deltaR and kt to kt and deltaR.
+Add --swapAxes for lunddata.py to switch the tree order of root file from deltaR and kt to kt and deltaR. Reads `originalJets_qcd.root` and outputs `inputFiles/qcd_lund.root`
 ```
 python lunddata.py --swapAxes
 ```
 
-**Discretizing**
-
-To perform the training, the input files must be discretized. 
-This can be performed by running the discretization script, where the first argument is the path to the original root files.
-To produce the qcd_lund.root file after download the Input files, process the code in Data Setup part.
-
+Use lund_select.py to cut the output. --xmim --xmax is the cut on kt, --ymin --ymax is the cut on deltaR. Reads `inputFiles/qcd_lund.root` and outputs `inputFiles/qcd_lund_cut.root` 
 ```
-Python discretize_auto.py --data_path inputFiles/qcd_lund_cut.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
+python lund_select.py --in inputFiles/qcd_lund.root --out inputFiles/qcd_lund_cut.root --mode cut --xmin 0 --xmax 8 --ymin -1 --ymax 8 --mode swap
 ```
+Could also use --mode top10 to select first 10 emissions, --mode shuffle to shuffle the order of emissions
+
+
+To perform the training, the lund input files must be discretized, output to h5 files in `inputFiles/discretized/`
+```
+python discretize_auto.py --data_path inputFiles/qcd_lund_cut.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
+```
+
+**Training**
 
 To train a model run:
 ```
@@ -66,36 +72,6 @@ To process the results:
 ```
 python sample_jets_auto.py --num_samples 10000 --model_dir models/test/
 ```
-
-**Input Files**
-
-
-Input files for this code can be found at https://zenodo.org/records/2603256
-
-
-**Data Setup**
-
-
-To process the input root after download the Input Files:
-```
-source date_setup.sh
-```
-
-Use --logMode for lunddata.py in data_detup.sh to output in log(1/deltaR) and log(kt) format, and deleta --logMode to produce deltaR and kt.
-```
-python lunddata.py --logMode
-```
-
-Add --swapAxes for lunddata.py to switch the tree order of root file from deltaR and kt to kt and deltaR.
-```
-python lunddata.py --swapAxes
-```
-
-Use lund_select.py to cut the output. --xmim --xmax is the cut on kt, --ymin --ymax is the cut on deltaR. 
-```
-python lund_select.py --in inputFiles/qcd_lund.root --out inputFiles/qcd_lund_cut.root --mode cut --xmin 0 --xmax 8 --ymin -1 --ymax 8 --mode swap
-```
-Could also use --mode top10 to select first 10 emissions, --mode shuffle to shuffle the order of emissions
 
 **Plot the Results**
 

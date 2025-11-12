@@ -162,7 +162,7 @@ def loopFile(m_filename, tree, outdir="inputFiles", outname="qcd_lund.root",
 
 import argparse
 parser = argparse.ArgumentParser(description='Process benchmarks.')
-parser.add_argument("--filename", help="", default="fileList.txt")
+parser.add_argument("--filename", help="", default="originalJets_qcd.root")
 parser.add_argument("--treename", help="", default="tree")
 parser.add_argument("--logMode", action="store_true", help="If set, output log(kt or z) and log(1/deltaR)")
 parser.add_argument("--swapAxes", action="store_true", help="If set, swap the order of kt and deltaR in output")
@@ -174,47 +174,35 @@ parser.add_argument("--mode", type=str, choices=["kt", "z"], default="kt",
 opt = parser.parse_args()
 
 
-if not os.path.exists("rootFiles"):
-    os.makedirs("rootFiles")
+tree = ROOT.TTree();
+'''
+try:
+  file = ROOT.TFile(opt.filename);
+  tree = file.Get(opt.treename);
+except:
+  file = None
+  print("Did not find either file or tree, continuing to the next")
+  continue
 
-with open(opt.filename) as infile:
-  for line in infile:
+if(not tree):
+  continue;
 
-    # Skip commented lines
-    if(line[0] == '#'):
-      continue;
-    line = line.rstrip('\n')
-
-    tree = ROOT.TTree();
-    '''
-    try:
-      file = ROOT.TFile(line);
-      tree = file.Get(opt.treename);
-    except:
-      file = None
-      print("Did not find either file or tree, continuing to the next")
-      continue
-
-    if(not tree):
-      continue;
-
-    # Always write to inputFiles/qcd_lund.root
-    loopFile("ignored.root", tree, logMode=opt.logMode, swapAxes=opt.swapAxes, mode=opt.mode);
-    '''
-    try:
-        file = ROOT.TFile(line)
-        # --- NEW: automatically iterate through all TTrees in the file ---
-        keys = file.GetListOfKeys()
-        for key in keys:
-            obj = key.ReadObj()
-            # Only process objects that are TTrees
-            if isinstance(obj, ROOT.TTree):
-                print(f"Processing tree: {obj.GetName()} in {line}")
-                loopFile("ignored.root", obj, logMode=opt.logMode, swapAxes=opt.swapAxes, mode=opt.mode)
-    except Exception as e:
-        print(f"Failed to read file {line}: {e}")
-        continue
+# Always write to inputFiles/qcd_lund.root
+loopFile("ignored.root", tree, logMode=opt.logMode, swapAxes=opt.swapAxes, mode=opt.mode);
+'''
+try:
+    file = ROOT.TFile(opt.filename)
+    # --- NEW: automatically iterate through all TTrees in the file ---
+    keys = file.GetListOfKeys()
+    for key in keys:
+        obj = key.ReadObj()
+        # Only process objects that are TTrees
+        if isinstance(obj, ROOT.TTree):
+            print(f"Processing tree: {obj.GetName()} in {opt.filename}")
+            loopFile("ignored.root", obj, logMode=opt.logMode, swapAxes=opt.swapAxes, mode=opt.mode)
+except Exception as e:
+    print(f"Failed to read file {opt.filename}: {e}")
 
 
 
-    file.Close();
+file.Close();
