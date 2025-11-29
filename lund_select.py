@@ -6,11 +6,13 @@ Read two jagged branches from a ROOT TTree, apply composable operations:
   - shuffle    : per-jet permutation with pair alignment
   - top10      : keep jets with >=10 emissions, then slice [:10]
   - both       : expands to shuffle + top10
+  - drprefix   : keep jets with first deltaR <= 0.3 and keep only the longest non-decreasing prefix in deltaR
+  - reverse    : reverse emission order within each jet (preserves alignment)
   - swap       : swap the two branches' DATA on output (names follow default unless overridden)
   - swapnames  : keep DATA as-is, only swap the OUTPUT NAMES (aliases)
 
 Pipeline order (deterministic when composing):
-  shuffle -> top10 -> swap(data) -> swapnames(names)
+  shuffle -> top10 -> drprefix -> swap(data) -> swapnames(names)
 
 THEN write them back using **PyROOT** as EXACTLY TWO branches.
 By default, the output branch order follows the input order,
@@ -37,7 +39,7 @@ so NO auxiliary count/offset branches will appear.
 Add a 'cut' mode to filter emissions by x–y rectangular region.
 
 This version extends the original pipeline:
-  shuffle -> top10 -> cut -> swap(data) -> swapnames(names)
+  shuffle -> top10 -> drprefix -> cut -> swap(data) -> swapnames(names)
 
 'cut' keeps only emissions satisfying xmin ≤ x ≤ xmax and ymin ≤ y ≤ ymax,
 where x = branch1 (e.g., log_kt) and y = branch2 (e.g., log_1_over_deltaR),
@@ -105,6 +107,54 @@ def op_top10(a1: ak.Array, a2: ak.Array):
     mask = n >= 10
     return a1[mask][:, :10], a2[mask][:, :10]
 
+def op_reverse(a1: ak.Array, a2: ak.Array):
+    """
+    Reverse emission order within each jet while keeping (a1, a2) aligned.
+    Works for any jagged array shape.
+    """
+    rev_index = ak.local_index(a1, axis=1)[::-1]
+    # Equivalent to reversing along axis=1 for each jagged row
+    return a1[:, ::-1], a2[:, ::-1]
+
+
+def op_drprefix(a1: ak.Array, a2: ak.Array, start_max: float = 0.3):
+    """
+    Keep only jets whose first deltaR <= start_max and then
+    truncate each jet to the longest non-decreasing prefix in deltaR.
+    Here we assume a2 is the log_1_Over_deltaR-like branch (before any swap).
+    """
+    # Convert jagged arrays to Python lists for simple per-jet logic
+    list_dr = ak.to_list(a2)
+    list_k = ak.to_list(a1)
+
+    new_dr = []
+    new_k = []
+
+    for dr_row, k_row in zip(list_dr, list_k):
+        # Skip empty jets
+        if not dr_row:
+            continue
+
+        # Optionally drop jets whose first deltaR is larger than the threshold
+        if start_max is not None and dr_row[0] > start_max:
+            continue
+
+
+        # Find the longest non-decreasing prefix in deltaR
+        prefix_len = 1
+        for i in range(1, len(dr_row)):
+            if dr_row[i] >= dr_row[i - 1]:
+                prefix_len += 1
+            else:
+                break
+
+        # Only keep jets with a non-empty prefix
+        if prefix_len > 0:
+            new_dr.append(dr_row[:prefix_len])
+            new_k.append(k_row[:prefix_len])
+
+    return ak.Array(new_k), ak.Array(new_dr)
+
 
 def op_cut(a1: ak.Array, a2: ak.Array, xmin: float, xmax: float, ymin: float, ymax: float):
     """Filter emissions by rectangular (x,y) window.
@@ -160,15 +210,17 @@ def parse_args():
     p.add_argument("--in", dest="in_path", required=True, help="Input ROOT file path.")
     p.add_argument("--out", dest="out_path", required=True, help="Output ROOT file path.")
     p.add_argument("--mode", action="append",
-                   choices=["shuffle", "top10", "cut", "swap", "swapnames", "both"],
+                   choices=["shuffle", "top10", "drprefix", "reverse", "cut", "swap", "swapnames", "both"],
                    required=True,
-                   help="Repeatable. Pipeline order: shuffle -> top10 -> cut -> swap -> swapnames.")
+                   help="Repeatable. Pipeline order: shuffle -> top10 -> drprefix -> reverse -> cut -> swap -> swapnames.")
     p.add_argument("--tree_name", default="auto", help="TTree name, 'auto' = autodetect first tree.")
     p.add_argument("--in_b1", default="log_kt", help="Input branch 1 name.")
     p.add_argument("--in_b2", default="log_1_over_deltaR", help="Input branch 2 name.")
     p.add_argument("--out_b1", default=None, help="Output branch 1 name.")
     p.add_argument("--out_b2", default=None, help="Output branch 2 name.")
     p.add_argument("--seed", type=int, default=None, help="Random seed for shuffle mode.")
+    p.add_argument("--dr_start_max", type=float, default=None,
+                   help="Optional threshold for the first deltaR (default=0.3 if set; no filtering if not set).")
 
     # --- new cut parameters ---
     p.add_argument("--xmin", type=float, default=None, help="Cut lower bound for x (branch1).")
@@ -183,7 +235,7 @@ def _expand_modes(modes_list: List[str]) -> List[str]:
     selected = set(modes_list)
     if "both" in selected:
         selected.update({"shuffle", "top10"})
-    pipeline = ["shuffle", "top10", "cut", "swap", "swapnames"]
+    pipeline = ["shuffle", "top10", "drprefix", "reverse", "cut", "swap", "swapnames"]
     return [m for m in pipeline if m in selected]
 
 
@@ -203,6 +255,21 @@ def main():
     if "top10" in modes:
         a1_out, a2_out = op_top10(a1_out, a2_out)
         applied.append("top10")
+
+    if "drprefix" in modes:
+        # Apply deltaR-based prefix selection before rectangular cuts and swaps
+        if args.dr_start_max is None:
+            a1_out, a2_out = op_drprefix(a1_out, a2_out, start_max=None)
+            applied.append("drprefix(no_start_cut, monotonic)")
+        else:
+            a1_out, a2_out = op_drprefix(a1_out, a2_out, start_max=args.dr_start_max)
+            applied.append(f"drprefix(start<={args.dr_start_max}, monotonic)")
+    
+    if "reverse" in modes:
+        # Reverse emission order within each jet
+        a1_out, a2_out = op_reverse(a1_out, a2_out)
+        applied.append("reverse(order)")
+
 
     if "cut" in modes:
         # Ensure all bounds provided
