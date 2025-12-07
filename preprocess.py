@@ -153,6 +153,7 @@ def discretize_data(
     lower_q: str,
     upper_q: str,
     nBins: list[int],
+    sample_name: str,
     nJets=None,
 ):
     def read_input():
@@ -263,7 +264,7 @@ def discretize_data(
     labelType = "qcd"
     if args.class_label == 1:
       labelType = "top"
-    file = ROOT.TFile.Open("originalJets_%s.root"%labelType, "RECREATE")
+    file = ROOT.TFile.Open("originalJets_%s_%s.root"%(labelType,sample_name), "RECREATE")
     tree = ROOT.TTree("tree","tree")
 
     constit_pt = ROOT.std.vector[float]()
@@ -332,13 +333,13 @@ if __name__ == "__main__":
     parser.add_argument("--nJets", "-N", type=int, default=None)
     args = parser.parse_args()
 
-    train_test = args.input_file.split("/")[-1][:-3]
-    print(f"Dataset: {train_test}")
+    sample_name = args.input_file.split("/")[-1][:-3]
+    print(f"Dataset: {sample_name}")
     output_path = os.path.join(os.path.dirname(args.input_file), "discretized")
     if not os.path.exists(output_path):
         print("\nCreating output path\n")
         os.makedirs(output_path)
-    output_file = f"{train_test}_{['qcd', 'top'][args.class_label]}_{args.tag}.h5"
+    output_file = f"{sample_name}_{['qcd', 'top'][args.class_label]}_{args.tag}.h5"
     output_file = os.path.join(output_path, output_file)
 
     discretize_data(
@@ -349,5 +350,6 @@ if __name__ == "__main__":
         lower_q=args.lower_q,
         upper_q=args.upper_q,
         nBins=args.nBins,
+        sample_name=sample_name,
         nJets=args.nJets,
     )
