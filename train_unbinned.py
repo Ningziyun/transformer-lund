@@ -92,8 +92,8 @@ class input_dataset(torch.utils.data.Dataset):
     #self.kt[mask]=0
 
   def __getitem__(self, index):
-    #inputs=np.array([self.DR[index],self.kt[index]])
-    inputs=np.array([self.DR[index]])
+    inputs=np.array([self.DR[index],self.kt[index]])
+    #inputs=np.array([self.DR[index]])
     #inputs=np.array([self.kt[index]])
     if self.add_stop:
       inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
@@ -192,7 +192,7 @@ class test_model(nn.Module):
 
 ##########################################
 class test_modelMDN(test_model):
-  def __init__(self, input_dim, n_mix=4, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
+  def __init__(self, input_dim, n_mix=10, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
       super(test_modelMDN, self).__init__(input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128)
 
       self.n_mix=n_mix
@@ -207,18 +207,16 @@ class test_modelMDN(test_model):
       # split into mixture components
       encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.input_dim)) #[Nbatch,Nconst,Nmix,(1+2*Ninput)]
 
-      #pi=encoded[:,:,0] #[batch,Nconst,Nmix]
-      #mu=encoded[:,:,1:self.input_dim] #[batch,Nconst,Nmix,Ninput]
-      #sigma=encoded[:,:,self.input_dim+1:] #[batch,Nconst,Nmix,Ninput]
+      pi=encoded[:,:,:,0] #[batch,Nconst,Nmix]
+      mu=encoded[:,:,:,1:self.input_dim+1] #[batch,Nconst,Nmix,Ninput]
+      sigma=encoded[:,:,:,self.input_dim+1:] #[batch,Nconst,Nmix,Ninput]
 
-      # constraints:
-      #pi = nn.functional.softmax(pi, dim=-1) #weights need to be normalized
-      #sigma = torch.exp(sigma) + 1e-6 # ensure positive
-      #encoded[:,:,0]=nn.functional.softmax(encoded[:,:,0],dim=-1) #weights need to be normalized
-      #encoded[:,:,self.input_dim+1:] = torch.exp(encoded[:,:,self.input_dim+1:]) # ensure positive
+      # constraints, don't do in-line replacements of tensors as can mess with gradients
+      pi = nn.functional.softmax(pi, dim=-1) #weights need to be normalized
+      sigma=sigma.clamp(min=0.05)
 
-      return encoded
-      #return pi,mu,sigma
+      return torch.cat([pi.unsqueeze(-1),mu,sigma],dim=-1)
+      #return pi, mu, sigma
 
   @torch.no_grad()
   def generate(self, x_init, steps):
@@ -233,7 +231,6 @@ class test_modelMDN(test_model):
           pi=pred[:,-1,:,0] # [Nbatch, Nmix]
           mu=pred[:,-1,:, 1:ninputs+1] #[Nbatch,Nmix,Ninput]
           sig2=pred[:,-1,:, ninputs+1:] #[Nbatch,Nmix,Ninput]
-          pi=nn.functional.softmax(pi,dim=-1) #FIXME
 
           if ii==0:
             print("pi",pi[0])
@@ -254,42 +251,28 @@ class test_modelMDN(test_model):
 
 def mdn_loss(inputs, targets):
     
-    doPrint=False
-
     ninputs=targets.shape[-1]
-    if doPrint: print("loss input=",inputs.shape)
-    if doPrint: print("loss target=",targets.shape)
 
     pi=inputs[..., 0] #[Nbatch,NConst,Nmix]
     mu=inputs[..., 1:ninputs+1] #target: [Nbatch,NConst,Nmix,Ninputs]
     sig2=inputs[..., ninputs+1:] #target: [Nbatch,NConst,Nmix,Ninputs]
 
-    pi=nn.functional.softmax(pi,dim=-1) #FIXME
-    #sig2 = torch.exp(sig2)
-
     #target: [Nbatch,NConst,Ninputs]
     targets = targets.unsqueeze(2)  # target: [Nbatch,NConst,1,Ninputs]
-    #print("loss target new",targets.shape)
 
     # central term: (sum_{j=1}^{Ninput} (x-mu_j)^2/2sigma_j^2)
     Z_term = torch.sum( ((targets - mu)**2 / (2*sig2)), dim=-1)  #[Nbatch,NConst,Nmix]
-    if doPrint: print(Z_term.shape)
-    if doPrint: print("Z term",Z_term)
 
     # Norm term: sum_{j=1}^{Ninput} 0.5*log(det|Sigma|)+Ninput/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
     sig_term = 0.5*torch.sum(sig2+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
     #sig_term = 0.5*torch.sum(sig2, dim=-1)
-    if doPrint: print("sigterm",sig_term)
 
     #the mixture term: log(pi_i)
     pi_term=torch.log(pi)
-    if doPrint: print("piterm",pi_term)
 
     #Total log prob, sum over mixture: sum_{i=1}^{N_mix} log(pi_i) - Z_term,i - sig_term,i
-    log_prob = torch.sum(pi_term - Z_term - sig_term, dim=-1)   #[Nbatch,NConst]
-
-    if doPrint: print("loss_output",log_prob.shape)
-    if doPrint: print("loss",log_prob)
+    #log_prob = torch.sum(pi_term - Z_term - sig_term, dim=-1)   #[Nbatch,NConst]
+    log_prob = torch.logsumexp(pi_term - Z_term - sig_term, dim=-1)
 
     return -log_prob.mean()
 
@@ -339,7 +322,7 @@ if __name__ == "__main__":
     X=next(iter(train_loader))
     print("Input shape,",X.shape)
 
-    doMDN=False
+    doMDN=True
 
     # construct model
     if args.contin:
@@ -429,7 +412,7 @@ if __name__ == "__main__":
       if doMixedLoss:
         pred[:,:,-1]=sigmoid(pred[:,:,-1])
 
-      print("loss",loss.item())
+      print(f"epoch:{t} loss={loss.item()}")
 
       #print("inputs",inputs[0])
       #print("targets",targets[0])
