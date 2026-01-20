@@ -15,13 +15,11 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torch.distributions.multivariate_normal import MultivariateNormal
 torch.multiprocessing.set_sharing_strategy("file_system")
+from torchviz import make_dot
 
 import matplotlib.pyplot as plt
 
 def quickLundPlot(inputs,labels=["original","generated","predicted"]):
-
-  #for jj in range(len(inputs)): print(inputs[jj].shape)
-  #print(inputs[0])
 
   linestyles=["-","--","-.",":"]
 
@@ -34,22 +32,18 @@ def quickLundPlot(inputs,labels=["original","generated","predicted"]):
     for jj in range(Nin):
       mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
       maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
-  #xmin=0
-  #xmax=5
-  #ymin=-2
-  #ymax=5
 
   #2d plots
-  if Ndim>2:
+  if Ndim>=2:
     fig, axs = plt.subplots(Nin,1,figsize=(8.0,8.0))
     for jj in range(Nin):
       pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[mins[0],maxs[0]],[mins[1],maxs[1]]],bins=[20,20],cmap="Blues", norm="log")
     fig.colorbar(pos[3],ax=axs)
 
     name="lund"
+    fig.savefig(name+".png")
     fig.savefig(name+".pdf")
     plt.close(fig)
-
 
   #1D plots
   fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
@@ -60,16 +54,16 @@ def quickLundPlot(inputs,labels=["original","generated","predicted"]):
     if ii==0: axs[0].legend()
 
   name="projection"
+  fig.savefig(name+".png")
   fig.savefig(name+".pdf")
   plt.close(fig)
 
 class input_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=7, add_stop=True):
+  def __init__(self, file_path, NConstituents=7, add_stop=False, standardize=False):
     super(input_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
 
-    Njets=100000
     Njets=-1
     df = pd.read_hdf(file_path, "raw", stop=Njets)
 
@@ -86,10 +80,11 @@ class input_dataset(torch.utils.data.Dataset):
       self.stop=self.DR[:,1:] == -1 
       self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
 
-    #Set pads to zero
-    #mask = np.argwhere((self.DR==-1))
-    #self.DR[mask]=0
-    #self.kt[mask]=0
+    if standardize:
+      dr_mean,dr_std=1.782,1.084
+      kt_mean,kt_std=1.397,1.117
+      self.DR=(self.DR-dr_mean)/dr_std
+      self.kt=(self.kt-kt_mean)/kt_std
 
   def __getitem__(self, index):
     inputs=np.array([self.DR[index],self.kt[index]])
@@ -99,7 +94,6 @@ class input_dataset(torch.utils.data.Dataset):
       inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     
     self.data=torch.transpose(torch.tensor(inputs),0,1)
-    #self.data=torch.flatten(self.data)
 
     return self.data
 
@@ -192,7 +186,7 @@ class test_model(nn.Module):
 
 ##########################################
 class test_modelMDN(test_model):
-  def __init__(self, input_dim, n_mix=10, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
+  def __init__(self, input_dim, n_mix=25, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
       super(test_modelMDN, self).__init__(input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128)
 
       self.n_mix=n_mix
@@ -207,16 +201,16 @@ class test_modelMDN(test_model):
       # split into mixture components
       encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.input_dim)) #[Nbatch,Nconst,Nmix,(1+2*Ninput)]
 
-      pi=encoded[:,:,:,0] #[batch,Nconst,Nmix]
+      alpha=encoded[:,:,:,0] #[batch,Nconst,Nmix]
       mu=encoded[:,:,:,1:self.input_dim+1] #[batch,Nconst,Nmix,Ninput]
       sigma=encoded[:,:,:,self.input_dim+1:] #[batch,Nconst,Nmix,Ninput]
 
       # constraints, don't do in-line replacements of tensors as can mess with gradients
-      pi = nn.functional.softmax(pi, dim=-1) #weights need to be normalized
-      sigma=sigma.clamp(min=0.05)
+      alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
+      sigma=sigma.clamp(min=0.001) #make positive
 
-      return torch.cat([pi.unsqueeze(-1),mu,sigma],dim=-1)
-      #return pi, mu, sigma
+      return torch.cat([alpha.unsqueeze(-1),mu,sigma],dim=-1)
+      #return alpha, mu, sigma
 
   @torch.no_grad()
   def generate(self, x_init, steps):
@@ -225,20 +219,20 @@ class test_modelMDN(test_model):
       batch_idx = torch.arange(x_init.shape[0]) #For some smoother slicing later
 
       for ii in range(steps):
-          pred = self.forward(seq) #get the pi,mu,sigma values
+          pred = self.forward(seq) #get the alpha,mu,sigma values
 
           #Take the last nconst and get the components
-          pi=pred[:,-1,:,0] # [Nbatch, Nmix]
+          alpha=pred[:,-1,:,0] # [Nbatch, Nmix]
           mu=pred[:,-1,:, 1:ninputs+1] #[Nbatch,Nmix,Ninput]
           sig2=pred[:,-1,:, ninputs+1:] #[Nbatch,Nmix,Ninput]
 
           if ii==0:
-            print("pi",pi[0])
+            print("alpha",alpha[0])
             print("mu",mu[0])
             print("sig2",sig2[0])
 
           # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
-          comp = torch.multinomial(pi, 1).squeeze(-1)  # (B,)
+          comp = torch.multinomial(alpha, 1).squeeze(-1)  # (B,)
 
           # Make the MVN distribution by getteing the mu and cov-matrix for this component and sample from it
           loc=mu[batch_idx,comp,:] #(Nbatch,Ninput)
@@ -253,28 +247,29 @@ def mdn_loss(inputs, targets):
     
     ninputs=targets.shape[-1]
 
-    pi=inputs[..., 0] #[Nbatch,NConst,Nmix]
+    alpha=inputs[..., 0] #[Nbatch,NConst,Nmix]
     mu=inputs[..., 1:ninputs+1] #target: [Nbatch,NConst,Nmix,Ninputs]
     sig2=inputs[..., ninputs+1:] #target: [Nbatch,NConst,Nmix,Ninputs]
 
     #target: [Nbatch,NConst,Ninputs]
     targets = targets.unsqueeze(2)  # target: [Nbatch,NConst,1,Ninputs]
 
-    # central term: (sum_{j=1}^{Ninput} (x-mu_j)^2/2sigma_j^2)
+    # central term, sum over the input vector dimension: (sum_{j=1}^{N_input} (x-mu_j)^2/2sigma_j^2)
     Z_term = torch.sum( ((targets - mu)**2 / (2*sig2)), dim=-1)  #[Nbatch,NConst,Nmix]
 
-    # Norm term: sum_{j=1}^{Ninput} 0.5*log(det|Sigma|)+Ninput/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
+    # Norm term: sum_{j=1}^{N_input} 0.5*log(det|Sigma|)+N_input/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
     sig_term = 0.5*torch.sum(sig2+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
     #sig_term = 0.5*torch.sum(sig2, dim=-1)
 
-    #the mixture term: log(pi_i)
-    pi_term=torch.log(pi)
+    #the mixture term: log(alpha_i)
+    alpha_term=torch.log(alpha)
 
-    #Total log prob, sum over mixture: sum_{i=1}^{N_mix} log(pi_i) - Z_term,i - sig_term,i
-    #log_prob = torch.sum(pi_term - Z_term - sig_term, dim=-1)   #[Nbatch,NConst]
-    log_prob = torch.logsumexp(pi_term - Z_term - sig_term, dim=-1)
+    #Total log prob of the datapoint, sum over mixture: log(p_{sample})=log(sum_{i=1}^{N_mix} alpha,i*exp{-sig_term,i}*exp{-Z_term,i})
+    #Make simpler and more stabler by doing the log-sum-exp: log(p_sample)=log(sum_{i=1}^{N_mix} exp{alpha_term,i - Z_term,i -exp{sig_term,i})
+    log_prob = torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
 
-    return -log_prob.mean()
+    # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
+    return -log_prob.mean() #Sum over all the training sample
 
 ##########################################
 class test_modelQuantile(test_model):
@@ -322,7 +317,8 @@ if __name__ == "__main__":
     X=next(iter(train_loader))
     print("Input shape,",X.shape)
 
-    doMDN=True
+    doMDN=False
+    doMixedLoss=False
 
     # construct model
     if args.contin:
@@ -341,16 +337,13 @@ if __name__ == "__main__":
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    doMixedLoss=False
-    if doMixedLoss:
+    if not doMDN:
       loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
-      #loss_fn2 = nn.CrossEntropyLoss() #expects logits
-      loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
-      sigmoid=nn.Sigmoid()
+      if doMixedLoss:
+        #loss_fn2 = nn.CrossEntropyLoss() #expects logits
+        loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
+        sigmoid=nn.Sigmoid()
     else:
-      loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
-
-    if doMDN:
       loss_fn=mdn_loss
 
     best_loss=1e6
@@ -374,33 +367,31 @@ if __name__ == "__main__":
           pred = model(inputs)       # (batch, seq_len-1, feature_dim)
           #print(inputs.shape,targets.shape,pred.shape)
 
-          if doMixedLoss:
-            lambd=1
-            loss= loss_fn(pred[:,:,:-1],targets[:,:,:-1])+lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1]) #mixed loss
-          else:
-            loss = loss_fn(pred, targets) #whole loss
-
           if not doMDN:
-            mask = torch.ones(inputs.shape,device=device,dtype=torch.bool) #mask and loss dimension [Nbatcth,NConst,Nfeatures]
+            if doMixedLoss:
+              lambd=1
+              #print(loss_fn(pred[:,:,:-1],targets[:,:,:-1]).shape,loss_fn2(pred[:,:,-1],targets[:,:,-1]).shape)
+              loss= loss_fn(pred[:,:,:-1],targets[:,:,:-1]).mean(dim=-1)+lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1]) #mixed loss
+            else:
+              loss = loss_fn(pred, targets) #whole loss
+
+            #mask = torch.ones(inputs.shape,device=device,dtype=torch.bool) #mask and loss dimension [Nbatch,NConst,Nfeatures]
             #mask = inputs[:,:,0]>-1
-            loss = loss[mask].mean()
+            #loss = loss[mask].mean()
+            loss=loss.mean()
           else:
+            loss = loss_fn(pred, targets)
             loss=loss.mean()
 
           #FIXME quantile regression
           #quantiles = [0.1, 0.5, 0.9]
           #loss = quantile_loss(pred, targets, quantiles)
 
-          #FIXME Gaussian NLL
-          #mu, logvar = model(inputs)
-          #loss = gaussian_nll(mu, logvar, targets)
-
           #FIXME playing around
           #loss=loss_fn(pred[:,0],targets[:,0])
 
           #loss = loss_fn(pred[:, -1, :], targets[:, -1, :]) #last element loss
           #loss = loss_fn(pred, targets[:, -1, :])
-
           #loss = loss_fn(pred[:,:,0],targets[:,:,0]) #only first feature regression
 
           loss.backward()
@@ -412,7 +403,7 @@ if __name__ == "__main__":
       if doMixedLoss:
         pred[:,:,-1]=sigmoid(pred[:,:,-1])
 
-      print(f"epoch:{t} loss={loss.item()}")
+      print(f"epoch: {t} loss={loss.item()}")
 
       #print("inputs",inputs[0])
       #print("targets",targets[0])
@@ -428,36 +419,31 @@ if __name__ == "__main__":
           print("Early stoping")
           break
 
-  
     with torch.no_grad():
-      X=next(iter(test_loader))
-      #X = X.to(device)
-      start=X[:,0,:].unsqueeze(1)
-      model.to("cpu")
-      pred= model(X)
-      generated_seq = model.generate(start, steps=X.shape[1]-1)
+      original=torch.empty([0,X.shape[-1]])
+      generated=torch.empty([0,X.shape[-1]])
+      predicted=torch.empty([0,X.shape[-1]])
+      device="cpu"
+      for batch, X in enumerate(train_loader):
+        if batch>10: break
+        X = X.to(device)
+        start=X[:,0,:].unsqueeze(1)
+        model.to(device)
+        pred= model(X)
+        generated_seq = model.generate(start, steps=X.shape[1]-1)
 
-      if not doMDN:
-        pred=torch.cat([torch.reshape(X[:,0,:],(X.shape[0],-1,X.shape[2])),pred[:,1:,:]],dim=1) # For display push intial element to front
+        if doMixedLoss:
+          pred[:,:,-1]=sigmoid(pred[:,:,-1])
+          generated_seq[:,:,-1]=sigmoid(generated_seq[:,:,-1])
+          generated_seq[:,0,-1]=X[:,0,-1]
 
-      if doMixedLoss:
-        pred[:,:,-1]=sigmoid(pred[:,:,-1])
-        generated_seq[:,:,-1]=sigmoid(generated_seq[:,:,-1])
-        generated_seq[:,0,-1]=X[:,0,-1]
+        if batch==0:
+          print("Input example")
+          print(X[0])
+          print("Generate example")
+          print(generated_seq[0])
 
-      print("Input example")
-      print(X[0])
-      print("Generate example")
-      print(generated_seq[0])
-      if not doMDN:
-        print("Model prediction")
-        print(pred[0])
+        original=torch.cat([original,X.flatten(0,1)])
+        generated=torch.cat([generated,generated_seq.flatten(0,1)])
 
-      print("Generated sequence shape:", generated_seq.shape) 
-
-      #quickLundPlot(X.reshape([X.shape[1]*X.shape[2],2]).numpy(),generated_seq.reshape([generated_seq.shape[0]*generated_seq.shape[1],2]).numpy())
-
-      if doMDN:
-        quickLundPlot([X.flatten(0,1).numpy(),generated_seq.flatten(0,1).numpy()])
-      else:
-        quickLundPlot([X.flatten(0,1).numpy(),generated_seq.flatten(0,1).numpy(),pred.flatten(0,1).numpy()])
+      quickLundPlot([original.numpy(),generated.numpy()])
