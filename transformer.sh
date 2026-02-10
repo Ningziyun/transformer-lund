@@ -8,4 +8,5 @@
 #SBATCH --mail-user=ning_yan@brown.edu
 
 source transformer_setup.sh
+source data_setup.sh
 source transformer_run.sh
