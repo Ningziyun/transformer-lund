@@ -6,6 +6,7 @@ import ROOT
 import math
 from tqdm import tqdm
 #from argparse import ArgumentParser
+import argparse  # CLI options
 
 from helpers_train import *
 
@@ -19,7 +20,7 @@ from torchviz import make_dot
 
 import matplotlib.pyplot as plt
 
-def quickLundPlot(inputs,labels=["original","generated","predicted"]):
+def quickLundPlot(inputs, labels=["original","generated","predicted"], epoch_losses=None, out_dir=""):
 
   linestyles=["-","--","-.",":"]
 
@@ -38,11 +39,17 @@ def quickLundPlot(inputs,labels=["original","generated","predicted"]):
     fig, axs = plt.subplots(Nin,1,figsize=(8.0,8.0))
     for jj in range(Nin):
       pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[mins[0],maxs[0]],[mins[1],maxs[1]]],bins=[20,20],cmap="Blues", norm="log")
+      axs[jj].set_title(labels[jj])          # jj=0 -> original, jj=1 -> generated
+      axs[jj].set_ylabel("log(kt)")
+      if jj == Nin - 1:
+        axs[jj].set_xlabel("log(1/deltaR)")
+      else:
+        axs[jj].set_xlabel("")
     fig.colorbar(pos[3],ax=axs)
 
     name="lund"
-    fig.savefig(name+".png")
-    fig.savefig(name+".pdf")
+    fig.savefig(os.path.join(out_dir, name+".png"))
+    fig.savefig(os.path.join(out_dir, name+".pdf"))
     plt.close(fig)
 
   #1D plots
@@ -51,12 +58,31 @@ def quickLundPlot(inputs,labels=["original","generated","predicted"]):
   for ii in range(Ndim):
     for jj in range(Nin):
       axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
+      axs[jj].set_title(labels[jj])          # jj=0 -> original, jj=1 -> generated
+      axs[jj].set_ylabel("log(kt)")
+      if jj == Nin - 1:
+        axs[jj].set_xlabel("log(1/deltaR)")
+      else:
+        axs[jj].set_xlabel("")
     if ii==0: axs[0].legend()
 
   name="projection"
-  fig.savefig(name+".png")
-  fig.savefig(name+".pdf")
+  fig.savefig(os.path.join(out_dir, name+".png"))
+  fig.savefig(os.path.join(out_dir, name+".pdf"))
   plt.close(fig)
+
+  #loss vs epoch plot if provided (Optional) 
+  if epoch_losses is not None and len(epoch_losses) > 0:
+    fig = plt.figure(figsize=(6.0, 4.0))
+    plt.plot(range(1, len(epoch_losses) + 1), epoch_losses, marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Loss vs Epoch")
+    plt.grid(True)
+    fig.savefig(os.path.join(out_dir, "loss_vs_epoch.png"))
+    fig.savefig(os.path.join(out_dir, "loss_vs_epoch.pdf"))
+    plt.close(fig)
+
 
 class input_dataset(torch.utils.data.Dataset):
   def __init__(self, file_path, NConstituents=7, add_stop=False, standardize=False):
@@ -100,10 +126,10 @@ class input_dataset(torch.utils.data.Dataset):
   def __len__(self):
     return len(self.DR)
 
-def get_loaders(batch_size=256, num_workers=1, shuffle=True,):
-  train_dataset = input_dataset("inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5")
+def get_loaders(train_file, val_file, batch_size=256, num_workers=1, shuffle=True):
+  train_dataset = input_dataset(train_file)
   train_loader = DataLoader( train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
-  test_dataset = input_dataset("inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_val.h5")
+  test_dataset = input_dataset(val_file)
   test_loader = DataLoader( test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
   return train_loader,test_loader
 
@@ -187,7 +213,7 @@ class test_model(nn.Module):
 ##########################################
 class test_modelMDN(test_model):
   def __init__(self, input_dim, n_mix=25, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
-      super(test_modelMDN, self).__init__(input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128)
+      super(test_modelMDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim)  # respect CLI params
 
       self.n_mix=n_mix
 
@@ -243,7 +269,7 @@ class test_modelMDN(test_model):
       return seq
 
 
-def mdn_loss(inputs, targets):
+def mdn_loss(inputs, targets, valid_mask=None):
     
     ninputs=targets.shape[-1]
 
@@ -269,7 +295,10 @@ def mdn_loss(inputs, targets):
     log_prob = torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
-    return -log_prob.mean() #Sum over all the training sample
+    nll = -log_prob  # shape: [B, L]
+    if valid_mask is not None:
+        nll = nll[valid_mask]  # ignore padding tokens
+    return nll.mean()  # mean over valid tokens only #Sum over all the training sample
 
 ##########################################
 class test_modelQuantile(test_model):
@@ -297,13 +326,58 @@ def quantile_loss(pred, target, quantiles):
       losses.append(torch.max(q*e, (q-1)*e))
     return torch.mean(torch.stack(losses, dim=0))
 
+def parse_input():
+    """Parse_Input args. Defaults match the current hard-coded values."""
+    p = argparse.ArgumentParser(description="Train transformer/MDN on Lund data")
+
+    # data / io
+    p.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_train.h5", help="Path to training .h5")
+    p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_val.h5", help="Path to validation .h5 (unused yet)")
+    p.add_argument("--batch-size", type=int, default=256, help="Batch size")
+    p.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
+    p.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
+    p.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
+    p.add_argument("--num-features", dest="num_features", type=int, default=2,
+                   help="Feature dimension per constituent (default: 2 = [deltaR, kt])")
+    p.add_argument("--num-bins", dest="num_bins", type=int, nargs="+", default=[20, 20],
+                   help="Binning spec (unused currently; default matches plotting bins)")
+
+    # training
+    p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    p.add_argument("--patience", type=int, default=3, help="Early stopping patience")
+    p.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
+
+    # model switches
+    p.add_argument("--mdn", action="store_true", default=True, help="Use MDN head (default: True)")
+    p.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
+    p.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
+
+    # transformer hyperparams (keep defaults = your current test_model defaults)
+    p.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
+    p.add_argument("--num-heads", type=int, default=1, help="Transformer num heads")
+    p.add_argument("--num-layers", type=int, default=2, help="Transformer num layers")
+    p.add_argument("--ff-dim", type=int, default=128, help="Transformer feedforward dim")
+
+    # mdn hyperparams
+    p.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
+
+    # misc
+    p.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
+    
+    # logging / checkpointing
+    p.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
+    p.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
+    p.add_argument("--model-path", dest="model_path", type=str, default="",help="Path to model/log_dir to load when --contin is set")
+    return p.parse_args()
+
 if __name__ == "__main__":
     args = parse_input()
     save_arguments(args)
     print(f"Logging to {args.log_dir}")
     set_seeds(args.seed)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device  # use CLI device if set
     print(f"Running on device: {device}")
 
     num_features = args.num_features # Origin was 3(Step-3)
@@ -312,13 +386,14 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set")
 
-    train_loader,test_loader=get_loaders()
+    train_loader, test_loader = get_loaders(train_file=args.train_file,val_file=args.val_file,batch_size=args.batch_size,
+    num_workers=args.num_workers,shuffle=args.shuffle)
 
     X=next(iter(train_loader))
     print("Input shape,",X.shape)
 
-    doMDN=False
-    doMixedLoss=False
+    doMDN = args.mdn
+    doMixedLoss = args.mixed_loss
 
     # construct model
     if args.contin:
@@ -327,15 +402,18 @@ if __name__ == "__main__":
     else:
         #model=test_modelNN(X.shape[1],X.shape[2])
         if doMDN:
-          model=test_modelMDN(X.shape[2])
+          model = test_modelMDN(input_dim=X.shape[2],n_mix=args.n_mix,embed_dim=args.embed_dim,num_heads=args.num_heads,
+                                num_layers=args.num_layers,ff_dim=args.ff_dim,)  # use CLI model params
         else:
-          model=test_model(X.shape[2])
+          model = test_model(input_dim=X.shape[2],embed_dim=args.embed_dim,num_heads=args.num_heads,
+                             num_layers=args.num_layers,ff_dim=args.ff_dim,)  # use CLI model params
+
 
     summary(model,input_data=[X[:,:-1,:]], col_names=["input_size", "output_size", "num_params","params_percent","mult_adds","trainable"])
     print("Output shape,",model(X[:,:-1,:]).shape)
     model.to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)  # use CLI lr
 
     if not doMDN:
       loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
@@ -348,11 +426,14 @@ if __name__ == "__main__":
 
     best_loss=1e6
     patience_counter=0
-    patience=3
+    patience = args.patience  # use CLI patience
     loss_test=[]
     loss_train=[]
-    epochs=10
+    epochs = args.epochs  # use CLI epochs
+    train_epoch_losses = []  # Store average training loss per epoch
     for t in range(epochs):
+      epoch_loss_sum = 0.0   # Sum of batch losses in this epoch
+      epoch_n_batches = 0    # Number of batches accumulated
       for batch, X in enumerate(train_loader):
           X = X.to(device)
           optimizer.zero_grad()
@@ -367,6 +448,9 @@ if __name__ == "__main__":
           pred = model(inputs)       # (batch, seq_len-1, feature_dim)
           #print(inputs.shape,targets.shape,pred.shape)
 
+          # Mask out padding tokens: both deltaR and kt are -1
+          valid_mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
+
           if not doMDN:
             if doMixedLoss:
               lambd=1
@@ -378,10 +462,10 @@ if __name__ == "__main__":
             #mask = torch.ones(inputs.shape,device=device,dtype=torch.bool) #mask and loss dimension [Nbatch,NConst,Nfeatures]
             #mask = inputs[:,:,0]>-1
             #loss = loss[mask].mean()
-            loss=loss.mean()
+            loss = loss[valid_mask].mean()  # ignore padding in loss
           else:
-            loss = loss_fn(pred, targets)
-            loss=loss.mean()
+            loss = loss_fn(pred, targets, valid_mask=valid_mask)  # ignore padding in loss
+            loss = loss.mean()
 
           #FIXME quantile regression
           #quantiles = [0.1, 0.5, 0.9]
@@ -393,6 +477,10 @@ if __name__ == "__main__":
           #loss = loss_fn(pred[:, -1, :], targets[:, -1, :]) #last element loss
           #loss = loss_fn(pred, targets[:, -1, :])
           #loss = loss_fn(pred[:,:,0],targets[:,:,0]) #only first feature regression
+          
+          # Accumulate batch loss to compute epoch-average loss
+          epoch_loss_sum += loss.item()
+          epoch_n_batches += 1
 
           loss.backward()
           optimizer.step()
@@ -404,6 +492,11 @@ if __name__ == "__main__":
         pred[:,:,-1]=sigmoid(pred[:,:,-1])
 
       print(f"epoch: {t} loss={loss.item()}")
+
+      # Save epoch-average loss for plotting only (keep original training logic unchanged)
+      epoch_avg_loss = epoch_loss_sum / max(epoch_n_batches, 1)
+      train_epoch_losses.append(epoch_avg_loss)
+
 
       #print("inputs",inputs[0])
       #print("targets",targets[0])
@@ -446,4 +539,4 @@ if __name__ == "__main__":
         original=torch.cat([original,X.flatten(0,1)])
         generated=torch.cat([generated,generated_seq.flatten(0,1)])
 
-      quickLundPlot([original.numpy(),generated.numpy()])
+      quickLundPlot([original.numpy(),generated.numpy()],epoch_losses=train_epoch_losses,out_dir=args.log_dir)
