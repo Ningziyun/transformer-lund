@@ -15,18 +15,18 @@ def evaluate_loss(model,X,args):
 
   if args.mdn:
     loss = loss_fn(pred, targets, mask=mask)
-    loss=loss.mean()
+    loss=loss.sum()
   else:
     if args.mixed_loss:
       lambd=1
       #print(loss_fn(pred[:,:,:-1],targets[:,:,:-1]).shape,loss_fn2(pred[:,:,-1],targets[:,:,-1]).shape)
-      loss= loss_fn(pred[:,:,:-1],targets[:,:,:-1]).mean(dim=-1)+lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1]) #mixed loss
+      loss= loss_fn(pred[:,:,:-1],targets[:,:,:-1]).sum(dim=-1)+lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1]) #mixed loss
     else:
       loss = loss_fn(pred, targets) #whole loss
     if mask==None:
-      loss=loss.mean()
+      loss=loss.sum()
     else:
-      loss=loss[mask].mean() 
+      loss=loss[mask].sum() 
 
   return loss
 
@@ -39,6 +39,8 @@ def train(model,train_loader,args):
 
       loss.backward()
       optimizer.step()
+
+      loss=loss/X.shape[0] #average the loss
 
       if batch % 100 == 0:
         print(f"batch: {batch} loss:{loss.item()}")
@@ -57,19 +59,19 @@ def test(model,test_loader,args):
 
       epochloss+=loss.item()
 
-    epochloss/=num_samples
+    epochloss/=num_samples #average loss across whole epoch
     print(f"test loss ={epochloss}")
     loss_test.append(epochloss)
 
 def validate(model,test_loader,input_shape,args):
   with torch.no_grad():
-      original=torch.empty([0,input_shape[-1]])
-      generated=torch.empty([0,input_shape[-1]])
-      predicted=torch.empty([0,input_shape[-1]])
+      original=torch.empty([0,input_shape[-2],input_shape[-1]]) #[Ninput,Nconst,dimension]
+      generated=torch.empty([0,input_shape[-2],input_shape[-1]])
+      predicted=torch.empty([0,input_shape[-2],input_shape[-1]])
 
       device="cpu"
       for batch, X in enumerate(train_loader):
-        if batch>10: break
+        if batch>=10: break
         X = X.to(device)
         start=X[:,0,:].unsqueeze(1)
         model.to(device)
@@ -87,13 +89,19 @@ def validate(model,test_loader,input_shape,args):
           print("Generate example")
           print(generated_seq[0])
 
-        original=torch.cat([original,X.flatten(0,1)])
-        generated=torch.cat([generated,generated_seq.flatten(0,1)])
+        original=torch.cat([original, X])
+        generated=torch.cat([generated,generated_seq])
 
-      projection_plot([original.numpy(),generated.numpy()])
+      projection_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()])
 
       if args.input_format=="ktdr":
-        lund_plot([original.numpy(),generated.numpy()])
+        lund_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()])
+      else:
+        #original=original[:5,:,:]
+        #generated=generated[:5,:,:]
+        lund_original=make_lundplane(original.numpy())
+        lund_generated=make_lundplane(generated.numpy())
+        lund_plot([lund_original.reshape(-1, lund_original.shape[-1]),lund_generated.reshape(-1, lund_generated.shape[-1])])
 
 if __name__ == "__main__":
     args = parse_input()

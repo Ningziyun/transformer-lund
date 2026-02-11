@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
 
+import fastjet
+import ljpHelpers
+import gc
+
 import torch
 from torchinfo import summary
 from torch import nn
@@ -419,6 +423,52 @@ def set_seeds(seed):
     np.random.seed(seed)
 
 
+def make_lundplane(input_vec, pad_length=15):
+  #Asssume input is dimensions [Nevents, Nconstituents, 4-vecs]
+  jetDef10 = fastjet.JetDefinition(fastjet.antikt_algorithm, 1.0, fastjet.E_scheme)
+  #jetDefCA = fastjet.JetDefinition1Param(fastjet.cambridge_algorithm, 10.0)
+
+  lund_plane=[]
+  for ii in range(input_vec.shape[0]):
+
+    # Convert the constituent information into a format usable for fastjet (PseudoJet objects)
+    constituents = []
+    for jj in range(input_vec.shape[1]):
+      constituents.append(fastjet.PseudoJet(float(input_vec[ii,jj,1]), float(input_vec[ii,jj,2]), float(input_vec[ii,jj,3]),float(input_vec[ii,jj,0])))
+
+    # Run the jet clustering on the jet constituents using the anti-kt algorithm
+    cs_akt = fastjet.ClusterSequence(constituents, jetDef10)
+    inclusiveJets10 = fastjet.sorted_by_pt(cs_akt.inclusive_jets(25.))
+
+    # Skip if inclusiveJets10 is empty
+    if not inclusiveJets10: continue
+
+    # Get Lund plane declusterings
+    lundPlane = ljpHelpers.jet_declusterings(inclusiveJets10[0])
+    lp_points=[]
+    for kk in range(len(lundPlane)):
+      if (lundPlane[kk].delta_R > 0 and lundPlane[kk].z > 0):
+        dr_val = math.log(1.0 / lundPlane[kk].delta_R)
+        kt_val = math.log(lundPlane[kk].kt)
+        lp_points.append([dr_val,kt_val])
+
+    # Free C++ memory
+    constituents.clear()
+    del cs_akt
+    del inclusiveJets10
+    del lundPlane
+
+    #push back and clean-up
+    while len(lp_points)<pad_length:
+      lp_points.append([-1,-1])
+    lund_plane.append(lp_points[:pad_length].copy())
+    lp_points.clear()
+
+  #pad the length
+  lund_plane=np.asarray(lund_plane)
+  return lund_plane
+
+
 def projection_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots/"):
 
   if not os.path.exists(outdir):
@@ -440,10 +490,10 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
   fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
   if Ndim==1: axs=[axs]
   for ii in range(Ndim):
-    axs[ii].set_yscale("log")
     for jj in range(Nin):
-      axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
+      axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
     if ii==0: axs[0].legend()
+    axs[ii].set_yscale("log")
 
   name="projection"
   fig.savefig(outdir+name+".png")
@@ -466,6 +516,9 @@ def lund_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots
     for jj in range(Nin):
       mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
       maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
+
+  mins[1]=-3
+  maxs[0]=8
 
   #Make plot
   if Ndim>=2:
