@@ -33,22 +33,17 @@ To process the input root after download the Input Files:
 ```
 source data_setup.sh
 ```
-This calls the scripts `discretize.sh` (which is a wrapper around `preprocess.py`), `addEnergy.py` and `lunddata.py` in sequence
+This calls the scripts `discretize.sh` (which is a wrapper around `preprocess.py`), `addEnergy.py`, `lunddata.py`, `lund_select.py`, and `discretize_auto.py` in sequence
 
 `preprocess.py` runs the original paper pt/eta discretization and outputs to a /discretized directory of the original, and outputs a root tree of pt/eta/phi to `./originalJets_*.root`
 
 
-Use --logMode for lunddata.py in data_setup.sh to output in log(1/deltaR) and log(kt) format, and remove --logMode to produce deltaR and kt. Overwites the `originalJets_*.root`
+Use --logMode for `lunddata.py` in `data_setup.sh` to output in log(1/deltaR) and log(kt) format, and remove --logMode to produce deltaR and kt. Add --swapAxes to switch the tree order of root file from deltaR and kt. Overwites the `originalJets_*.root`
 ```
 python lunddata.py --logMode
 ```
 
-Add --swapAxes for lunddata.py to switch the tree order of root file from deltaR and kt to kt and deltaR. Reads `originalJets_qcd.root` and outputs `inputFiles/qcd_lund.root`
-```
-python lunddata.py --swapAxes
-```
-
-Use lund_select.py to cut the output. --xmim --xmax is the cut on kt, --ymin --ymax is the cut on deltaR. Reads `inputFiles/qcd_lund.root` and outputs `inputFiles/qcd_lund_cut.root` 
+Use `lund_select.py` to cut the output. --xmim --xmax is the cut on kt, --ymin --ymax is the cut on deltaR. Reads `inputFiles/qcd_lund.root` and outputs `inputFiles/qcd_lund_cut.root` 
 ```
 python lund_select.py --in inputFiles/qcd_lund.root --out inputFiles/qcd_lund_cut.root --mode cut --xmin 0 --xmax 8 --ymin -1 --ymax 8 --mode swap
 ```
