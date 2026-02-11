@@ -7,7 +7,7 @@ import math
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
-from argparse import ArgumentParser
+import argparse
 
 import torch
 from torchinfo import summary
@@ -199,7 +199,7 @@ class model_transformer(nn.Module):
 
 class model_transformer_MDN(model_transformer):
   def __init__(self, input_dim, n_mix=25, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
-      super(model_transformer_MDN, self).__init__(input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128)
+      super(model_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim)
 
       self.n_mix=n_mix
 
@@ -238,11 +238,6 @@ class model_transformer_MDN(model_transformer):
           mu=pred[:,-1,:, 1:ninputs+1] #[Nbatch,Nmix,Ninput]
           sig2=pred[:,-1,:, ninputs+1:] #[Nbatch,Nmix,Ninput]
 
-          if ii==0:
-            print("alpha",alpha[0])
-            print("mu",mu[0])
-            print("sig2",sig2[0])
-
           # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
           comp = torch.multinomial(alpha, 1).squeeze(-1)  # (B,)
 
@@ -254,7 +249,7 @@ class model_transformer_MDN(model_transformer):
           seq = torch.cat([seq, next_pred], dim=1) #append it
       return seq
 
-def mdn_loss(inputs, targets):
+def mdn_loss(inputs, targets, mask=None):
 
     ninputs=targets.shape[-1]
 
@@ -280,7 +275,10 @@ def mdn_loss(inputs, targets):
     log_prob = torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
-    return -log_prob.mean() #Sum over all the training sample
+    if mask is not None:
+      return -log_prob[mask].mean()  # mean over valid tokens only
+    else:
+      return -log_prob.mean() #Sum over all the training sample
 
 class model_transformer_quantile(model_transformer):
   def __init__(self, input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
@@ -360,123 +358,46 @@ def load_model(model_path):
     return model
 
 def parse_input():
-    parser = ArgumentParser()
-    parser.add_argument(
-        "--log_dir", type=str, default="models/test", help="Model directory"
-    )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="inputFiles/top_benchmark/train_qcd_30_bins.h5",
-        help="Path to training data file",
-    )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default=None,
-        help="Model file to load",
-    )
-    parser.add_argument(
-        "--sample_file",
-        type=str,
-        default=None,
-        help="Path to file for sampling. If none given, sample from model",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=0, help="the random seed for torch and numpy"
-    )
-    parser.add_argument(
-        "--logging_steps", type=int, default=10, help="Training steps between logging"
-    )
-    parser.add_argument(
-        "--checkpoint_steps",
-        type=int,
-        default=5000,
-        help="Training steps between saving checkpoints",
-    )
-    parser.add_argument("--num_workers", type=int, default=4, help="Number of workers")
+    """Parse_Input args. Defaults match the current hard-coded values."""
+    p = argparse.ArgumentParser(description="Train transformer/MDN on Lund data")
 
-    parser.add_argument(
-        "--num_const", type=int, default=100, help="Number of constituents"
-    )
-    parser.add_argument(
-        "--limit_const",
-        action="store_true",
-        help="Only use jets with at least num_const constituents",
-    )
-    parser.add_argument(
-        "--num_events", type=int, default=-1, help="Number of events for training"
-    )
-    parser.add_argument(
-        "--start_token",
-        action="store_true",
-        help="Whether to use a start particle (learn first particle as well)",
-    )
-    parser.add_argument(
-        "--end_token",
-        action="store_true",
-        help="Whether to use a end particle (learn jet length as well)",
-    )
-    parser.add_argument(
-        "--contin", action="store_true", help="Whether to continue training"
-    )
-    parser.add_argument(
-        "--global_step", type=int, default=0, help="Starting point of step counter"
-    )
-    parser.add_argument(
-        "--reverse", action="store_true", help="Whether to reverse pt order"
-    )
+    # data / io
+    p.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_train.h5", help="Path to training .h5")
+    p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_val.h5", help="Path to validation .h5 (unused yet)")
+    p.add_argument("--batch-size", type=int, default=256, help="Batch size")
+    p.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
+    p.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
+    p.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
+    p.add_argument("--input_format", type=str, choices=["ktdr","4vec"], help="What format of inputs we are using")
 
-    parser.add_argument("--num_epochs", type=int, default=3, help="Number of epochs")
-    parser.add_argument("--batch_size", type=int, default=100, help="Batch size")
-    parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
-    parser.add_argument(
-        "--lr_decay", type=float, default=0.01, help="learning rate decay (linear)"
-    )
-    parser.add_argument(
-        "--weight_decay", type=float, default=0.00001, help="weight decay"
-    )
-    parser.add_argument(
-        "--scheduler",
-        type=str,
-        default="cos",
-        choices=["cos", "lin", "exp"],
-        help="Type of learning rate scheduler to use (cos, lin, exp)."
-    )
-    parser.add_argument(
-        "--hidden_dim", type=int, default=256, help="Hidden dim of the model"
-    )
-    parser.add_argument(
-        "--num_layers", type=int, default=8, help="Number of transformer layers"
-    )
-    parser.add_argument(
-        "--num_heads", type=int, default=4, help="Number of attention heads"
-    )
-    parser.add_argument("--dropout", type=float, default=0.1, help="dropout rate")
-    parser.add_argument(
-        "--early_stop",
-        action="store_true",
-        help="Enable early stopping based on validation loss."
-    )
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=5,
-        help="Number of epochs with no sufficient improvement before stopping."
-    )
-    parser.add_argument(
-        "--min_delta",
-        type=float,
-        default=0.0,
-        help="Minimum absolute improvement in validation loss to reset patience."
-    )
+    # training
+    p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    p.add_argument("--patience", type=int, default=3, help="Early stopping patience")
+    p.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
 
-    parser.add_argument("--doMDN", action="store_true", help="Run Mixture Density Network Variant")
-    parser.add_argument("--doMixedLoss", action="store_true", help="Use a mixed loss")
-    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec"], help="What format of inputs we are using")
+    # model switches
+    p.add_argument("--mdn", action="store_true", default=True, help="Use MDN head (default: True)")
+    p.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
+    p.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
 
-    args = parser.parse_args()
-    return args
+    # transformer hyperparams (keep defaults = your current test_model defaults)
+    p.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
+    p.add_argument("--num-heads", type=int, default=1, help="Transformer num heads")
+    p.add_argument("--num-layers", type=int, default=2, help="Transformer num layers")
+    p.add_argument("--ff-dim", type=int, default=128, help="Transformer feedforward dim")
+
+    # mdn hyperparams
+    p.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
+
+    # misc
+    p.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
+
+    # logging / checkpointing
+    p.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
+    p.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
+    p.add_argument("--model-path", dest="model_path", type=str, default="",help="Path to model/log_dir to load when --contin is set")
+    return p.parse_args()
 
 def save_arguments(args):
     tmp = args.log_dir
@@ -519,6 +440,7 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
   fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
   if Ndim==1: axs=[axs]
   for ii in range(Ndim):
+    axs[ii].set_yscale("log")
     for jj in range(Nin):
       axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
     if ii==0: axs[0].legend()
@@ -556,6 +478,25 @@ def lund_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots
     fig.savefig(outdir+name+".png")
     fig.savefig(outdir+name+".pdf")
     plt.close(fig)
+
+def loss_plot(loss_train,loss_test,outdir="./Plots/"):
+
+  if not os.path.exists(outdir):
+    os.makedirs(outdir)
+
+  epochs=range(1, len(loss_train) + 1)
+
+  fig,ax = plt.subplots(figsize=(6.0, 4.0))
+  ax.plot(epochs, loss_train, marker="o", label="Train")
+  ax.plot(epochs, loss_test , marker="o", label="Test")
+  ax.legend()
+  ax.set_xlabel("Epoch")
+  ax.set_ylabel("Loss")
+  ax.set_yscale("log")
+  ax.grid(True)
+  fig.savefig(outdir+"loss_vs_epoch.png")
+  fig.savefig(outdir+"loss_vs_epoch.pdf")
+  plt.close(fig)
 
 if __name__ == "__main__":
     pass

@@ -7,23 +7,26 @@ def evaluate_loss(model,X,args):
   targets = X[:, 1:, :]   # all but first
   pred = model(inputs)       # (batch, seq_len-1, feature_dim)
 
-  #if args.doMixedLoss:
+  #if args.mixed_loss:
   #  pred[:,:,-1]=sigmoid(pred[:,:,-1])
 
-  if args.doMDN:
-    loss = loss_fn(pred, targets)
+  #mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
+  mask=None
+
+  if args.mdn:
+    loss = loss_fn(pred, targets, mask=mask)
     loss=loss.mean()
   else:
-    if args.doMixedLoss:
+    if args.mixed_loss:
       lambd=1
       #print(loss_fn(pred[:,:,:-1],targets[:,:,:-1]).shape,loss_fn2(pred[:,:,-1],targets[:,:,-1]).shape)
       loss= loss_fn(pred[:,:,:-1],targets[:,:,:-1]).mean(dim=-1)+lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1]) #mixed loss
     else:
       loss = loss_fn(pred, targets) #whole loss
-    #mask = torch.ones(inputs.shape,device=device,dtype=torch.bool) #mask and loss dimension [Nbatch,NConst,Nfeatures]
-    #mask = inputs[:,:,0]>-1
-    #loss = loss[mask].mean()
-    loss=loss.mean()
+    if mask==None:
+      loss=loss.mean()
+    else:
+      loss=loss[mask].mean() 
 
   return loss
 
@@ -63,6 +66,7 @@ def validate(model,test_loader,input_shape,args):
       original=torch.empty([0,input_shape[-1]])
       generated=torch.empty([0,input_shape[-1]])
       predicted=torch.empty([0,input_shape[-1]])
+
       device="cpu"
       for batch, X in enumerate(train_loader):
         if batch>10: break
@@ -72,7 +76,7 @@ def validate(model,test_loader,input_shape,args):
         pred= model(X)
         generated_seq = model.generate(start, steps=X.shape[1]-1)
 
-        if args.doMixedLoss:
+        if args.mixed_loss:
           pred[:,:,-1]=sigmoid(pred[:,:,-1])
           generated_seq[:,:,-1]=sigmoid(generated_seq[:,:,-1])
           generated_seq[:,0,-1]=X[:,0,-1]
@@ -87,7 +91,9 @@ def validate(model,test_loader,input_shape,args):
         generated=torch.cat([generated,generated_seq.flatten(0,1)])
 
       projection_plot([original.numpy(),generated.numpy()])
-      lund_plot([original.numpy(),generated.numpy()])
+
+      if args.input_format=="ktdr":
+        lund_plot([original.numpy(),generated.numpy()])
 
 if __name__ == "__main__":
     args = parse_input()
@@ -95,12 +101,13 @@ if __name__ == "__main__":
     save_arguments(args)
     set_seeds(args.seed)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device  # use CLI device if set
     print(f"Running on device: {device}")
 
     # load and preprocess data
     print(f"Loading training set")
-    train_loader,test_loader=get_loaders(args.input_format)
+    #train_loader,test_loader=get_loaders(train_file=args.train_file,val_file=args.val_file,batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
+    train_loader,test_loader=get_loaders(args.input_format,batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
     X_example=next(iter(train_loader))
     print("Input shape,",X_example.shape)
 
@@ -109,18 +116,20 @@ if __name__ == "__main__":
         model = load_model(log_dir=args.model_path)
         print("Loaded model")
     else:
-        if args.doMDN:
-          model=model_transformer_MDN(X_example.shape[2])
+        if args.mdn:
+          model=model_transformer_MDN(input_dim=X_example.shape[2],n_mix=args.n_mix,embed_dim=args.embed_dim,num_heads=args.num_heads,
+                                num_layers=args.num_layers,ff_dim=args.ff_dim,)
         else:
-          model=model_transformer(X_example.shape[2])
+          model=model_transformer(input_dim=X_example.shape[2],embed_dim=args.embed_dim,num_heads=args.num_heads,
+                             num_layers=args.num_layers,ff_dim=args.ff_dim,)
           #model=model_DNN(X.shape[1],X_example.shape[2])
 
     #Set the loss
-    if args.doMDN:
+    if args.mdn:
       loss_fn=mdn_loss
-    if not args.doMDN:
+    if not args.mdn:
       loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
-      if args.doMixedLoss:
+      if args.mixed_loss:
         #loss_fn2 = nn.CrossEntropyLoss() #expects logits
         loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
         sigmoid=nn.Sigmoid()
@@ -131,15 +140,15 @@ if __name__ == "__main__":
     model.to(device)
 
     #Set the optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     #Run the training loop
     best_loss=1e6
     patience_counter=0
-    patience=3
+    patience=args.patience
     loss_test=[]
     loss_train=[]
-    epochs=1
+    epochs=args.epochs 
     for t in range(epochs):
       print(f"\nEpoch {t+1}\n-------------------------------")
       starttime=time.time()
@@ -156,4 +165,6 @@ if __name__ == "__main__":
           print("Early stoping")
           break
 
+    loss_plot(loss_train,loss_test)
     validate(model,test_loader,X_example.shape,args)
+
