@@ -10,10 +10,13 @@ def evaluate_loss(model,X,args):
   #if args.mixed_loss:
   #  pred[:,:,-1]=sigmoid(pred[:,:,-1])
 
-  #mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
-  mask=None
-
-  if args.mdn:
+  mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
+  #mask=None
+  
+  # CNF mode: likelihood-based loss
+  if args.cnf:
+    loss = model.nll(inputs, targets, mask=mask)
+  elif args.mdn:
     loss = loss_fn(pred, targets, mask=mask)
     loss=loss.sum()
   else:
@@ -48,18 +51,31 @@ def train(model,train_loader,args):
   print(f"train loss={loss.item()}")
   loss_train.append(loss.item())
 
-def test(model,test_loader,args):
-  with torch.no_grad():
+def test(model, test_loader, args):
+  model.eval()  # disable dropout for evaluation
+  # CNF needs autograd w.r.t. x to estimate divergence; do NOT use torch.no_grad() here.
+  if args.cnf:
     num_samples = len(test_loader.dataset)
-    epochloss=0
+    epochloss = 0.0
     for batch, X in enumerate(test_loader):
       X = X.to(device)
+      loss = evaluate_loss(model, X, args)
+      epochloss += loss.item()
+    epochloss /= num_samples
+    print(f"test loss ={epochloss}")
+    loss_test.append(epochloss)
+    return
 
-      loss=evaluate_loss(model, X, args)
+  # Non-CNF models can safely disable grads during evaluation
+  with torch.no_grad():
+    num_samples = len(test_loader.dataset)
+    epochloss = 0.0
+    for batch, X in enumerate(test_loader):
+      X = X.to(device)
+      loss = evaluate_loss(model, X, args)
+      epochloss += loss.item()
 
-      epochloss+=loss.item()
-
-    epochloss/=num_samples #average loss across whole epoch
+    epochloss /= num_samples # average loss across whole epoch
     print(f"test loss ={epochloss}")
     loss_test.append(epochloss)
 
@@ -92,16 +108,16 @@ def validate(model,test_loader,input_shape,args):
         original=torch.cat([original, X])
         generated=torch.cat([generated,generated_seq])
 
-      projection_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()])
+      projection_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()],outdir=args.log_dir)
 
       if args.input_format=="ktdr":
-        lund_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()])
+        lund_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()],outdir=args.log_dir)
       else:
         #original=original[:5,:,:]
         #generated=generated[:5,:,:]
         lund_original=make_lundplane(original.numpy())
         lund_generated=make_lundplane(generated.numpy())
-        lund_plot([lund_original.reshape(-1, lund_original.shape[-1]),lund_generated.reshape(-1, lund_generated.shape[-1])])
+        lund_plot([lund_original.reshape(-1, lund_original.shape[-1]),lund_generated.reshape(-1, lund_generated.shape[-1])],outdir=args.log_dir)
 
 if __name__ == "__main__":
     args = parse_input()
@@ -115,16 +131,20 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set")
     #train_loader,test_loader=get_loaders(train_file=args.train_file,val_file=args.val_file,batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
-    train_loader,test_loader=get_loaders(args.input_format,batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
+    train_loader,test_loader=get_loaders(args.input_format,train_file=args.train_file,val_file=args.val_file,
+    batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
     X_example=next(iter(train_loader))
     print("Input shape,",X_example.shape)
 
     # construct model
     if args.contin:
-        model = load_model(log_dir=args.model_path)
+        model = load_model(model_path=args.model_path)
         print("Loaded model")
     else:
-        if args.mdn:
+        if args.cnf:
+            model = model_transformer_CNF(input_dim=X_example.shape[2],embed_dim=args.embed_dim,num_heads=args.num_heads,
+                                num_layers=args.num_layers,ff_dim=args.ff_dim,cnf_hidden=args.cnf_hidden,cnf_steps=args.cnf_steps,)
+        elif args.mdn:
           model=model_transformer_MDN(input_dim=X_example.shape[2],n_mix=args.n_mix,embed_dim=args.embed_dim,num_heads=args.num_heads,
                                 num_layers=args.num_layers,ff_dim=args.ff_dim,)
         else:
@@ -133,9 +153,11 @@ if __name__ == "__main__":
           #model=model_DNN(X.shape[1],X_example.shape[2])
 
     #Set the loss
-    if args.mdn:
+    if args.cnf:
+      loss_fn = None  # CNF uses model.nll(...)
+    elif args.mdn:
       loss_fn=mdn_loss
-    if not args.mdn:
+    if not args.mdn and not args.cnf:
       loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
       if args.mixed_loss:
         #loss_fn2 = nn.CrossEntropyLoss() #expects logits
@@ -143,8 +165,13 @@ if __name__ == "__main__":
         sigmoid=nn.Sigmoid()
 
     #Plot the model summary
-    summary(model,input_data=[X_example[:,:-1,:]], col_names=["input_size", "output_size", "num_params","params_percent","mult_adds","trainable"])
-    print("Output shape,",model(X_example[:,:-1,:]).shape)
+    if not args.cnf:
+      summary(model, input_data=[X_example[:,:-1,:]], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(X_example[:,:-1,:]).shape)
+    else:
+      # Skip torchinfo for CNF to avoid autograd-mode issues.
+      n_params = sum(p.numel() for p in model.parameters())
+      print(f"Model params: {n_params}")
     model.to(device)
 
     #Set the optimizer
@@ -161,7 +188,7 @@ if __name__ == "__main__":
       print(f"\nEpoch {t+1}\n-------------------------------")
       starttime=time.time()
       train(model,train_loader,args)
-      test(model,train_loader,args)
+      test(model,test_loader,args)
       print("Took %.2f minutes to run"%((time.time()-starttime)/60))
   
       if loss_train[-1]<best_loss:
@@ -173,6 +200,5 @@ if __name__ == "__main__":
           print("Early stoping")
           break
 
-    loss_plot(loss_train,loss_test)
+    loss_plot(loss_train,loss_test,outdir=args.log_dir)
     validate(model,test_loader,X_example.shape,args)
-
