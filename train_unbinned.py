@@ -41,7 +41,8 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"], epoch_los
   if Ndim>=2:
     fig, axs = plt.subplots(Nin,1,figsize=(8.0,8.0))
     for jj in range(Nin):
-      pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[mins[0],maxs[0]],[mins[1],maxs[1]]],bins=[20,20],cmap="Blues", norm="log")
+      #pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[mins[0],maxs[0]],[mins[1],maxs[1]]],bins=[20,20],cmap="Blues", norm="log")
+      pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[-2,6],[-3,6]],bins=[20,20],cmap="Blues", norm="log")
       axs[jj].set_title(labels[jj])          # jj=0 -> original, jj=1 -> generated
       axs[jj].set_ylabel("log(kt)")
       if jj == Nin - 1:
@@ -60,11 +61,13 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"], epoch_los
   if Ndim==1: axs=[axs]
   for ii in range(Ndim):
     for jj in range(Nin):
-      axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
+      #axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
+      axs[ii].hist(inputs[jj][:,ii],bins=20,range=[-3,7],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
       axs[jj].set_title(labels[jj])          # jj=0 -> original, jj=1 -> generated
-      axs[jj].set_ylabel("log(kt)")
+      axs[jj].set_ylabel("Density")
+      axs[ii].set_ylim(0.0, 0.5)
       if jj == Nin - 1:
-        axs[jj].set_xlabel("log(1/deltaR)")
+        axs[jj].set_xlabel("log(value)")
       else:
         axs[jj].set_xlabel("")
     if ii==0: axs[0].legend()
@@ -493,8 +496,8 @@ def parse_input():
     p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_val.h5", help="Path to validation .h5 (unused yet)")
     p.add_argument("--batch-size", type=int, default=256, help="Batch size")
     p.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
-    p.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
-    p.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
+    p.add_argument("--shuffle", action="store_true", default=False, help="Shuffle training loader (default: True)")
+    #p.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     p.add_argument("--num-features", dest="num_features", type=int, default=2,
                    help="Feature dimension per constituent (default: 2 = [deltaR, kt])")
     p.add_argument("--num-bins", dest="num_bins", type=int, nargs="+", default=[20, 20],
@@ -641,7 +644,8 @@ if __name__ == "__main__":
           targets = X[:, 1:, :]
 
           # Mask out padding tokens: both deltaR and kt are -1
-          valid_mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))
+          #valid_mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))
+          valid_mask = None
 
           if doCNF:
             context = model(inputs)  # (B, L, C)
