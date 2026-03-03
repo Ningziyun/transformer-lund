@@ -164,7 +164,6 @@ def discretize_data(
         cols = [item for sublist in zip(es, px, py, pz) for item in sublist]
         print(input_file) 
         #print(pd.read_hdf(input_file))
-
         df = pd.read_hdf(
             input_file,
             key="table",
@@ -176,7 +175,52 @@ def discretize_data(
         data = data.reshape((-1, 200, 4))
 
         return data
+    def calculate_features(momenta):
+        """
+        Compute (pT, d_eta, d_phi) for each constituent.
 
+        This version is numerically safe:
+        - Avoid division-by-zero / log of non-positive values in eta
+        - Replace any NaN/inf with 0 so downstream steps stay stable
+        - Treat invalid constituents as padding (pt=0, angles=0)
+        """
+        def safe_eta(p, pz, eps=1e-12):
+            denom = p - pz
+            numer = p + pz
+            out = np.zeros_like(p, dtype=np.float64)
+
+            valid = (np.abs(denom) > eps) & (numer > 0) & (denom > 0) \
+                    & np.isfinite(p) & np.isfinite(pz)
+            out[valid] = 0.5 * np.log(numer[valid] / denom[valid])
+            return out
+
+        jets = data.sum(1)
+        jets_p   = np.sqrt(np.square(jets[:, 1:]).sum(1))
+        jets_phi = np.arctan2(jets[:, 2], jets[:, 1])
+        jets_eta = safe_eta(jets_p, jets[:, 3])
+
+        const_p   = np.sqrt(np.square(momenta[:, :, 1:]).sum(2))
+        const_pt  = np.sqrt(np.square(momenta[:, :, 1:3]).sum(2))
+        const_phi = np.arctan2(momenta[:, :, 2], momenta[:, :, 1])
+        const_eta = safe_eta(const_p, momenta[:, :, 3])
+
+        d_eta = const_eta - jets_eta[..., np.newaxis]
+        d_phi = const_phi - jets_phi[..., np.newaxis]
+        d_phi = (d_phi + np.pi) % (2 * np.pi) - np.pi
+
+        # Mark invalid constituents as padding
+        valid_const = (const_pt > 0) & np.isfinite(const_pt) & np.isfinite(d_eta) & np.isfinite(d_phi)
+        const_pt = np.where(valid_const, const_pt, 0.0)
+        d_eta    = np.where(valid_const, d_eta, 0.0)
+        d_phi    = np.where(valid_const, d_phi, 0.0)
+
+        # Final safety: remove any remaining NaN/inf
+        const_pt = np.nan_to_num(const_pt, nan=0.0, posinf=0.0, neginf=0.0)
+        d_eta    = np.nan_to_num(d_eta,    nan=0.0, posinf=0.0, neginf=0.0)
+        d_phi    = np.nan_to_num(d_phi,    nan=0.0, posinf=0.0, neginf=0.0)
+
+        return const_pt, d_eta, d_phi
+    '''
     def calculate_features(momenta):
         jets = data.sum(1)
         jets_p = np.sqrt(np.square(jets[:, 1:]).sum(1))
@@ -199,11 +243,199 @@ def discretize_data(
         d_phi[const_pt == 0] = 0
 
         return const_pt, d_eta, d_phi
+    '''
 
     def check_pt_oredering(pts):
         for i in range(len(pts)):
             assert np.all(pts[i, :-1] >= pts[i, 1:]), "Data not sorted in pT"
 
+    def dedup_within_event(const_pt, d_eta, d_phi,
+                        deta_tol=1e-3, dphi_tol=1e-3):
+        """
+        Deduplicate near-identical constituents within each event.
+
+        Key idea:
+        - The Lund-plane pathology (very large log(1/dR) and very negative log(kt))
+        often comes from merges with dR ~ 0.
+        - Two constituents can have (almost) identical direction but different pt.
+        If the dedup key includes log(pt), those will NOT be removed and can
+        still generate dR~0 merges downstream.
+        - Here we deduplicate by (d_eta, d_phi) only, and MERGE pt into the first
+        occurrence instead of inserting zeros in the middle or dropping energy.
+
+        Behavior:
+        - Preserve original ordering as much as possible.
+        - Keep the first occurrence; if another constituent falls into the same
+        (d_eta, d_phi) bin, add its pt to the kept one.
+        - Pack kept constituents to the front; tail is padding (pt=0, eta=0, phi=0).
+        """
+        pt_in  = const_pt
+        eta_in = d_eta
+        phi_in = d_phi
+
+        n_ev, n_const = pt_in.shape
+
+        pt_out  = np.zeros_like(pt_in,  dtype=pt_in.dtype)
+        eta_out = np.zeros_like(eta_in, dtype=eta_in.dtype)
+        phi_out = np.zeros_like(phi_in, dtype=phi_in.dtype)
+
+        for i in range(n_ev):
+            # Map from (quantized eta, quantized phi) -> output index
+            seen_idx = {}
+            write_idx = 0
+
+            for j in range(n_const):
+                p = pt_in[i, j]
+                if p <= 0:
+                    continue  # padding / invalid
+
+                k1 = int(np.round(eta_in[i, j] / deta_tol))
+                k2 = int(np.round(phi_in[i, j] / dphi_tol))
+                key = (k1, k2)
+
+                if key in seen_idx:
+                    # Same direction bin: merge pt into the first occurrence
+                    k = seen_idx[key]
+                    pt_out[i, k] = pt_out[i, k] + p
+                    continue
+
+                # First time seeing this direction bin: keep it
+                seen_idx[key] = write_idx
+                pt_out[i, write_idx]  = p
+                eta_out[i, write_idx] = eta_in[i, j]
+                phi_out[i, write_idx] = phi_in[i, j]
+                write_idx += 1
+
+                if write_idx >= n_const:
+                    break
+
+        return pt_out, eta_out, phi_out
+
+    def sort_by_pt_desc(const_pt, d_eta, d_phi):
+        """
+        Sort constituents within each event by descending pT.
+
+        Notes:
+        - We treat pt<=0 as padding/invalid and push them to the end.
+        - Sorting must be applied consistently to (pt, d_eta, d_phi) to keep alignment.
+        """
+        pt = const_pt.copy()
+        eta = d_eta.copy()
+        phi = d_phi.copy()
+
+        # Replace non-positive pT with -inf so they go to the end after sorting
+        pt_for_sort = np.where(pt > 0, pt, -np.inf)
+
+        # argsort ascending then reverse => descending
+        idx = np.argsort(pt_for_sort, axis=1)[:, ::-1]
+
+        # Fancy indexing to reorder each row
+        row = np.arange(pt.shape[0])[:, None]
+        pt  = pt[row, idx]
+        eta = eta[row, idx]
+        phi = phi[row, idx]
+
+        return pt, eta, phi
+    
+    '''
+    def dedup_within_event(const_pt, d_eta, d_phi,
+                        logpt_tol=1e-3, deta_tol=1e-3, dphi_tol=1e-3):
+        """
+        Deduplicate near-identical constituents within each event.
+
+        IMPORTANT:
+        - Do NOT set pt=0 "in place" for duplicates, because that inserts zeros in the
+        middle of a pt-sorted sequence and breaks monotonic ordering.
+        - Instead, keep the first occurrence, then compact (pack) all kept constituents
+        to the front while preserving their original order.
+        - All dropped entries are moved to the tail and set to padding (pt=0, eta=0, phi=0).
+        """
+        pt_in  = const_pt
+        eta_in = d_eta
+        phi_in = d_phi
+
+        n_ev, n_const = pt_in.shape
+
+        # Output arrays: initialized as padding everywhere
+        pt_out  = np.zeros_like(pt_in,  dtype=pt_in.dtype)
+        eta_out = np.zeros_like(eta_in, dtype=eta_in.dtype)
+        phi_out = np.zeros_like(phi_in, dtype=phi_in.dtype)
+
+        for i in range(n_ev):
+            seen = set()
+            write_idx = 0
+
+            for j in range(n_const):
+                p = pt_in[i, j]
+                if p <= 0:
+                    # Treat non-positive pt as padding/invalid; stop early if your data guarantees padding at tail
+                    # (We do not "break" here to stay robust in case padding is not strictly at the tail.)
+                    continue
+
+                # Build a quantized key in (log(pt), deta, dphi) space
+                logp = np.log(p)
+                k0 = int(np.round(logp / logpt_tol))
+                k1 = int(np.round(eta_in[i, j] / deta_tol))
+                k2 = int(np.round(phi_in[i, j] / dphi_tol))
+                key = (k0, k1, k2)
+
+                if key in seen:
+                    # Duplicate: drop it (it will remain padding in the output tail)
+                    continue
+
+                # First occurrence: keep it and pack to the front
+                seen.add(key)
+                pt_out[i, write_idx]  = p
+                eta_out[i, write_idx] = eta_in[i, j]
+                phi_out[i, write_idx] = phi_in[i, j]
+                write_idx += 1
+
+                if write_idx >= n_const:
+                    break
+
+        return pt_out, eta_out, phi_out
+    '''
+    '''
+    def dedup_within_event(const_pt, d_eta, d_phi,
+                           logpt_tol=1e-3, deta_tol=1e-3, dphi_tol=1e-3):
+        """
+        Deduplicate near-identical constituents within each event.
+        Similarity is defined in the feature space used to compute Lund variables:
+        (log(pt), d_eta, d_phi). Keep the first occurrence, drop later duplicates.
+
+        Dropped constituents are turned into padding by setting pt=0 (and d_eta/d_phi=0).
+        This preserves array shapes (N, 200) with minimal downstream changes.
+        """
+        # Make copies to avoid surprising side effects
+        pt = const_pt.copy()
+        eta = d_eta.copy()
+        phi = d_phi.copy()
+
+        n_ev, n_const = pt.shape
+        for i in range(n_ev):
+            seen = set()
+            for j in range(n_const):
+                if pt[i, j] <= 0:
+                    continue  # padding / invalid
+
+                # Build an approximate key from the features that drive kt and deltaR
+                # Use quantization so "near-identical" maps to the same key
+                logpt = np.log(pt[i, j])
+                k0 = int(np.round(logpt / logpt_tol))
+                k1 = int(np.round(eta[i, j] / deta_tol))
+                k2 = int(np.round(phi[i, j] / dphi_tol))
+                key = (k0, k1, k2)
+
+                if key in seen:
+                    # Drop duplicates within the same event only
+                    pt[i, j] = 0.0
+                    eta[i, j] = 0.0
+                    phi[i, j] = 0.0
+                else:
+                    seen.add(key)
+
+        return pt, eta, phi
+    '''
     def get_binning():
         # If QCD training as input, get the bins
         if input_file.split("/")[-1] == "train.h5" and class_label == 0:
@@ -230,6 +462,7 @@ def discretize_data(
             print(f"\nLoaded bins with tag {tag}\n")
         return pt_bins, eta_bins, phi_bins
 
+    '''
     def discretize():
         # Get the discrete values
         const_pt_disc = np.digitize(np.log(const_pt), pt_bins).astype(np.int16)
@@ -240,6 +473,32 @@ def discretize_data(
         const_pt_disc[const_pt == 0] = -1
         d_eta_disc[const_pt == 0] = -1
         d_phi_disc[const_pt == 0] = -1
+        return const_pt_disc, d_eta_disc, d_phi_disc
+    '''
+    def discretize():
+        """
+        Discretize continuous features into integer bins.
+
+        Important:
+        - const_pt contains padding entries with pt=0.
+        - np.log(0) -> -inf, which triggers a RuntimeWarning.
+        - We avoid the warning by only taking log for pt>0 entries.
+        """
+        # Safe log(pt): only compute log where pt>0, keep 0 elsewhere
+        log_pt = np.zeros_like(const_pt, dtype=np.float64)
+        mask = const_pt > 0
+        log_pt[mask] = np.log(const_pt[mask])
+
+        # Digitize using the safe log_pt
+        const_pt_disc = np.digitize(log_pt, pt_bins).astype(np.int16)
+        d_eta_disc = np.digitize(d_eta, eta_bins).astype(np.int16)
+        d_phi_disc = np.digitize(d_phi, phi_bins).astype(np.int16)
+
+        # Apply padding mask
+        const_pt_disc[~mask] = -1
+        d_eta_disc[~mask] = -1
+        d_phi_disc[~mask] = -1
+
         return const_pt_disc, d_eta_disc, d_phi_disc
 
     def get_df(pt, eta, phi):
@@ -258,8 +517,27 @@ def discretize_data(
     data = read_input()
     print(f"Data shape: {data.shape}\n")
     const_pt, d_eta, d_phi = calculate_features(data)
+
+    # Enforce pT ordering explicitly (do this BEFORE any checks/dedup)
+    const_pt, d_eta, d_phi = sort_by_pt_desc(const_pt, d_eta, d_phi)
+
     check_pt_oredering(const_pt)
 
+    
+
+    if args.dedup_particles:
+        print("Deduplicating near-identical constituents within each event (keep the first)")
+        # Tolerances can be tuned; start small to only remove truly duplicated records
+        const_pt, d_eta, d_phi = dedup_within_event(
+            const_pt, d_eta, d_phi,
+            deta_tol=args.deta_tol,
+            dphi_tol=args.dphi_tol,
+        )
+        # Optional: re-check ordering is still valid (pt duplicates are set to 0)
+        # IMPORTANT: dedup merges pT and can break ordering -> re-sort
+        const_pt, d_eta, d_phi = sort_by_pt_desc(const_pt, d_eta, d_phi)
+        
+        check_pt_oredering(const_pt)
 
     labelType = "qcd"
     if args.class_label == 1:
@@ -331,6 +609,12 @@ if __name__ == "__main__":
     parser.add_argument("--lower_q", "-l", type=float, default=0.0)
     parser.add_argument("--upper_q", "-u", type=float, default=1.0)
     parser.add_argument("--nJets", "-N", type=int, default=None)
+    parser.add_argument("--dedup_particles", action="store_true",
+                    help="Deduplicate near-identical constituents within each event (keep the first).")
+    parser.add_argument("--deta_tol", type=float, default=1e-1,
+                    help="Tolerance in d_eta for deduplication (continuous space).")
+    parser.add_argument("--dphi_tol", type=float, default=1e-1,
+                    help="Tolerance in d_phi for deduplication (continuous space).")
     args = parser.parse_args()
 
     sample_name = args.input_file.split("/")[-1][:-3]

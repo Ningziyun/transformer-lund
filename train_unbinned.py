@@ -23,7 +23,10 @@ import matplotlib.pyplot as plt
 # -----------------------------
 # Plotting utility (unchanged)
 # -----------------------------
-def quickLundPlot(inputs, labels=["original","generated","predicted"], epoch_losses=None, out_dir=""):
+def quickLundPlot(inputs, labels=["original","generated","predicted"],
+                  epoch_losses=None, out_dir="",
+                  loss_curves=None):
+    # loss_curves: optional dict like {"mdn_nll": [...], "cnf_nll": [...]}
 
   linestyles=["-","--","-.",":"]
 
@@ -42,7 +45,7 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"], epoch_los
     fig, axs = plt.subplots(Nin,1,figsize=(8.0,8.0))
     for jj in range(Nin):
       #pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[mins[0],maxs[0]],[mins[1],maxs[1]]],bins=[20,20],cmap="Blues", norm="log")
-      pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[-2,6],[-3,6]],bins=[20,20],cmap="Blues", norm="log")
+      pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[-3,7],[-5,7]],bins=[30,40],cmap="Blues", norm="log")
       axs[jj].set_title(labels[jj])          # jj=0 -> original, jj=1 -> generated
       axs[jj].set_ylabel("log(kt)")
       if jj == Nin - 1:
@@ -63,11 +66,11 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"], epoch_los
     for jj in range(Nin):
       #axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
       axs[ii].hist(inputs[jj][:,ii],bins=20,range=[-3,7],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
-      axs[jj].set_title(labels[jj])          # jj=0 -> original, jj=1 -> generated
+      axs[jj].set_title(["log(kt)","log(1/dr)"][jj])          # jj=0 -> log(kt), jj=1 -> log(1/dr)
       axs[jj].set_ylabel("Density")
       axs[ii].set_ylim(0.0, 0.5)
       if jj == Nin - 1:
-        axs[jj].set_xlabel("log(value)")
+        axs[jj].set_xlabel("value")
       else:
         axs[jj].set_xlabel("")
     if ii==0: axs[0].legend()
@@ -78,16 +81,37 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"], epoch_los
   plt.close(fig)
 
   #loss vs epoch plot if provided (Optional)
-  if epoch_losses is not None and len(epoch_losses) > 0:
+  # -----------------------------
+  # Loss vs epoch plots (Optional)
+  # -----------------------------
+  # Backward-compatible: if only epoch_losses is provided, save as "loss_self_*"
+  if (epoch_losses is not None) and (len(epoch_losses) > 0):
     fig = plt.figure(figsize=(6.0, 4.0))
     plt.plot(range(1, len(epoch_losses) + 1), epoch_losses, marker="o")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Loss vs Epoch")
+    plt.title("Loss vs Epoch (self-training objective)")
     plt.grid(True)
-    fig.savefig(os.path.join(out_dir, "loss_vs_epoch.png"))
-    fig.savefig(os.path.join(out_dir, "loss_vs_epoch.pdf"))
+    fig.savefig(os.path.join(out_dir, "loss_self.png"))
+    fig.savefig(os.path.join(out_dir, "loss_self.pdf"))
     plt.close(fig)
+
+  # New: save multiple curves with explicit metric names
+  if (loss_curves is not None) and (len(loss_curves) > 0):
+    for metric_name, curve in loss_curves.items():
+      if curve is None or len(curve) == 0:
+        continue
+      fig = plt.figure(figsize=(6.0, 4.0))
+      plt.plot(range(1, len(curve) + 1), curve, marker="o")
+      plt.xlabel("Epoch")
+      plt.ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
+      plt.title(f"Loss vs Epoch ({metric_name})")
+      plt.grid(True)
+
+      # File name includes the metric definition explicitly
+      fig.savefig(os.path.join(out_dir, f"loss_vs_epoch__{metric_name}.png"))
+      fig.savefig(os.path.join(out_dir, f"loss_vs_epoch__{metric_name}.pdf"))
+      plt.close(fig)
 
 
 # -----------------------------
@@ -189,18 +213,23 @@ class test_model(nn.Module):
 
       #Now de-embed back to original output
       self.deembed = nn.Linear(self.embed_dim, self.input_dim)
+  
+  def forward_context(self, x):
+      """
+      Return transformer context (B, L, embed_dim) with causal mask.
+      This is used by auxiliary heads for logging extra metrics.
+      """
+      seq_len = x.shape[1]
+      h = self.embed(x)
+      mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(h.device)
+      context = self.encoder(h, mask=mask)
+      return context
 
   def forward(self, x):
       seq_len = x.shape[1] # (batch, seq_len, feature_dim)
 
-      # Embed the N-dim vector into the embedded space
-      x=self.embed(x) # (batch, seq_len, embed_dim)
-
-      # Causal mask prevents looking ahead
-      mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
-
-      encoded = self.encoder(x, mask=mask)
-      return self.deembed(encoded)  # (batch, seq_len, feature_dim)
+      context = self.forward_context(x)
+      return self.deembed(context)
 
   def _build_pos_encoding(self, max_len, d_model):
         pos = torch.arange(max_len).unsqueeze(1)
@@ -291,6 +320,29 @@ def mdn_loss(inputs, targets, valid_mask=None):
         nll = nll[valid_mask]
     return nll.mean()
 
+class _MDNHeadFromContext(nn.Module):
+  """
+  Convert transformer context (B, L, C) into MDN params for logging.
+  Output shape matches test_modelMDN.forward(): (B, L, n_mix, 1+input_dim+input_dim)
+  """
+  def __init__(self, context_dim, input_dim, n_mix):
+    super().__init__()
+    self.input_dim = input_dim
+    self.n_mix = n_mix
+    self.proj = nn.Linear(context_dim, n_mix * (1 + input_dim + input_dim))
+
+  def forward(self, context):
+    B, L, C = context.shape
+    out = self.proj(context).view(B, L, self.n_mix, (1 + self.input_dim + self.input_dim))
+
+    alpha = out[:, :, :, 0]
+    mu    = out[:, :, :, 1:self.input_dim+1]
+    sigma = out[:, :, :, self.input_dim+1:]
+
+    alpha = nn.functional.softmax(alpha, dim=-1)
+    sigma = sigma.clamp(min=0.001)
+
+    return torch.cat([alpha.unsqueeze(-1), mu, sigma], dim=-1)
 
 # ============================================================
 # CNF MODE (Conditional Normalizing Flow) - NEW
@@ -532,6 +584,10 @@ def parse_input():
     # cnf hyperparams (new)
     p.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for CNF coupling nets")
 
+    # Multi-Loss-plot
+    p.add_argument("--multi-loss-plot", action="store_true", default=False,
+                   help="Log multiple loss definitions (e.g. mdn_nll and cnf_nll) without affecting main training")
+
     # misc
     p.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
 
@@ -572,6 +628,7 @@ if __name__ == "__main__":
     doCNF = args.cnf
     doMDN = args.mdn
     doMixedLoss = args.mixed_loss
+    doMultiLossPlot = args.multi_loss_plot
 
     # If CNF is enabled, we ignore MDN/regression heads
     if doCNF:
@@ -611,6 +668,25 @@ if __name__ == "__main__":
 
     model.to(device)
 
+    aux_mdn_head = None
+    aux_cnf_flow = None
+    aux_optimizer = None
+
+    if doMultiLossPlot:
+      # We train ONLY the auxiliary head parameters on detached context,
+      # so it never affects the main model iteration.
+      if doCNF:
+        # CNF main: log MDN-NLL with an auxiliary MDN head
+        aux_mdn_head = _MDNHeadFromContext(
+          context_dim=args.embed_dim, input_dim=X.shape[2], n_mix=args.n_mix
+        ).to(device)
+        aux_optimizer = torch.optim.Adam(aux_mdn_head.parameters(), lr=args.lr)
+
+      elif doMDN:
+        # MDN main: log CNF-NLL with an auxiliary flow head
+        aux_cnf_flow = _CondRealNVP2D(context_dim=args.embed_dim, hidden=args.flow_hidden).to(device)
+        aux_optimizer = torch.optim.Adam(aux_cnf_flow.parameters(), lr=args.lr)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # Loss functions
@@ -631,8 +707,17 @@ if __name__ == "__main__":
     loss_train=[]
     epochs = args.epochs
     train_epoch_losses = []
+    # Store multiple metric curves (epoch-averaged)
+    loss_curves = {
+      "mdn_nll": [],
+      "cnf_nll": [],
+    }
 
     for t in range(epochs):
+      epoch_sum_mdn = 0.0
+      epoch_sum_cnf = 0.0
+      epoch_n_mdn = 0
+      epoch_n_cnf = 0
       epoch_loss_sum = 0.0
       epoch_n_batches = 0
 
@@ -647,42 +732,108 @@ if __name__ == "__main__":
           #valid_mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))
           valid_mask = None
 
+          # -----------------------------
+          # Main training objective (backprop)
+          # -----------------------------
           if doCNF:
             context = model(inputs)  # (B, L, C)
-            loss = cnf_loss(context, targets, valid_mask=valid_mask, flow=model.flow)
+            loss_main = cnf_loss(context, targets, valid_mask=valid_mask, flow=model.flow)
           else:
             pred = model(inputs)
-
             if not doMDN:
               if doMixedLoss:
                 lambd=1
-                loss= loss_fn(pred[:,:,:-1],targets[:,:,:-1]).mean(dim=-1)+lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1])
+                loss_main = loss_fn(pred[:,:,:-1],targets[:,:,:-1]).mean(dim=-1) + lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1])
               else:
-                loss = loss_fn(pred, targets)
-              loss = loss[valid_mask].mean()
+                loss_main = loss_fn(pred, targets)
+              # IMPORTANT: if valid_mask is None, do NOT index with it
+              loss_main = loss_main.mean() if (valid_mask is None) else loss_main[valid_mask].mean()
             else:
-              loss = loss_fn(pred, targets, valid_mask=valid_mask)
-              loss = loss.mean()
-
-          epoch_loss_sum += loss.item()
-          epoch_n_batches += 1
-
-          loss.backward()
+              loss_main = mdn_loss(pred, targets, valid_mask=valid_mask)  # already mean()
+          
+          # Backprop ONLY main loss
+          loss_main.backward()
           optimizer.step()
 
+          # -----------------------------
+          # Extra metric logging (no effect on main training)
+          # -----------------------------
+          if doMultiLossPlot:
+            # Get transformer context for auxiliary metrics
+            # Use detached context so aux training never backprops into main model
+            with torch.no_grad():
+              ctx_detached = model.forward_context(inputs).detach()
+
+            if doCNF:
+              # Main is CNF => record CNF-NLL from main model
+              with torch.no_grad():
+                cnf_nll = cnf_loss(context, targets, valid_mask=valid_mask, flow=model.flow)
+                epoch_sum_cnf += cnf_nll.item()
+                epoch_n_cnf += 1
+
+              # Also record MDN-NLL using auxiliary MDN head (train aux head only)
+              aux_optimizer.zero_grad()
+              mdn_pred = aux_mdn_head(ctx_detached)  # (B,L,n_mix,1+2+2)
+              mdn_nll = mdn_loss(mdn_pred, targets, valid_mask=valid_mask)
+              mdn_nll.backward()
+              aux_optimizer.step()
+
+              epoch_sum_mdn += mdn_nll.item()
+              epoch_n_mdn += 1
+
+            elif doMDN:
+              # Main is MDN => record MDN-NLL from main model
+              with torch.no_grad():
+                mdn_nll = mdn_loss(pred, targets, valid_mask=valid_mask)
+                epoch_sum_mdn += mdn_nll.item()
+                epoch_n_mdn += 1
+
+              # Also record CNF-NLL using auxiliary flow head (train aux flow only)
+              aux_optimizer.zero_grad()
+              # Flatten (B,L,C) and (B,L,D) for flow.log_prob
+              B, L, C = ctx_detached.shape
+              y = targets.reshape(B*L, targets.shape[-1])
+              ctx = ctx_detached.reshape(B*L, C)
+
+              logp = aux_cnf_flow.log_prob(y, ctx)
+              cnf_nll = (-logp).mean()
+              cnf_nll.backward()
+              aux_optimizer.step()
+
+              epoch_sum_cnf += cnf_nll.item()
+              epoch_n_cnf += 1
+
+          # Keep your printing logic (use main loss)
           if batch % 100 == 0:
-            print(f"batch: {batch} loss:{loss.item()}")
+            print(f"batch: {batch} loss_main:{loss_main.item()}")
+
+          epoch_loss_sum += loss_main.item()
+          epoch_n_batches += 1
+          '''
+          loss.backward()
+          optimizer.step()
+          
+          if batch % 100 == 0:
+            print(f"batch: {batch} loss:{loss_main.item()}")
+          '''
 
       # Keep original mixed-loss postprocessing (only relevant if not CNF)
       if (not doCNF) and doMixedLoss:
         pred[:,:,-1]=sigmoid(pred[:,:,-1])
 
-      print(f"epoch: {t} loss={loss.item()}")
+      print(f"epoch: {t} loss={loss_main.item()}")
 
       epoch_avg_loss = epoch_loss_sum / max(epoch_n_batches, 1)
       train_epoch_losses.append(epoch_avg_loss)
 
-      loss_train.append(loss.item())
+      if doMultiLossPlot:
+        # Epoch-averaged metrics for apple-to-apple comparisons
+        if epoch_n_mdn > 0:
+          loss_curves["mdn_nll"].append(epoch_sum_mdn / epoch_n_mdn)
+        if epoch_n_cnf > 0:
+          loss_curves["cnf_nll"].append(epoch_sum_cnf / epoch_n_cnf)
+
+      loss_train.append(loss_main.item())
       if loss_train[-1]<best_loss:
         best_loss=loss_train[-1]
         patience_counter=0
@@ -723,4 +874,9 @@ if __name__ == "__main__":
         original=torch.cat([original,X.flatten(0,1)])
         generated=torch.cat([generated,generated_seq.flatten(0,1)])
 
-      quickLundPlot([original.numpy(),generated.numpy()],epoch_losses=train_epoch_losses,out_dir=args.log_dir)
+      quickLundPlot(
+        [original.numpy(), generated.numpy()],
+        epoch_losses=train_epoch_losses,
+        out_dir=args.log_dir,
+        loss_curves=(loss_curves if doMultiLossPlot else None)
+      )
