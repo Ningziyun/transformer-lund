@@ -250,23 +250,17 @@ def discretize_data(
             assert np.all(pts[i, :-1] >= pts[i, 1:]), "Data not sorted in pT"
 
     def dedup_within_event(const_pt, d_eta, d_phi,
-                        deta_tol=1e-3, dphi_tol=1e-3):
+                        dpt_tol=1e-3, deta_tol=1e-3, dphi_tol=1e-3):
         """
-        Deduplicate near-identical constituents within each event.
+        Deduplicate near-identical constituents within each event using (pt, d_eta, d_phi).
 
-        Key idea:
-        - The Lund-plane pathology (very large log(1/dR) and very negative log(kt))
-        often comes from merges with dR ~ 0.
-        - Two constituents can have (almost) identical direction but different pt.
-        If the dedup key includes log(pt), those will NOT be removed and can
-        still generate dR~0 merges downstream.
-        - Here we deduplicate by (d_eta, d_phi) only, and MERGE pt into the first
-        occurrence instead of inserting zeros in the middle or dropping energy.
+        Definition of "duplicate":
+        - Two constituents are considered duplicates if their (pt, d_eta, d_phi) are
+        the same up to the provided tolerances.
 
         Behavior:
-        - Preserve original ordering as much as possible.
-        - Keep the first occurrence; if another constituent falls into the same
-        (d_eta, d_phi) bin, add its pt to the kept one.
+        - Keep the first occurrence.
+        - Drop later duplicates (DO NOT merge pt).
         - Pack kept constituents to the front; tail is padding (pt=0, eta=0, phi=0).
         """
         pt_in  = const_pt
@@ -280,8 +274,7 @@ def discretize_data(
         phi_out = np.zeros_like(phi_in, dtype=phi_in.dtype)
 
         for i in range(n_ev):
-            # Map from (quantized eta, quantized phi) -> output index
-            seen_idx = {}
+            seen = set()
             write_idx = 0
 
             for j in range(n_const):
@@ -289,18 +282,18 @@ def discretize_data(
                 if p <= 0:
                     continue  # padding / invalid
 
+                # Quantize (pt, d_eta, d_phi) into integer keys for "near-identical" matching
+                k0 = int(np.round(p / dpt_tol))
                 k1 = int(np.round(eta_in[i, j] / deta_tol))
                 k2 = int(np.round(phi_in[i, j] / dphi_tol))
-                key = (k1, k2)
+                key = (k0, k1, k2)
 
-                if key in seen_idx:
-                    # Same direction bin: merge pt into the first occurrence
-                    k = seen_idx[key]
-                    pt_out[i, k] = pt_out[i, k] + p
+                if key in seen:
+                    # Duplicate: drop it (keep the first one)
                     continue
 
-                # First time seeing this direction bin: keep it
-                seen_idx[key] = write_idx
+                seen.add(key)
+
                 pt_out[i, write_idx]  = p
                 eta_out[i, write_idx] = eta_in[i, j]
                 phi_out[i, write_idx] = phi_in[i, j]
@@ -530,6 +523,7 @@ def discretize_data(
         # Tolerances can be tuned; start small to only remove truly duplicated records
         const_pt, d_eta, d_phi = dedup_within_event(
             const_pt, d_eta, d_phi,
+            dpt_tol=args.dpt_tol,
             deta_tol=args.deta_tol,
             dphi_tol=args.dphi_tol,
         )
@@ -611,9 +605,11 @@ if __name__ == "__main__":
     parser.add_argument("--nJets", "-N", type=int, default=None)
     parser.add_argument("--dedup_particles", action="store_true",
                     help="Deduplicate near-identical constituents within each event (keep the first).")
-    parser.add_argument("--deta_tol", type=float, default=1e-1,
+    parser.add_argument("--dpt_tol", type=float, default=1e-3,
+                    help="Tolerance in d_pt for deduplication (continuous space).")
+    parser.add_argument("--deta_tol", type=float, default=1e-3,
                     help="Tolerance in d_eta for deduplication (continuous space).")
-    parser.add_argument("--dphi_tol", type=float, default=1e-1,
+    parser.add_argument("--dphi_tol", type=float, default=1e-3,
                     help="Tolerance in d_phi for deduplication (continuous space).")
     args = parser.parse_args()
 
