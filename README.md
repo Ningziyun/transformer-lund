@@ -54,7 +54,11 @@ To perform the training, the lund input files must be discretized, output to h5 
 ```
 python discretize_auto.py --data_path inputFiles/qcd_lund_cut.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
 ```
-
+**Training & Plot**
+```
+python train_ublund.py --epochs 50 --patience 300 --lr 0.1 --batch-size 100 --multi-loss-plot --train-file inputFiles/qcd_lund_train.h5 --val-file inputFiles/qcd_lund_val.h5
+python plot_ublund.py --checkpoint models/test/checkpoints/best.pt --out-dir models/test/plot
+```
 **Training**
 
 To train a model run:
