@@ -9,16 +9,21 @@ instead of redefining them.
 """
 
 import os
+import re
+import csv
 import argparse
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import LogLocator, NullFormatter
 from torchinfo import summary
 
 # Reuse existing utilities and model definitions from the training script
 from train_ublund import (
     get_loaders,
-    quickLundPlot,
     test_model,
     test_modelMDN,
+    quickLundPlot,
     test_modelCNF,
 )
 from helpers_train import set_seeds
@@ -32,6 +37,7 @@ def parse_args():
     p.add_argument(
         "--checkpoint",
         type=str,
+        nargs="+",
         required=True,
         help="Path to a checkpoint file saved by train_ublund.py, e.g. models/test/checkpoints/best.pt",
     )
@@ -100,6 +106,37 @@ def parse_args():
         default=None,
         help="Flattened 1D ranges, e.g. --hist1d-ranges -3 7 -5 7",
     )
+    p.add_argument(
+        "--hist1d-bins",
+        type=int,
+        default=30,
+        help="Number of bins for 1D histograms",
+    )
+    p.add_argument(
+        "--hist1d-logy",
+        action="store_true",
+        default=False,
+        help="Use log scale on the y-axis for 1D histograms",
+    )
+    p.add_argument(
+        "--not-save-both-hist1d-scales",
+        action="store_true",
+        default=False,
+        help="Save both linear-scale and log-scale versions of the 1D histograms",
+    )
+    p.add_argument(
+        "--loss-zoom-percentile",
+        type=float,
+        default=80.0,
+        help="Upper percentile used for the zoomed loss plot to suppress very large early values",
+    )
+    p.add_argument(
+        "--loss-zoom-headroom",
+        type=float,
+        default=0.08,
+        help="Extra fractional headroom added above the zoomed loss upper limit",
+    )
+    return p.parse_args()
     return p.parse_args()
 
 
@@ -174,62 +211,126 @@ def default_out_dir(checkpoint_path, cli_out_dir):
         return cli_out_dir
     return os.path.dirname(os.path.dirname(os.path.abspath(checkpoint_path)))
 
+def parse_arguments_txt(txt_path):
+    """
+    Parse key-value pairs from arguments.txt.
 
-def main():
-    args = parse_args()
+    This supports both formats currently written by the training script:
+    1) save_arguments(args) style lines
+    2) appended summary lines such as:
+       resolved_model_mode, scheduler, cos_start_epoch, best_epoch, best_loss, etc.
+    """
+    meta = {}
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    ckpt_args = checkpoint.get("args", {})
+    if not os.path.exists(txt_path):
+        return meta
 
-    epoch_losses = checkpoint.get("train_epoch_losses", None)
-    loss_curves = checkpoint.get("loss_curves", None)
+    with open(txt_path, "r") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
 
-    seed = ckpt_args.get("seed", 0)
-    set_seeds(seed)
+            # Support "key: value"
+            if ":" in line:
+                key, value = line.split(":", 1)
+                meta[key.strip()] = value.strip()
+                continue
 
-    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
-    print(f"Running on device: {device}")
+            # Support whitespace-aligned "key    value"
+            parts = line.split()
+            if len(parts) >= 2:
+                key = parts[0].strip()
+                value = " ".join(parts[1:]).strip()
+                meta[key] = value
 
-    train_file, val_file, batch_size, num_workers = resolve_data_args(args, checkpoint)
-    out_dir = default_out_dir(args.checkpoint, args.out_dir)
-    os.makedirs(out_dir, exist_ok=True)
+    return meta
 
-    print(f"Loading data from:\n  train = {train_file}\n  val   = {val_file}")
 
-    train_loader, val_loader = get_loaders(
-        train_file=train_file,
-        val_file=val_file,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        shuffle=args.shuffle,
-    )
+def infer_log_dir_from_checkpoint(checkpoint_path):
+    """
+    Convert models/test/checkpoints/best.pt -> models/test
+    """
+    return os.path.dirname(os.path.dirname(os.path.abspath(checkpoint_path)))
 
-    loader = val_loader if args.use_val else train_loader
+
+def build_run_caption(meta):
+    """
+    Build legend text from arguments.txt metadata.
+    Example:
+    MDN bs=100 lr=0.005 cos-d minlr=5e-05
+    """
+    model_mode = meta.get("resolved_model_mode", "Unknown")
+    batch_size = meta.get("batch_size", meta.get("batch-size", "?"))
+    lr = meta.get("lr", "?")
+    scheduler = meta.get("scheduler", "none")
+    cos_final_lr = meta.get("cos_final_lr", None)
+
+    label = f"{model_mode} bs={batch_size} lr={lr}"
+
+    if scheduler == "cos_damping":
+        label += " cos-d"
+        if cos_final_lr is not None:
+            label += f" minlr={cos_final_lr}"
+
+    return label
+
+
+def load_loss_history_csv(csv_path):
+    """
+    Load loss_history.csv into a dict of lists.
+    Returns {} if the file does not exist.
+    """
+    if not os.path.exists(csv_path):
+        return {}
+
+    curves = {}
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+
+        for name in fieldnames:
+            if name != "epoch":
+                curves[name] = []
+
+        for row in reader:
+            for name in curves:
+                value = row.get(name, "")
+                if value is None or value == "":
+                    curves[name].append(np.nan)
+                else:
+                    curves[name].append(float(value))
+
+    return curves
+
+
+def make_output_dir(cli_out_dir, checkpoint_paths):
+    """
+    Resolve output directory for multi-model plotting.
+    If --out-dir is given, use it.
+    Otherwise, use the parent directory of the first checkpoint.
+    """
+    if cli_out_dir:
+        return cli_out_dir
+    return infer_log_dir_from_checkpoint(checkpoint_paths[0])
+
+
+def generate_original_and_generated(model, loader, device, max_batches):
+    """
+    Generate flattened original and generated arrays for one model.
+    """
     first_batch = next(iter(loader))
-    print(f"Input shape: {first_batch.shape}")
-
-    model, do_cnf, do_mdn = build_model_from_checkpoint(checkpoint, first_batch, device)
-
-    # Move the summary input to the same device as the model
-    summary_input = first_batch[:, :-1, :].to(device)
-
-    summary(
-        model,
-        input_data=[summary_input],
-        col_names=["input_size", "output_size", "num_params", "params_percent", "mult_adds", "trainable"],
-    )
 
     with torch.no_grad():
         original = torch.empty([0, first_batch.shape[-1]], device="cpu")
         generated = torch.empty([0, first_batch.shape[-1]], device="cpu")
 
         for batch_idx, X in enumerate(loader):
-            if args.max_batches >= 0 and batch_idx >= args.max_batches:
+            if max_batches >= 0 and batch_idx >= max_batches:
                 break
 
             X = X.to(device)
             start = X[:, 0, :].unsqueeze(1)
-
             generated_seq = model.generate(start, steps=X.shape[1] - 1)
 
             if batch_idx == 0:
@@ -241,7 +342,172 @@ def main():
             original = torch.cat([original, X.detach().cpu().flatten(0, 1)], dim=0)
             generated = torch.cat([generated, generated_seq.detach().cpu().flatten(0, 1)], dim=0)
 
-    hist2d_range = [args.hist2d_xrange, args.hist2d_yrange]
+    return original.numpy(), generated.numpy()
+
+
+def plot_combined_1dhist(inputs,labels,out_dir,hist1d_ranges=None,hist1d_bins=20,logy=False,out_name=None,):
+    """
+    Plot one shared original plus multiple generated samples on the same 1D figures.
+    Automatically choose a sensible y-range for both linear and log-scale plots.
+    """
+    linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
+    Ndim = inputs[0].shape[1]
+    Nin = len(inputs)
+
+    if hist1d_ranges is None:
+        hist1d_ranges = [[-3, 7] for _ in range(Ndim)]
+
+    fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
+    if Ndim == 1:
+        axs = [axs]
+
+    axis_titles = ["log(kt)","log(1/deltaR)"]
+
+    for ii in range(Ndim):
+        feature_idx = 1 - ii  # Swap feature order so top panel shows kt and bottom panel shows log(1/deltaR)
+        # Store histogram heights so we can set y-limits from actual bin contents
+        all_hist_counts = []
+        positive_hist_counts = []
+
+        for jj in range(Nin):
+            values = inputs[jj][:, feature_idx]
+
+            # Compute the histogram first so the y-limits can be data-driven
+            hist_counts, bin_edges = np.histogram(
+                values,
+                bins=hist1d_bins,
+                range=hist1d_ranges[ii],
+                density=True,
+            )
+
+            all_hist_counts.append(hist_counts)
+            positive_hist_counts.extend(hist_counts[hist_counts > 0.0])
+
+            axs[ii].hist(
+                values,
+                bins=hist1d_bins,
+                range=hist1d_ranges[ii],
+                histtype="step",
+                density=True,
+                linestyle=linestyles[jj % len(linestyles)],
+                label=labels[jj],
+            )
+
+        if ii < len(axis_titles):
+            axs[ii].set_title(axis_titles[ii])
+        else:
+            axs[ii].set_title(f"feature_{ii}")
+
+        axs[ii].set_ylabel("Density")
+        axs[ii].set_xlabel("value")
+
+        # Determine the maximum histogram height across all inputs
+        ymax = 0.0
+        for hist_counts in all_hist_counts:
+            if hist_counts.size > 0:
+                ymax = max(ymax, np.max(hist_counts))
+
+        if logy:
+            axs[ii].set_yscale("log")
+
+            if len(positive_hist_counts) > 0:
+                min_positive = min(positive_hist_counts)
+                max_positive = max(positive_hist_counts)
+
+                # Use a lower bound slightly below the smallest non-zero bin.
+                # Clamp it so it does not become absurdly tiny.
+                y_min = max(min_positive / 3.0, 1e-4)
+
+                # Leave some room above the tallest bin for readability.
+                y_max = max_positive * 1.5
+
+                # Guard against degenerate cases
+                if y_max <= y_min:
+                    y_max = y_min * 10.0
+
+                axs[ii].set_ylim(y_min, y_max)
+            else:
+                # Fallback if everything is empty
+                axs[ii].set_ylim(1e-4, 1.0)
+
+            # Cleaner minor ticks on log axis
+            axs[ii].yaxis.set_major_locator(LogLocator(base=10.0))
+            axs[ii].yaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1))
+            axs[ii].yaxis.set_minor_formatter(NullFormatter())
+
+        else:
+            # Linear scale: set the top from the actual histogram maximum
+            # instead of using a hard-coded 0.5 for every case
+            y_max = ymax * 1.15 if ymax > 0 else 1.0
+            axs[ii].set_ylim(0.0, y_max)
+
+    axs[0].legend()
+
+    if out_name is None:
+        out_name = "projection_combined_logy" if logy else "projection_combined"
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, out_name + ".png"))
+    fig.savefig(os.path.join(out_dir, out_name + ".pdf"))
+    plt.close(fig)
+
+
+def plot_combined_losses(run_infos, out_dir):
+    """
+    Plot loss curves from multiple runs on shared figures.
+
+    For each metric name found across runs, create one overlay plot.
+    """
+    metric_names = set()
+    for info in run_infos:
+        for metric_name, curve in info["loss_curves_csv"].items():
+            if curve is not None and len(curve) > 0:
+                metric_names.add(metric_name)
+
+    for metric_name in sorted(metric_names):
+        fig = plt.figure(figsize=(6.0, 4.0))
+        used_any = False
+
+        for info in run_infos:
+            curve = info["loss_curves_csv"].get(metric_name, None)
+            if curve is None or len(curve) == 0:
+                continue
+
+            y = np.asarray(curve, dtype=float)
+            x = np.arange(1, len(y) + 1)
+            mask = ~np.isnan(y)
+            if np.any(mask):
+                plt.plot(x[mask], y[mask], marker="o", label=info["caption"])
+                used_any = True
+
+        if not used_any:
+            plt.close(fig)
+            continue
+
+        plt.xlabel("Epoch")
+        plt.ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
+        plt.title(f"Loss vs Epoch ({metric_name})")
+        plt.grid(True)
+        plt.legend()
+        fig.tight_layout()
+
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.png"))
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"))
+        plt.close(fig)
+        
+def main():
+    args = parse_args()
+
+    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
+    print(f"Running on device: {device}")
+
+    out_dir = make_output_dir(args.out_dir, args.checkpoint)
+    os.makedirs(out_dir, exist_ok=True)
+
+    run_infos = []
+    original_shared = None
+    generated_inputs = []
+    generated_labels = []
 
     hist1d_ranges = None
     if args.hist1d_ranges is not None:
@@ -251,21 +517,134 @@ def main():
         for i in range(0, len(args.hist1d_ranges), 2):
             hist1d_ranges.append([args.hist1d_ranges[i], args.hist1d_ranges[i + 1]])
 
+    for idx, checkpoint_path in enumerate(args.checkpoint):
+        print(f"\nProcessing checkpoint: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        ckpt_args = checkpoint.get("args", {})
+
+        seed = ckpt_args.get("seed", 0)
+        set_seeds(seed)
+
+        train_file, val_file, batch_size, num_workers = resolve_data_args(args, checkpoint)
+
+        print(f"Loading data from:\n  train = {train_file}\n  val   = {val_file}")
+
+        train_loader, val_loader = get_loaders(
+            train_file=train_file,
+            val_file=val_file,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            shuffle=args.shuffle,
+        )
+
+        loader = val_loader if args.use_val else train_loader
+        first_batch = next(iter(loader))
+        print(f"Input shape: {first_batch.shape}")
+
+        model, do_cnf, do_mdn = build_model_from_checkpoint(checkpoint, first_batch, device)
+
+        # Print the summary only for the first checkpoint to avoid repeated output spam
+        if idx == 0:
+            summary_input = first_batch[:, :-1, :].to(device)
+            summary(
+                model,
+                input_data=[summary_input],
+                col_names=["input_size", "output_size", "num_params", "params_percent", "mult_adds", "trainable"],
+            )
+
+        original_np, generated_np = generate_original_and_generated(
+            model=model,
+            loader=loader,
+            device=device,
+            max_batches=args.max_batches,
+        )
+
+        log_dir = infer_log_dir_from_checkpoint(checkpoint_path)
+        txt_meta = parse_arguments_txt(os.path.join(log_dir, "arguments.txt"))
+        caption = build_run_caption(txt_meta)
+
+        if original_shared is None:
+            original_shared = original_np
+        
+        # Create one dedicated subdirectory for this checkpoint and reuse quickLundPlot
+        run_plot_dir = os.path.join(out_dir, f"run_{idx+1}")
+        os.makedirs(run_plot_dir, exist_ok=True)
+
+        quickLundPlot(
+            inputs=[original_np, generated_np],
+            labels=["original", caption],
+            out_dir=run_plot_dir,
+            hist2d_range=[args.hist2d_xrange, args.hist2d_yrange],
+            hist1d_ranges=hist1d_ranges,
+            hist2d_bins=(30, 40),
+            hist1d_bins=args.hist1d_bins,
+        )
+
+        generated_inputs.append(generated_np)
+        generated_labels.append(caption)
+
+        loss_curves_csv = load_loss_history_csv(os.path.join(log_dir, "loss_history.csv"))
+
+        run_infos.append(
+            {
+                "checkpoint_path": checkpoint_path,
+                "log_dir": log_dir,
+                "caption": caption,
+                "txt_meta": txt_meta,
+                "loss_curves_csv": loss_curves_csv,
+            }
+        )
+
+
     # Reuse the existing plotting utility from train_ublund.py
-    quickLundPlot(
-        [original.numpy(), generated.numpy()],
-        labels=["original", "generated"],
+    # Plot one shared original plus all generated samples together
+    combined_inputs = [original_shared] + generated_inputs
+    combined_labels = ["original"] + generated_labels
+
+    if not args.not_save_both_hist1d_scales:
+        # Save the linear-scale histogram first
+        plot_combined_1dhist(
+            inputs=combined_inputs,
+            labels=combined_labels,
+            out_dir=out_dir,
+            hist1d_ranges=hist1d_ranges,
+            hist1d_bins=args.hist1d_bins,
+            logy=False,
+            out_name="projection_combined",
+        )
+
+        # Save the log-scale histogram as a second figure
+        plot_combined_1dhist(
+            inputs=combined_inputs,
+            labels=combined_labels,
+            out_dir=out_dir,
+            hist1d_ranges=hist1d_ranges,
+            hist1d_bins=args.hist1d_bins,
+            logy=True,
+            out_name="projection_combined_logy",
+        )
+    else:
+        plot_combined_1dhist(
+            inputs=combined_inputs,
+            labels=combined_labels,
+            out_dir=out_dir,
+            hist1d_ranges=hist1d_ranges,
+            hist1d_bins=args.hist1d_bins,
+            logy=args.hist1d_logy,
+            out_name="projection_combined_logy" if args.hist1d_logy else "projection_combined",
+        )
+
+    # Overlay loss curves from all runs using loss_history.csv
+    plot_combined_losses(
+        run_infos=run_infos,
         out_dir=out_dir,
-        epoch_losses=epoch_losses,
-        loss_curves=loss_curves,
-        hist2d_range=hist2d_range,
-        hist1d_ranges=hist1d_ranges,
     )
 
     print(f"Plots written to: {out_dir}")
-    print(f"Loaded checkpoint epoch: {checkpoint.get('epoch', 'unknown')}")
-    print(f"Checkpoint main loss: {checkpoint.get('loss', 'unknown')}")
-    print(f"Model mode: {'CNF' if do_cnf else ('MDN' if do_mdn else 'Regression')}")
+    print("Processed runs:")
+    for info in run_infos:
+        print(f"  - {info['caption']}  [{info['checkpoint_path']}]")
 
 
 if __name__ == "__main__":
