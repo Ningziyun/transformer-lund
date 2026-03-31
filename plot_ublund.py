@@ -645,12 +645,79 @@ def plot_combined_losses(run_infos, out_dir):
         plt.ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
         plt.title(f"Loss vs Epoch ({metric_name})")
         plt.grid(True)
+
+        ax = plt.gca()
+
+        # Apply the same flexible legend strategy used in the combined 1D histogram:
+        # 1) balanced line wrapping
+        # 2) shrink font if needed
+        # 3) move to a safer in-axes position if still too large
+        handles, raw_labels = ax.get_legend_handles_labels()
+        legend_labels = format_legend_labels(raw_labels, target_chars=28, max_lines=3)
+
+        legend = ax.legend(
+            handles,
+            legend_labels,
+            loc="best",
+            fontsize=10,
+            framealpha=0.9,
+            borderpad=0.6,
+            labelspacing=0.4,
+            handlelength=2.0,
+        )
+
+        # Draw once before measuring the legend bounding box
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        bbox = legend.get_window_extent(renderer=renderer)
+
+        fig_width_px = fig.get_size_inches()[0] * fig.dpi
+        fig_height_px = fig.get_size_inches()[1] * fig.dpi
+
+        # If the legend is still too large, reduce font size step by step
+        if bbox.width > 0.42 * fig_width_px or bbox.height > 0.22 * fig_height_px:
+            for fs in [9, 8]:
+                for txt in legend.get_texts():
+                    txt.set_fontsize(fs)
+                fig.canvas.draw()
+                bbox = legend.get_window_extent(renderer=fig.canvas.get_renderer())
+
+                if bbox.width <= 0.42 * fig_width_px and bbox.height <= 0.22 * fig_height_px:
+                    break
+
+        # If it is still too large, move it to a safer in-axes location
+        if bbox.width > 0.42 * fig_width_px or bbox.height > 0.22 * fig_height_px:
+            legend.remove()
+            legend = ax.legend(
+                handles,
+                legend_labels,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.98),
+                fontsize=8,
+                framealpha=0.9,
+                borderpad=0.5,
+                labelspacing=0.35,
+                handlelength=2.0,
+            )
+            fig.canvas.draw()
+
+        fig.tight_layout()
+
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.png"))
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"))
+        plt.close(fig)
+        '''
+        plt.xlabel("Epoch")
+        plt.ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
+        plt.title(f"Loss vs Epoch ({metric_name})")
+        plt.grid(True)
         plt.legend()
         fig.tight_layout()
 
         fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.png"))
         fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"))
         plt.close(fig)
+        '''
         
 def main():
     args = parse_args()

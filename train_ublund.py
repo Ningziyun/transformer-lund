@@ -105,7 +105,7 @@ def quickLundPlot(inputs,labels=["original", "generated", "predicted"],
     feature_idx = 1 - ii  # Swap feature order so top panel shows kt and bottom panel shows log(1/deltaR)
     for jj in range(Nin):
       #axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
-      axs[ii].hist(inputs[jj][:,feature_idx], bins=hist1d_bins,range=hist1d_ranges[feature_idx],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
+      axs[ii].hist(inputs[jj][:,feature_idx], bins=hist1d_bins,range=hist1d_ranges[jj],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
       axs[jj].set_title(["log(kt)","log(1/deltaR)"][jj])          # jj=0 -> log(kt), jj=1 -> log(1/dr)
       axs[jj].set_ylabel("Density")
       axs[ii].set_ylim(0.0, 0.5)
