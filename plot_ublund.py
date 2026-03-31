@@ -28,6 +28,9 @@ from train_ublund import (
 )
 from helpers_train import set_seeds
 
+import textwrap
+
+
 
 def parse_args():
     """CLI arguments for checkpoint-based generation."""
@@ -262,19 +265,104 @@ def build_run_caption(meta):
     """
     model_mode = meta.get("resolved_model_mode", "Unknown")
     batch_size = meta.get("batch_size", meta.get("batch-size", "?"))
+    start_epoch = meta.get("cos_damping_start_epoch", None)
+    total_epoch = meta.get("epochs", meta.get("total_epochs", None))
     lr = meta.get("lr", "?")
     scheduler = meta.get("scheduler", "none")
     cos_final_lr = meta.get("cos_final_lr", None)
 
     label = f"{model_mode} bs={batch_size} lr={lr}"
 
+    # Add total epoch (always show if available)
+    if total_epoch is not None:
+        label += f" ep={total_epoch}"
+
+    # Add cos-damping info (only if used)
     if scheduler == "cos_damping":
-        label += " cos-d"
+        label += " cos-osc"
+
+        if start_epoch is not None:
+            label += f" ep_st={start_epoch}"
+
         if cos_final_lr is not None:
-            label += f" minlr={cos_final_lr}"
+            label += f" lr_f={cos_final_lr}"
 
     return label
 
+def _best_balanced_split(words, n_lines):
+    """
+    Split a list of words into n_lines so that the longest line is as short as possible.
+    This prefers visually balanced legend lines over naive fixed-width wrapping.
+    """
+    if n_lines <= 1 or len(words) <= 1:
+        return [" ".join(words)]
+
+    best_lines = [" ".join(words)]
+    best_score = float("inf")
+
+    # Two-line split
+    if n_lines == 2:
+        for i in range(1, len(words)):
+            lines = [
+                " ".join(words[:i]),
+                " ".join(words[i:]),
+            ]
+            score = max(len(line) for line in lines)
+            if score < best_score:
+                best_score = score
+                best_lines = lines
+        return best_lines
+
+    # Three-line split
+    if n_lines == 3:
+        for i in range(1, len(words) - 1):
+            for j in range(i + 1, len(words)):
+                lines = [
+                    " ".join(words[:i]),
+                    " ".join(words[i:j]),
+                    " ".join(words[j:]),
+                ]
+                score = max(len(line) for line in lines)
+                if score < best_score:
+                    best_score = score
+                    best_lines = lines
+        return best_lines
+
+    return [" ".join(words)]
+
+
+def format_legend_labels(labels, target_chars=28, max_lines=3):
+    """
+    Format legend labels with balanced line breaks.
+    Priority:
+    1) keep one line if short enough
+    2) use balanced 2-line split
+    3) use balanced 3-line split
+    """
+    formatted = []
+
+    for label in labels:
+        if len(label) <= target_chars:
+            formatted.append(label)
+            continue
+
+        words = label.split()
+
+        # Try 2 lines first
+        lines_2 = _best_balanced_split(words, 2)
+        if max(len(line) for line in lines_2) <= target_chars:
+            formatted.append("\n".join(lines_2))
+            continue
+
+        # Then try 3 lines
+        if max_lines >= 3:
+            lines_3 = _best_balanced_split(words, 3)
+            formatted.append("\n".join(lines_3))
+            continue
+
+        formatted.append(label)
+
+    return formatted
 
 def load_loss_history_csv(csv_path):
     """
@@ -448,7 +536,60 @@ def plot_combined_1dhist(inputs,labels,out_dir,hist1d_ranges=None,hist1d_bins=20
             y_max = ymax * 1.15 if ymax > 0 else 1.0
             axs[ii].set_ylim(0.0, y_max)
 
-    axs[0].legend()
+    # Format legend labels with balanced line breaks first
+    legend_labels = format_legend_labels(labels, target_chars=28, max_lines=3)
+
+    # Start from a moderate font size instead of a large one
+    legend_fontsize = 10
+
+    legend = axs[0].legend(
+        legend_labels,
+        loc="best",
+        fontsize=legend_fontsize,
+        framealpha=0.9,
+        borderpad=0.6,
+        labelspacing=0.4,
+        handlelength=2.0,
+    )
+
+    # Draw the canvas before measuring legend size
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    bbox = legend.get_window_extent(renderer=renderer)
+
+    fig_width_px = fig.get_size_inches()[0] * fig.dpi
+    fig_height_px = fig.get_size_inches()[1] * fig.dpi
+
+    # Priority order:
+    # 1) balanced wrapping
+    # 2) smaller font
+    # 3) balanced wrapping + smaller font + move to a safer in-figure position
+
+    # If the legend is still too wide/tall, reduce font size step by step
+    if bbox.width > 0.42 * fig_width_px or bbox.height > 0.22 * fig_height_px:
+        for fs in [9, 8]:
+            for txt in legend.get_texts():
+                txt.set_fontsize(fs)
+            fig.canvas.draw()
+            bbox = legend.get_window_extent(renderer=fig.canvas.get_renderer())
+
+            if bbox.width <= 0.42 * fig_width_px and bbox.height <= 0.22 * fig_height_px:
+                break
+
+    # If it is still too large, move it to the upper center inside the first panel
+    if bbox.width > 0.42 * fig_width_px or bbox.height > 0.22 * fig_height_px:
+        legend.remove()
+        legend = axs[0].legend(
+            legend_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.98),
+            fontsize=8,
+            framealpha=0.9,
+            borderpad=0.5,
+            labelspacing=0.35,
+            handlelength=2.0,
+        )
+        fig.canvas.draw()
 
     if out_name is None:
         out_name = "projection_combined_logy" if logy else "projection_combined"
