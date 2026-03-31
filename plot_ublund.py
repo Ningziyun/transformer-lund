@@ -345,7 +345,7 @@ def generate_original_and_generated(model, loader, device, max_batches):
     return original.numpy(), generated.numpy()
 
 
-def plot_combined_1dhist(inputs,labels,out_dir,hist1d_ranges=None,hist1d_bins=20,logy=False,out_name=None,):
+def plot_combined_1dhist(inputs,labels,out_dir,hist1d_ranges=None,hist1d_bins=20,logy=False,out_name=None,logy_floor_mode="clamped"):
     """
     Plot one shared original plus multiple generated samples on the same 1D figures.
     Automatically choose a sensible y-range for both linear and log-scale plots.
@@ -406,7 +406,7 @@ def plot_combined_1dhist(inputs,labels,out_dir,hist1d_ranges=None,hist1d_bins=20
         for hist_counts in all_hist_counts:
             if hist_counts.size > 0:
                 ymax = max(ymax, np.max(hist_counts))
-
+        
         if logy:
             axs[ii].set_yscale("log")
 
@@ -414,9 +414,13 @@ def plot_combined_1dhist(inputs,labels,out_dir,hist1d_ranges=None,hist1d_bins=20
                 min_positive = min(positive_hist_counts)
                 max_positive = max(positive_hist_counts)
 
-                # Use a lower bound slightly below the smallest non-zero bin.
-                # Clamp it so it does not become absurdly tiny.
-                y_min = max(min_positive / 3.0, 1e-4)
+                # Choose the lower bound strategy for the log-y axis.
+                # "clamped": keep the current behavior and do not go below 1e-4.
+                # "tail": expose the sparse tail by using the true minimum positive bin scale.
+                if logy_floor_mode == "tail":
+                    y_min = min_positive / 3.0
+                else:
+                    y_min = max(min_positive / 3.0, 1e-4)
 
                 # Leave some room above the tallest bin for readability.
                 y_max = max_positive * 1.5
@@ -428,7 +432,10 @@ def plot_combined_1dhist(inputs,labels,out_dir,hist1d_ranges=None,hist1d_bins=20
                 axs[ii].set_ylim(y_min, y_max)
             else:
                 # Fallback if everything is empty
-                axs[ii].set_ylim(1e-4, 1.0)
+                if logy_floor_mode == "tail":
+                    axs[ii].set_ylim(1e-10, 1.0)
+                else:
+                    axs[ii].set_ylim(1e-4, 1.0)
 
             # Cleaner minor ticks on log axis
             axs[ii].yaxis.set_major_locator(LogLocator(base=10.0))
@@ -477,7 +484,16 @@ def plot_combined_losses(run_infos, out_dir):
             x = np.arange(1, len(y) + 1)
             mask = ~np.isnan(y)
             if np.any(mask):
-                plt.plot(x[mask], y[mask], marker="o", label=info["caption"])
+                #plt.plot(x[mask], y[mask], marker="o", label=info["caption"])
+                # Use semi-transparent lines without markers to reduce overlap clutter
+                plt.plot(
+                    x[mask],
+                    y[mask],
+                    linestyle="-",
+                    linewidth=2,
+                    alpha=0.6,   # transparency helps reveal overlapping curves
+                    label=info["caption"]
+                )
                 used_any = True
 
         if not used_any:
@@ -614,7 +630,7 @@ def main():
             out_name="projection_combined",
         )
 
-        # Save the log-scale histogram as a second figure
+        # Save the standard log-scale histogram with the current clamped lower bound
         plot_combined_1dhist(
             inputs=combined_inputs,
             labels=combined_labels,
@@ -623,6 +639,19 @@ def main():
             hist1d_bins=args.hist1d_bins,
             logy=True,
             out_name="projection_combined_logy",
+            logy_floor_mode="clamped",
+        )
+
+        # Save an additional log-scale histogram that exposes the sparse tail
+        plot_combined_1dhist(
+            inputs=combined_inputs,
+            labels=combined_labels,
+            out_dir=out_dir,
+            hist1d_ranges=hist1d_ranges,
+            hist1d_bins=args.hist1d_bins,
+            logy=True,
+            out_name="projection_combined_logy_tail",
+            logy_floor_mode="tail",
         )
     else:
         plot_combined_1dhist(
@@ -633,6 +662,7 @@ def main():
             hist1d_bins=args.hist1d_bins,
             logy=args.hist1d_logy,
             out_name="projection_combined_logy" if args.hist1d_logy else "projection_combined",
+            logy_floor_mode="clamped",
         )
 
     # Overlay loss curves from all runs using loss_history.csv
