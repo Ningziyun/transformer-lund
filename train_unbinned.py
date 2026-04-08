@@ -10,8 +10,8 @@ def evaluate_loss(model,X,args):
   #if args.mixed_loss:
   #  pred[:,:,-1]=sigmoid(pred[:,:,-1])
 
-  mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
-  #mask=None
+  #mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
+  mask=None
   
   # CNF mode: likelihood-based loss
   if args.cnf:
@@ -34,6 +34,7 @@ def evaluate_loss(model,X,args):
   return loss
 
 def train(model,train_loader,args):
+  bestloss=1e6
   for batch, X in enumerate(train_loader):
       X = X.to(device)
       optimizer.zero_grad()
@@ -43,13 +44,14 @@ def train(model,train_loader,args):
       loss.backward()
       optimizer.step()
 
-      loss=loss/X.shape[0] #average the loss
+      loss=loss/X.shape[0] #average the loss across batch
 
       if batch % 100 == 0:
         print(f"batch: {batch} loss:{loss.item()}")
+      if loss.item()<bestloss: bestloss=loss.item()
 
-  print(f"train loss={loss.item()}")
-  loss_train.append(loss.item())
+  print(f"train loss={bestloss}")
+  loss_train.append(bestloss)
 
 def test(model, test_loader, args):
   model.eval()  # disable dropout for evaluation
@@ -60,7 +62,7 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
       X = X.to(device)
       loss = evaluate_loss(model, X, args)
-      epochloss += loss.item()
+      epochloss += loss.item() #sum the loss across epoch
     epochloss /= num_samples
     print(f"test loss ={epochloss}")
     loss_test.append(epochloss)
@@ -73,7 +75,7 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
       X = X.to(device)
       loss = evaluate_loss(model, X, args)
-      epochloss += loss.item()
+      epochloss += loss.item() #sum the loss across epoch
 
     epochloss /= num_samples # average loss across whole epoch
     print(f"test loss ={epochloss}")
@@ -87,7 +89,7 @@ def validate(model,test_loader,input_shape,args):
 
       device="cpu"
       for batch, X in enumerate(train_loader):
-        if batch>=10: break
+        if batch>=5: break
         X = X.to(device)
         start=X[:,0,:].unsqueeze(1)
         model.to(device)
@@ -184,12 +186,13 @@ if __name__ == "__main__":
     loss_test=[]
     loss_train=[]
     epochs=args.epochs 
-    for t in range(epochs):
-      print(f"\nEpoch {t+1}\n-------------------------------")
+    for epoch in range(epochs):
+      print(f"\nEpoch {epoch+1}\n-------------------------------")
       starttime=time.time()
       train(model,train_loader,args)
       test(model,test_loader,args)
       print("Took %.2f minutes to run"%((time.time()-starttime)/60))
+      save_model(model, args.log_dir, str(epoch))
   
       if loss_train[-1]<best_loss:
         best_loss=loss_train[-1]

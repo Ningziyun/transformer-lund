@@ -2,6 +2,7 @@ import os,sys
 import time
 import numpy as np
 import pandas as pd
+import h5py
 import ROOT
 import math
 import matplotlib.pyplot as plt
@@ -28,14 +29,9 @@ class ktdr_dataset(torch.utils.data.Dataset):
     self.data=torch.tensor([])
     self.add_stop=add_stop
 
-    Njets=-1
-    df = pd.read_hdf(file_path, "raw", stop=Njets)
-
-    cols=list(df)
-    drcols=[col for col in cols if "deltaR" in col]
-    ktcols=[col for col in cols if "kt" in col]
-    drs=df[drcols].to_numpy()
-    kts=df[ktcols].to_numpy()
+    f = h5py.File(file_path,'r')
+    drs=f["lundplane"]["dr"]
+    kts=f["lundplane"]["kt"]
     self.DR=drs[:,:NConstituents]
     self.kt=kts[:,:NConstituents]
 
@@ -63,24 +59,16 @@ class ktdr_dataset(torch.utils.data.Dataset):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=50, add_stop=False, standardize=False):
+  def __init__(self, file_path, NConstituents=50, add_stop=False):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
 
-    Njets=-1
-    df = pd.read_hdf(file_path, "table", stop=Njets)
-    df = df.loc[df['is_signal_new'] == 0]
-
-    cols=list(df)
-    Ecols=[col for col in cols if "E_" in col]
-    Pxcols=[col for col in cols if "PX_" in col]
-    Pycols=[col for col in cols if "PY_" in col]
-    Pzcols=[col for col in cols if "PZ_" in col]
-    es=df[Ecols].to_numpy()
-    pxs=df[Pxcols].to_numpy()
-    pys=df[Pycols].to_numpy()
-    pzs=df[Pzcols].to_numpy()
+    f = h5py.File(file_path,'r')
+    es=f["constituents"]["E"]
+    pxs=f["constituents"]["PX"]
+    pys=f["constituents"]["PY"]
+    pzs=f["constituents"]["PZ"]
     self.E=es[:,:NConstituents]
     self.px=pxs[:,:NConstituents]
     self.py=pys[:,:NConstituents]
@@ -90,14 +78,6 @@ class constit_dataset(torch.utils.data.Dataset):
     if add_stop:
       self.stop=self.E[:,1:] == 0
       self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
-
-    '''
-    if standardize:
-      dr_mean,dr_std=1.782,1.084
-      kt_mean,kt_std=1.397,1.117
-      self.DR=(self.DR-dr_mean)/dr_std
-      self.kt=(self.kt-kt_mean)/kt_std
-    '''
 
   def __getitem__(self, index):
     inputs=np.array([self.E[index],self.px[index],self.px[index],self.pz[index]])
@@ -119,9 +99,9 @@ def get_loaders(input_format="ktdr",train_file=None,val_file=None,batch_size=256
     test_loader = DataLoader( test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
 
   elif input_format=="4vec":
-    train_dataset = constit_dataset("inputFiles/top_benchmark/train.h5")
+    train_dataset = constit_dataset(train_file)
     train_loader = DataLoader( train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
-    test_dataset = constit_dataset("inputFiles/top_benchmark/test.h5")
+    test_dataset = constit_dataset(val_file)
     test_loader = DataLoader( test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
   return train_loader,test_loader
 
@@ -281,9 +261,9 @@ def mdn_loss(inputs, targets, mask=None):
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
     if mask is not None:
-      return -log_prob[mask].mean()  # mean over valid tokens only
+      return -log_prob[mask].sum()  # mean over valid tokens only
     else:
-      return -log_prob.mean() #Sum over all the training sample
+      return -log_prob.sum() #Sum over all the training sample
 
 # =========================
 # CNF (Continuous Normalizing Flow) components
@@ -500,7 +480,7 @@ def quantile_loss(pred, target, quantiles):
     for i, q in enumerate(quantiles):
       e = target - pred[:, :, i]
       losses.append(torch.max(q*e, (q-1)*e))
-    return torch.mean(torch.stack(losses, dim=0))
+    return torch.sum(torch.stack(losses, dim=0))
 
 def get_lin_scheduler(num_epochs, num_batches, lr_decay, optimizer):
     training_steps = num_epochs * num_batches
@@ -559,8 +539,8 @@ def parse_input():
     p = argparse.ArgumentParser(description="Train transformer/MDN on Lund data")
 
     # data / io
-    p.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_train.h5", help="Path to training .h5")
-    p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_val.h5", help="Path to validation .h5 (unused yet)")
+    p.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5", help="Path to training .h5")
+    p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_val.h5", help="Path to validation .h5 (unused yet)")
     p.add_argument("--batch-size", type=int, default=256, help="Batch size")
     p.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
     p.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
@@ -570,11 +550,11 @@ def parse_input():
     # training
     p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    p.add_argument("--patience", type=int, default=3, help="Early stopping patience")
+    p.add_argument("--patience", type=int, default=5, help="Early stopping patience")
     p.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
 
     # model switches
-    p.add_argument("--mdn", action="store_true", default=True, help="Use MDN head (default: True)")
+    p.add_argument("--mdn", action="store_true", default=False, help="Use MDN head (default: True)")
     p.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
     p.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
 
@@ -622,7 +602,7 @@ def set_seeds(seed):
 
 
 def make_lundplane(input_vec, pad_length=15):
-  #Asssume input is dimensions [Nevents, Nconstituents, 4-vecs]
+  #Assume input is dimensions [Nevents, Nconstituents, 4-vecs]
   jetDef10 = fastjet.JetDefinition(fastjet.antikt_algorithm, 1.0, fastjet.E_scheme)
   #jetDefCA = fastjet.JetDefinition1Param(fastjet.cambridge_algorithm, 10.0)
 
