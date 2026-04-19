@@ -123,12 +123,15 @@ def validate(model,test_loader,input_shape,args):
 
 if __name__ == "__main__":
     args = parse_input()
-    print(f"Logging to {args.log_dir}")
     save_arguments(args)
+    print(f"Logging to {args.log_dir}")
     set_seeds(args.seed)
 
-    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device  # use CLI device if set
+    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}")
+
+    num_features = args.num_features
+    num_bins = tuple(args.num_bins)
 
     # load and preprocess data
     print(f"Loading training set")
@@ -150,9 +153,11 @@ if __name__ == "__main__":
           model=model_transformer_MDN(input_dim=X_example.shape[2],n_mix=args.n_mix,embed_dim=args.embed_dim,num_heads=args.num_heads,
                                 num_layers=args.num_layers,ff_dim=args.ff_dim,)
         else:
-          model=model_transformer(input_dim=X_example.shape[2],embed_dim=args.embed_dim,num_heads=args.num_heads,
-                             num_layers=args.num_layers,ff_dim=args.ff_dim,)
-          #model=model_DNN(X.shape[1],X_example.shape[2])
+          model = test_model(
+            input_dim=X.shape[2],
+            embed_dim=args.embed_dim, num_heads=args.num_heads,
+            num_layers=args.num_layers, ff_dim=args.ff_dim
+          )
 
     #Set the loss
     if args.cnf:
@@ -176,13 +181,41 @@ if __name__ == "__main__":
       print(f"Model params: {n_params}")
     model.to(device)
 
-    #Set the optimizer
+    aux_mdn_head = None
+    aux_cnf_flow = None
+    aux_optimizer = None
+
+    if doMultiLossPlot:
+      # We train ONLY the auxiliary head parameters on detached context,
+      # so it never affects the main model iteration.
+      if doCNF:
+        # CNF main: log MDN-NLL with an auxiliary MDN head
+        aux_mdn_head = _MDNHeadFromContext(
+          context_dim=args.embed_dim, input_dim=X.shape[2], n_mix=args.n_mix
+        ).to(device)
+        aux_optimizer = torch.optim.Adam(aux_mdn_head.parameters(), lr=args.lr)
+
+      elif doMDN:
+        # MDN main: log CNF-NLL with an auxiliary flow head
+        aux_cnf_flow = _CondRealNVP2D(context_dim=args.embed_dim, hidden=args.flow_hidden).to(device)
+        aux_optimizer = torch.optim.Adam(aux_cnf_flow.parameters(), lr=args.lr)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
-    #Run the training loop
+    # Loss functions
+    if doCNF:
+      loss_fn = None  # we call cnf_loss(...) directly
+    elif not doMDN:
+      loss_fn = nn.MSELoss(reduction='none')
+      if doMixedLoss:
+        loss_fn2 = nn.BCEWithLogitsLoss(reduction='none')
+        sigmoid=nn.Sigmoid()
+    else:
+      loss_fn=mdn_loss
+
     best_loss=1e6
     patience_counter=0
-    patience=args.patience
+    patience = args.patience
     loss_test=[]
     loss_train=[]
     epochs=args.epochs 
