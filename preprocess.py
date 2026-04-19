@@ -536,7 +536,7 @@ def discretize_data(
     labelType = "qcd"
     if args.class_label == 1:
       labelType = "top"
-    file = ROOT.TFile.Open("originalJets_%s_%s.root"%(labelType,sample_name), "RECREATE")
+    file = ROOT.TFile.Open("%s/rootified/originalJets_%s_%s.root"%("/".join(output_file.split("/")[:-2]),labelType,sample_name), "RECREATE")
     tree = ROOT.TTree("tree","tree")
 
     constit_pt = ROOT.std.vector[float]()
@@ -619,6 +619,8 @@ if __name__ == "__main__":
     if not os.path.exists(output_path):
         print("\nCreating output path\n")
         os.makedirs(output_path)
+    output_path2 = os.path.join(os.path.dirname(args.input_file), "rootified")
+    if not os.path.exists(output_path2): os.makedirs(output_path2)
     output_file = f"{sample_name}_{['qcd', 'top'][args.class_label]}_{args.tag}.h5"
     output_file = os.path.join(output_path, output_file)
 

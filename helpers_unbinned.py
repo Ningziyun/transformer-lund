@@ -2,6 +2,7 @@ import os,sys
 import time
 import numpy as np
 import pandas as pd
+import h5py
 import ROOT
 import math
 import matplotlib.pyplot as plt
@@ -18,6 +19,7 @@ from torchinfo import summary
 from torch import nn
 from torch.utils.data import DataLoader
 from torch.distributions.multivariate_normal import MultivariateNormal
+from torch.optim.lr_scheduler import LambdaLR
 torch.multiprocessing.set_sharing_strategy("file_system")
 from torchviz import make_dot
 
@@ -27,14 +29,9 @@ class ktdr_dataset(torch.utils.data.Dataset):
     self.data=torch.tensor([])
     self.add_stop=add_stop
 
-    Njets=-1
-    df = pd.read_hdf(file_path, "raw", stop=Njets)
-
-    cols=list(df)
-    drcols=[col for col in cols if "deltaR" in col]
-    ktcols=[col for col in cols if "kt" in col]
-    drs=df[drcols].to_numpy()
-    kts=df[ktcols].to_numpy()
+    f = h5py.File(file_path,'r')
+    drs=f["lundplane"]["dr"]
+    kts=f["lundplane"]["kt"]
     self.DR=drs[:,:NConstituents]
     self.kt=kts[:,:NConstituents]
 
@@ -62,24 +59,16 @@ class ktdr_dataset(torch.utils.data.Dataset):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=50, add_stop=False, standardize=False):
+  def __init__(self, file_path, NConstituents=50, add_stop=False):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
 
-    Njets=-1
-    df = pd.read_hdf(file_path, "table", stop=Njets)
-    df = df.loc[df['is_signal_new'] == 0]
-
-    cols=list(df)
-    Ecols=[col for col in cols if "E_" in col]
-    Pxcols=[col for col in cols if "PX_" in col]
-    Pycols=[col for col in cols if "PY_" in col]
-    Pzcols=[col for col in cols if "PZ_" in col]
-    es=df[Ecols].to_numpy()
-    pxs=df[Pxcols].to_numpy()
-    pys=df[Pycols].to_numpy()
-    pzs=df[Pzcols].to_numpy()
+    f = h5py.File(file_path,'r')
+    es=f["constituents"]["E"]
+    pxs=f["constituents"]["PX"]
+    pys=f["constituents"]["PY"]
+    pzs=f["constituents"]["PZ"]
     self.E=es[:,:NConstituents]
     self.px=pxs[:,:NConstituents]
     self.py=pys[:,:NConstituents]
@@ -89,14 +78,6 @@ class constit_dataset(torch.utils.data.Dataset):
     if add_stop:
       self.stop=self.E[:,1:] == 0
       self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
-
-    '''
-    if standardize:
-      dr_mean,dr_std=1.782,1.084
-      kt_mean,kt_std=1.397,1.117
-      self.DR=(self.DR-dr_mean)/dr_std
-      self.kt=(self.kt-kt_mean)/kt_std
-    '''
 
   def __getitem__(self, index):
     inputs=np.array([self.E[index],self.px[index],self.px[index],self.pz[index]])
@@ -109,18 +90,18 @@ class constit_dataset(torch.utils.data.Dataset):
   def __len__(self):
     return len(self.E)
 
-def get_loaders(input_format="ktdr",batch_size=256, num_workers=1, shuffle=True):
+def get_loaders(input_format="ktdr",train_file=None,val_file=None,batch_size=256, num_workers=1, shuffle=True):
 
   if input_format=="ktdr":
-    train_dataset = ktdr_dataset("inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5")
+    train_dataset = ktdr_dataset(train_file)
     train_loader = DataLoader( train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
-    test_dataset = ktdr_dataset("inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_val.h5")
+    test_dataset = ktdr_dataset(val_file)
     test_loader = DataLoader( test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
 
   elif input_format=="4vec":
-    train_dataset = constit_dataset("inputFiles/top_benchmark/train.h5")
+    train_dataset = constit_dataset(train_file)
     train_loader = DataLoader( train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
-    test_dataset = constit_dataset("inputFiles/top_benchmark/test.h5")
+    test_dataset = constit_dataset(val_file)
     test_loader = DataLoader( test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
   return train_loader,test_loader
 
@@ -280,9 +261,201 @@ def mdn_loss(inputs, targets, mask=None):
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
     if mask is not None:
-      return -log_prob[mask].mean()  # mean over valid tokens only
+      return -log_prob[mask].sum()  # mean over valid tokens only
     else:
-      return -log_prob.mean() #Sum over all the training sample
+      return -log_prob.sum() #Sum over all the training sample
+
+# =========================
+# CNF (Continuous Normalizing Flow) components
+# =========================
+
+class CondVectorField(nn.Module):
+  """
+  Conditional vector field: dx/dt = f(t, x, c)
+  x: [B, D]
+  c: [B, C] (context from transformer)
+  """
+  def __init__(self, x_dim, c_dim, hidden=128):
+    super().__init__()
+    self.net = nn.Sequential(
+      nn.Linear(x_dim + c_dim + 1, hidden),  # +1 for time embedding (t)
+      nn.SiLU(),
+      nn.Linear(hidden, hidden),
+      nn.SiLU(),
+      nn.Linear(hidden, x_dim),
+    )
+
+  def forward(self, t, x, c):
+    # t: scalar tensor or float, make it a column
+    if not torch.is_tensor(t):
+      t = torch.tensor(t, device=x.device, dtype=x.dtype)
+    tt = torch.ones(x.shape[0], 1, device=x.device, dtype=x.dtype) * t
+    xc = torch.cat([x, c, tt], dim=-1)
+    return self.net(xc)
+
+
+def hutch_trace(f, x):
+  """
+  Hutchinson trace estimator for divergence: tr(df/dx)
+  f: [B, D], x requires_grad=True
+  returns: [B]
+  """
+  eps = torch.randn_like(x)
+  v = (f * eps).sum()
+  (grad,) = torch.autograd.grad(v, x, create_graph=True)
+  return (grad * eps).sum(dim=-1)
+
+
+class ConditionalCNF(nn.Module):
+  """
+  A minimal CNF using Euler integration + Hutchinson trace estimator.
+  This avoids external dependencies (torchdiffeq), and is enough to get a working CNF mode.
+  """
+  def __init__(self, x_dim, c_dim, hidden=128, t0=0.0, t1=1.0, steps=8):
+    super().__init__()
+    self.x_dim = x_dim
+    self.c_dim = c_dim
+    self.hidden = hidden
+    self.t0 = t0
+    self.t1 = t1
+    self.steps = steps
+    self.vf = CondVectorField(x_dim, c_dim, hidden=hidden)
+
+  def _time_grid(self, device, dtype):
+    return torch.linspace(self.t0, self.t1, self.steps, device=device, dtype=dtype)
+
+  def log_prob(self, x1, c):
+    """
+    Compute log p(x1 | c) by integrating backward from x1 -> z0 (base)
+    x1: [B, D]
+    c:  [B, C]
+    """
+    device, dtype = x1.device, x1.dtype
+    t = self._time_grid(device, dtype)
+
+    x = x1
+    logp_correction = torch.zeros(x.shape[0], device=device, dtype=dtype)
+
+    # integrate backward: x_{k-1} = x_k - dt * f(t_k, x_k, c)
+    for k in range(len(t) - 1, 0, -1):
+      dt = t[k] - t[k - 1]
+      x = x.detach().requires_grad_(True)
+      f = self.vf(t[k], x, c)
+      div = hutch_trace(f, x)  # divergence estimate
+      x = x - dt * f
+      logp_correction = logp_correction + dt * div
+
+    z0 = x
+
+    # standard normal base log prob
+    log2pi = torch.log(torch.tensor(2.0 * math.pi, device=device, dtype=dtype))
+    logp0 = -0.5 * (z0 ** 2).sum(dim=-1) - 0.5 * self.x_dim * log2pi
+
+    return logp0 + logp_correction
+
+  @torch.no_grad()
+  def sample(self, c):
+    """
+    Sample x1 ~ p(x|c) by sampling z0~N(0,I) and integrating forward.
+    c: [B, C]
+    returns x1: [B, D]
+    """
+    device, dtype = c.device, c.dtype
+    t = self._time_grid(device, dtype)
+
+    z = torch.randn(c.shape[0], self.x_dim, device=device, dtype=dtype)
+
+    # integrate forward: x_{k+1} = x_k + dt * f(t_k, x_k, c)
+    x = z
+    for k in range(0, len(t) - 1):
+      dt = t[k + 1] - t[k]
+      f = self.vf(t[k], x, c)
+      x = x + dt * f
+
+    return x
+
+
+class model_transformer_CNF(nn.Module):
+  """
+  Transformer context encoder + CNF head for conditional density p(x_{t+1} | x_{<=t}).
+  This produces a likelihood-based model (harder constraints require bounded transforms; CNF itself is on R^D).
+  """
+  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128,
+               cnf_hidden=128, cnf_steps=8):
+    super().__init__()
+    self.input_dim = input_dim
+    self.embed_dim = embed_dim
+
+    # same embedding + transformer encoder as your regression model
+    self.embed = nn.Linear(input_dim, embed_dim)
+    encoder_layer = nn.TransformerEncoderLayer(
+      d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=0.1, batch_first=True
+    )
+    self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+
+    # project hidden -> context vector for CNF
+    self.ctx = nn.Linear(embed_dim, embed_dim)
+
+    # CNF head models distribution of the next token x_{t+1} given context
+    self.cnf = ConditionalCNF(x_dim=input_dim, c_dim=embed_dim, hidden=cnf_hidden, steps=cnf_steps)
+
+  def forward_context(self, x):
+    """
+    x: [B, L, D] (inputs up to time t)
+    returns c: [B, L, C] context vectors aligned with each token
+    """
+    seq_len = x.shape[1]
+    h = self.embed(x)
+
+    # causal mask (no look-ahead)
+    mask = torch.triu(torch.ones(seq_len, seq_len, device=h.device), diagonal=1).bool()
+    h = self.encoder(h, mask=mask)
+
+    return self.ctx(h)
+  
+  def forward(self, x):
+    # Safe forward for debugging / torchinfo; does NOT compute likelihood.
+    return self.forward_context(x)
+
+
+  def nll(self, inputs, targets, mask=None):
+    """
+    Negative log likelihood for all target tokens.
+    inputs:  [B, L, D]  (x_0..x_{L-1})
+    targets: [B, L, D]  (x_1..x_{L})
+    mask:    [B, L] bool, True=valid token
+    returns scalar loss (sum over valid tokens)
+    """
+    c = self.forward_context(inputs)  # [B, L, C]
+    B, L, D = targets.shape
+
+    x = targets.reshape(B * L, D)
+    cc = c.reshape(B * L, c.shape[-1])
+
+    logp = self.cnf.log_prob(x, cc)   # [B*L]
+    nll = -logp
+
+    if mask is not None:
+      m = mask.reshape(B * L)
+      nll = nll[m]
+
+    return nll.sum()
+
+  @torch.no_grad()
+  def generate(self, x_init, steps):
+    """
+    Autoregressive sampling:
+    given initial token(s) x_init: [B, L0, D]
+    generate 'steps' new tokens by sampling CNF at each step.
+    """
+    seq = x_init.clone()
+    for _ in range(steps):
+      c = self.forward_context(seq)      # [B, L, C]
+      c_last = c[:, -1, :]               # [B, C]
+      x_next = self.cnf.sample(c_last)   # [B, D]
+      seq = torch.cat([seq, x_next.unsqueeze(1)], dim=1)
+    return seq
+
 
 class model_transformer_quantile(model_transformer):
   def __init__(self, input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
@@ -307,7 +480,7 @@ def quantile_loss(pred, target, quantiles):
     for i, q in enumerate(quantiles):
       e = target - pred[:, :, i]
       losses.append(torch.max(q*e, (q-1)*e))
-    return torch.mean(torch.stack(losses, dim=0))
+    return torch.sum(torch.stack(losses, dim=0))
 
 def get_lin_scheduler(num_epochs, num_batches, lr_decay, optimizer):
     training_steps = num_epochs * num_batches
@@ -366,24 +539,29 @@ def parse_input():
     p = argparse.ArgumentParser(description="Train transformer/MDN on Lund data")
 
     # data / io
-    p.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_train.h5", help="Path to training .h5")
-    p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_val.h5", help="Path to validation .h5 (unused yet)")
+    p.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5", help="Path to training .h5")
+    p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_val.h5", help="Path to validation .h5 (unused yet)")
     p.add_argument("--batch-size", type=int, default=256, help="Batch size")
     p.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
     p.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     p.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
-    p.add_argument("--input_format", type=str, choices=["ktdr","4vec"], help="What format of inputs we are using")
+    p.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
 
     # training
     p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    p.add_argument("--patience", type=int, default=3, help="Early stopping patience")
+    p.add_argument("--patience", type=int, default=5, help="Early stopping patience")
     p.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
 
     # model switches
-    p.add_argument("--mdn", action="store_true", default=True, help="Use MDN head (default: True)")
+    p.add_argument("--mdn", action="store_true", default=False, help="Use MDN head (default: True)")
     p.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
     p.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
+
+    # CNF switch (overrides mdn/regression)
+    p.add_argument("--cnf", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
+    p.add_argument("--cnf-hidden", type=int, default=128, help="CNF vector field hidden size")
+    p.add_argument("--cnf-steps", type=int, default=8, help="CNF Euler steps for integration")
 
     # transformer hyperparams (keep defaults = your current test_model defaults)
     p.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
@@ -424,7 +602,7 @@ def set_seeds(seed):
 
 
 def make_lundplane(input_vec, pad_length=15):
-  #Asssume input is dimensions [Nevents, Nconstituents, 4-vecs]
+  #Assume input is dimensions [Nevents, Nconstituents, 4-vecs]
   jetDef10 = fastjet.JetDefinition(fastjet.antikt_algorithm, 1.0, fastjet.E_scheme)
   #jetDefCA = fastjet.JetDefinition1Param(fastjet.cambridge_algorithm, 10.0)
 
@@ -496,8 +674,8 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
     axs[ii].set_yscale("log")
 
   name="projection"
-  fig.savefig(outdir+name+".png")
-  fig.savefig(outdir+name+".pdf")
+  fig.savefig(os.path.join(outdir,name+".png"))
+  fig.savefig(os.path.join(outdir,name+".pdf"))
   plt.close(fig)
 
 def lund_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots/"):
@@ -528,8 +706,8 @@ def lund_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots
     fig.colorbar(pos[3],ax=axs)
 
     name="lund"
-    fig.savefig(outdir+name+".png")
-    fig.savefig(outdir+name+".pdf")
+    fig.savefig(os.path.join(outdir,name+".png"))
+    fig.savefig(os.path.join(outdir,name+".pdf"))
     plt.close(fig)
 
 def loss_plot(loss_train,loss_test,outdir="./Plots/"):
@@ -547,8 +725,8 @@ def loss_plot(loss_train,loss_test,outdir="./Plots/"):
   ax.set_ylabel("Loss")
   ax.set_yscale("log")
   ax.grid(True)
-  fig.savefig(outdir+"loss_vs_epoch.png")
-  fig.savefig(outdir+"loss_vs_epoch.pdf")
+  fig.savefig(os.path.join(outdir,"loss_vs_epoch.png"))
+  fig.savefig(os.path.join(outdir,"loss_vs_epoch.pdf"))
   plt.close(fig)
 
 if __name__ == "__main__":
