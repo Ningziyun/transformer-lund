@@ -16,19 +16,16 @@ pip install -r requirements.txt
 
 
 **Get dataset**
-Input files for the top-benchmark dataset can be found here https://zenodo.org/records/2603256 and download via
+Input files for this code can be found at https://zenodo.org/records/2603256
+
+Setup the directory structure and download the files as such for the rest of the automation to work
 ```
 mkdir inputFiles/top_benchmark
 cd inputFiles/top_benchmark
 wget https://zenodo.org/records/2603256/files/train.h5
 wget https://zenodo.org/records/2603256/files/test.h5
 wget https://zenodo.org/records/2603256/files/val.h5
-cd ../..
-```
-
-Input files from the jetclass dataset from https://zenodo.org/records/6619768 can be downloaded via
-```
-download_jetclass.py
+cd ..
 ```
 
 **Data Setup**

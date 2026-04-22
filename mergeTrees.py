@@ -15,4 +15,4 @@ for inp in inputs: merger.AddFile(inp)
 if not merger.Merge():
     print("Merging failed!")
 else:
-    print(f"Successfully merged files into {output}")
+    print("Successfully merged files into merged.root")
