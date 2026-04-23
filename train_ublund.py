@@ -19,19 +19,58 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 from torchviz import make_dot
 
 import matplotlib.pyplot as plt
+import csv
+from torch.optim.lr_scheduler import LambdaLR
 
 # -----------------------------
 # Plotting utility (unchanged)
 # -----------------------------
-def quickLundPlot(inputs, labels=["original","generated","predicted"],
-                  epoch_losses=None, out_dir="",
-                  loss_curves=None):
-    # loss_curves: optional dict like {"mdn_nll": [...], "cnf_nll": [...]}
+def quickLundPlot(inputs,labels=["original", "generated", "predicted"],
+    epoch_losses=None,
+    out_dir="",
+    loss_curves=None,
+    hist2d_range=None,
+    hist1d_ranges=None,
+    hist2d_bins=(30, 40),
+    hist1d_bins=20,
+):
+  """
+  Plot Lund-plane 2D histograms, 1D projections, and optional loss curves.
+
+  Parameters
+  ----------
+  inputs : list of np.ndarray
+      Each array should have shape (N, D).
+  labels : list of str
+      Labels for each input array.
+  epoch_losses : list[float] or None
+      Optional self-training loss curve.
+  out_dir : str
+      Output directory.
+  loss_curves : dict or None
+      Optional dict of named loss curves, e.g. {"mdn_nll": [...], "cnf_nll": [...]}.
+  hist2d_range : list or None
+      2D histogram range in the form [[x_min, x_max], [y_min, y_max]].
+      If None, defaults to the old hard-coded setting.
+  hist1d_ranges : list or None
+      Per-dimension 1D histogram ranges, e.g. [[xmin, xmax], [ymin, ymax]].
+      If None, defaults to the old hard-coded setting.
+  hist2d_bins : tuple
+      Number of bins for the 2D histogram.
+  hist1d_bins : int
+      Number of bins for the 1D histograms.
+  """
 
   linestyles=["-","--","-.",":"]
 
   Ndim=inputs[0].shape[1]
   Nin=len(inputs)
+
+  if hist2d_range is None:
+    hist2d_range = [[-3, 7], [-5, 7]]
+
+  if hist1d_ranges is None:
+    hist1d_ranges = [[-3, 7] for _ in range(Ndim)]
 
   mins=np.zeros(Ndim)
   maxs=np.zeros(Ndim)
@@ -45,7 +84,7 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"],
     fig, axs = plt.subplots(Nin,1,figsize=(8.0,8.0))
     for jj in range(Nin):
       #pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[mins[0],maxs[0]],[mins[1],maxs[1]]],bins=[20,20],cmap="Blues", norm="log")
-      pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[-3,7],[-5,7]],bins=[30,40],cmap="Blues", norm="log")
+      pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=hist2d_range,bins=hist2d_bins,cmap="Blues", norm="log")
       axs[jj].set_title(labels[jj])          # jj=0 -> original, jj=1 -> generated
       axs[jj].set_ylabel("log(kt)")
       if jj == Nin - 1:
@@ -63,10 +102,11 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"],
   fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
   if Ndim==1: axs=[axs]
   for ii in range(Ndim):
+    feature_idx = 1 - ii  # Swap feature order so top panel shows kt and bottom panel shows log(1/deltaR)
     for jj in range(Nin):
       #axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
-      axs[ii].hist(inputs[jj][:,ii],bins=20,range=[-3,7],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
-      axs[jj].set_title(["log(kt)","log(1/dr)"][jj])          # jj=0 -> log(kt), jj=1 -> log(1/dr)
+      axs[ii].hist(inputs[jj][:,feature_idx], bins=hist1d_bins,range=hist1d_ranges[jj],histtype="step",density=True,linestyle=linestyles[jj],label=labels[jj])
+      axs[jj].set_title(["log(kt)","log(1/deltaR)"][jj])          # jj=0 -> log(kt), jj=1 -> log(1/dr)
       axs[jj].set_ylabel("Density")
       axs[ii].set_ylim(0.0, 0.5)
       if jj == Nin - 1:
@@ -112,7 +152,115 @@ def quickLundPlot(inputs, labels=["original","generated","predicted"],
       fig.savefig(os.path.join(out_dir, f"loss_vs_epoch__{metric_name}.png"))
       fig.savefig(os.path.join(out_dir, f"loss_vs_epoch__{metric_name}.pdf"))
       plt.close(fig)
+  # Save the epoch-level loss values as CSV
+  save_loss_csv(
+    epoch_losses=epoch_losses,
+    loss_curves=loss_curves,
+    out_dir=out_dir
+  )
 
+def save_loss_csv(epoch_losses=None, loss_curves=None, out_dir=""):
+  """
+  Save epoch-level loss information to CSV.
+
+  The CSV will contain one row per epoch and columns such as:
+  - epoch
+  - self_loss
+  - mdn_nll
+  - cnf_nll
+
+  Missing values are left blank.
+  """
+  if ((epoch_losses is None or len(epoch_losses) == 0) and
+      (loss_curves is None or len(loss_curves) == 0)):
+    return
+
+  os.makedirs(out_dir, exist_ok=True)
+
+  # Collect all metric names that should appear as CSV columns
+  metric_names = []
+  if epoch_losses is not None and len(epoch_losses) > 0:
+    metric_names.append("self_loss")
+
+  if loss_curves is not None:
+    for metric_name, curve in loss_curves.items():
+      if curve is not None and len(curve) > 0:
+        metric_names.append(metric_name)
+
+  # Determine the maximum number of epochs across all curves
+  max_len = 0
+  if epoch_losses is not None:
+    max_len = max(max_len, len(epoch_losses))
+  if loss_curves is not None:
+    for _, curve in loss_curves.items():
+      if curve is not None:
+        max_len = max(max_len, len(curve))
+
+  csv_path = os.path.join(out_dir, "loss_history.csv")
+
+  with open(csv_path, "w", newline="") as f:
+    writer = csv.writer(f)
+
+    # Write header
+    writer.writerow(["epoch"] + metric_names)
+
+    # Write one row per epoch
+    for i in range(max_len):
+      row = [i + 1]
+
+      for metric_name in metric_names:
+        if metric_name == "self_loss":
+          value = epoch_losses[i] if (epoch_losses is not None and i < len(epoch_losses)) else ""
+        else:
+          curve = loss_curves.get(metric_name, None) if loss_curves is not None else None
+          value = curve[i] if (curve is not None and i < len(curve)) else ""
+
+        row.append(value)
+
+      writer.writerow(row)
+
+  print(f"Saved loss CSV to {csv_path}")
+
+def save_lr_csv(lr_history, out_dir=""):
+  """
+  Save epoch-level learning rate history to CSV.
+  """
+  if lr_history is None or len(lr_history) == 0:
+    return
+
+  os.makedirs(out_dir, exist_ok=True)
+
+  csv_path = os.path.join(out_dir, "lr_history.csv")
+
+  with open(csv_path, "w", newline="") as f:
+    writer = csv.writer(f)
+
+    # Write header
+    writer.writerow(["epoch", "lr"])
+
+    # Write one row per epoch
+    for i, lr in enumerate(lr_history):
+      writer.writerow([i + 1, lr])
+
+  print(f"Saved LR CSV to {csv_path}")
+  
+def save_lr_plot(lr_history, out_dir=""):
+  """
+  Save epoch-level learning rate history as PNG and PDF.
+  """
+  if lr_history is None or len(lr_history) == 0:
+    return
+
+  fig = plt.figure(figsize=(6.0, 4.0))
+  plt.plot(range(1, len(lr_history) + 1), lr_history, marker="o")
+  plt.xlabel("Epoch")
+  plt.ylabel("Learning Rate")
+  plt.title("Learning Rate vs Epoch")
+  plt.grid(True)
+
+  fig.savefig(os.path.join(out_dir, "lr_vs_epoch.png"))
+  fig.savefig(os.path.join(out_dir, "lr_vs_epoch.pdf"))
+  plt.close(fig)
 
 # -----------------------------
 # Dataset (unchanged)
@@ -248,6 +396,57 @@ class test_model(nn.Module):
           next_pred = pred[:, -1:, :]
           seq = torch.cat([seq, next_pred], dim=1)
       return seq
+
+##########################################
+# Scheduler
+##########################################
+def get_cos_damping_scheduler(
+    optimizer,
+    base_lr,
+    num_epochs,
+    cos_start_epoch=0,
+    cos_end_epoch=None,
+    cos_damping_final_lr=5e-5,
+    cos_damping_amplitude=0.1,
+    cos_damping_period_epochs=1.0,
+):
+  """
+  Epoch-level cosine damping scheduler.
+  LR is updated once per epoch, not once per batch.
+  """
+  start_epoch = max(int(cos_start_epoch), 0)
+
+  if cos_end_epoch is None:
+    cos_end_epoch = num_epochs
+  end_epoch = max(int(cos_end_epoch), start_epoch + 1)
+
+  final_ratio = cos_damping_final_lr / base_lr
+  final_ratio = max(final_ratio, 1e-12)
+
+  period_epochs = max(float(cos_damping_period_epochs), 1e-12)
+
+  def lr_lambda(epoch):
+    if epoch < start_epoch:
+      return 1.0
+
+    if epoch >= end_epoch:
+      return final_ratio
+
+    progress = (epoch - start_epoch) / float(end_epoch - start_epoch)
+
+    # Monotonic damping baseline: linear decay from 1.0 to final_ratio
+    baseline = 1.0 + (final_ratio - 1.0) * progress
+
+    # Continuous cosine oscillation after damping starts
+    phase = 2.0 * math.pi * (epoch - start_epoch) / period_epochs
+    oscillation_factor = 1.0 + cos_damping_amplitude * math.cos(phase)
+
+    factor = baseline * oscillation_factor
+    factor = max(factor, 1e-12)
+    return factor
+
+  scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+  return scheduler
 
 
 ##########################################
@@ -513,6 +712,38 @@ def cnf_loss(context, targets, valid_mask=None, flow=None):
     nll = nll[vm]
   return nll.mean()
 
+# -----------------------------
+# Save model (check point)
+# -----------------------------
+
+def save_checkpoint(model,optimizer,epoch,loss,args,ckpt_name=None,train_epoch_losses=None,loss_curves=None,lr_history=None,):
+
+    """
+    Save training checkpoint under args.log_dir/checkpoints/.
+    This does not change the existing output directory structure.
+    """
+    ckpt_dir = os.path.join(args.log_dir, "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    if ckpt_name is None:
+        ckpt_name = f"epoch_{epoch:03d}.pt"
+
+    ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+    torch.save({
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss": loss,
+        "args": vars(args),
+        "doCNF": args.cnf,
+        "doMDN": args.mdn,
+        "doMixedLoss": args.mixed_loss,
+        "train_epoch_losses": train_epoch_losses if train_epoch_losses is not None else [],
+        "loss_curves": loss_curves if loss_curves is not None else {},
+        "lr_history": lr_history if lr_history is not None else [],
+    }, ckpt_path)
+
+    print(f"Saved checkpoint to {ckpt_path}")
 
 # -----------------------------
 # Quantile model (unchanged; not used)
@@ -558,6 +789,18 @@ def parse_input():
     # training
     p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    p.add_argument("--scheduler",type=str,default="none",choices=["none", "cos_damping"],
+        help="Learning rate scheduler type.")
+    p.add_argument("--cos-damping-start-epoch",type=int,default=0,
+        help="Epoch index at which cosine damping starts. LR stays flat before this.")
+    p.add_argument("--cos-damping-end-epoch",type=int,default=None,
+        help="Epoch index at which cosine damping ends. Default: last epoch.")
+    p.add_argument("--cos-damping-final-lr",type=float,default=5e-5,
+        help="Final learning rate reached at the end of cosine damping.")
+    p.add_argument("--cos-damping-amplitude",type=float,default=0.0,
+        help="Amplitude of the oscillation around the decaying LR baseline.")
+    p.add_argument("--cos-damping-period-epochs",type=float,default=1.0,
+        help="Oscillation period in epochs after cosine damping starts.")
     p.add_argument("--patience", type=int, default=3, help="Early stopping patience")
     p.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
 
@@ -610,6 +853,10 @@ if __name__ == "__main__":
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}")
 
+    # Track best epoch and best loss
+    best_loss = float("inf")
+    best_epoch = -1
+    
     num_features = args.num_features
     num_bins = tuple(args.num_bins)
 
@@ -634,6 +881,18 @@ if __name__ == "__main__":
     if doCNF:
       doMDN = False
       doMixedLoss = False
+
+    # Write the model name in txt file
+    model_mode_name = "CNF" if doCNF else ("MDN" if doMDN else "Regression")
+    with open(os.path.join(args.log_dir, "arguments.txt"), "a") as f:
+      f.write("\n")
+      f.write(f"{'resolved_model_mode':20s} {model_mode_name}\n")
+      f.write(f"{'scheduler':20s} {args.scheduler}\n")
+      f.write(f"{'cos_start_epoch':20s} {args.cos_damping_start_epoch}\n")
+      f.write(f"{'cos_end_epoch':20s} {args.cos_damping_end_epoch if args.cos_damping_end_epoch is not None else args.epochs}\n")
+      f.write(f"{'cos_final_lr':20s} {args.cos_damping_final_lr}\n")
+      f.write(f"{'cos_amplitude':20s} {args.cos_damping_amplitude}\n")
+      f.write(f"{'cos_period_epochs':20s} {args.cos_damping_period_epochs}\n")
 
     # construct model
     if args.contin:
@@ -688,6 +947,21 @@ if __name__ == "__main__":
         aux_optimizer = torch.optim.Adam(aux_cnf_flow.parameters(), lr=args.lr)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    
+    # Scheduler
+    if args.scheduler == "cos_damping":
+      scheduler = get_cos_damping_scheduler(
+        optimizer=optimizer,
+        base_lr=args.lr,
+        num_epochs=args.epochs,
+        cos_start_epoch=args.cos_damping_start_epoch,
+        cos_end_epoch=args.cos_damping_end_epoch,
+        cos_damping_final_lr=args.cos_damping_final_lr,
+        cos_damping_amplitude=args.cos_damping_amplitude,
+        cos_damping_period_epochs=args.cos_damping_period_epochs,
+      )
+    else:
+      scheduler = None
 
     # Loss functions
     if doCNF:
@@ -707,6 +981,7 @@ if __name__ == "__main__":
     loss_train=[]
     epochs = args.epochs
     train_epoch_losses = []
+    lr_history = []
     # Store multiple metric curves (epoch-averaged)
     loss_curves = {
       "mdn_nll": [],
@@ -729,8 +1004,8 @@ if __name__ == "__main__":
           targets = X[:, 1:, :]
 
           # Mask out padding tokens: both deltaR and kt are -1
-          #valid_mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))
-          valid_mask = None
+          valid_mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))
+          #valid_mask = None
 
           # -----------------------------
           # Main training objective (backprop)
@@ -826,6 +1101,22 @@ if __name__ == "__main__":
       epoch_avg_loss = epoch_loss_sum / max(epoch_n_batches, 1)
       train_epoch_losses.append(epoch_avg_loss)
 
+      current_lr = optimizer.param_groups[0]["lr"]
+      lr_history.append(current_lr)
+
+      if scheduler is not None:
+          scheduler.step()
+      # Save one checkpoint after each epoch
+      save_checkpoint(
+          model=model,
+          optimizer=optimizer,
+          epoch=t,
+          loss=epoch_avg_loss,
+          args=args,
+          train_epoch_losses=train_epoch_losses,
+          loss_curves=loss_curves,
+          lr_history=lr_history,
+      )
       if doMultiLossPlot:
         # Epoch-averaged metrics for apple-to-apple comparisons
         if epoch_n_mdn > 0:
@@ -836,13 +1127,38 @@ if __name__ == "__main__":
       loss_train.append(loss_main.item())
       if loss_train[-1]<best_loss:
         best_loss=loss_train[-1]
+        best_epoch = t   # record which epoch achieved best loss
         patience_counter=0
+        # Save/update the best checkpoint
+        save_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            epoch=t,
+            loss=best_loss,
+            args=args,
+            ckpt_name="best.pt",
+            train_epoch_losses=train_epoch_losses,
+            loss_curves=loss_curves,
+            lr_history=lr_history,
+        )
       else:
-        patience_counter+=1
-        if patience_counter>=patience:
+        patience_counter += 1
+        if patience_counter >= patience:
           print("Early stoping")
           break
+    save_lr_csv(lr_history, out_dir=args.log_dir)
+    save_lr_plot(lr_history, out_dir=args.log_dir)
+    # ----------------------------------------
+    # Append best epoch information to txt file
+    # ----------------------------------------
+    txt_path = os.path.join(args.log_dir, "arguments.txt")
 
+    with open(txt_path, "a") as f:
+        f.write("\n")
+        f.write("# Best training result\n")
+        f.write(f"best_epoch: {best_epoch}\n")
+        f.write(f"best_loss: {best_loss}\n")
+  
     with torch.no_grad():
       original=torch.empty([0,X.shape[-1]])
       generated=torch.empty([0,X.shape[-1]])
@@ -850,7 +1166,7 @@ if __name__ == "__main__":
       device="cpu"
 
       for batch, X in enumerate(train_loader):
-        if batch>10: break
+        #if batch>10: break
         X = X.to(device)
         start=X[:,0,:].unsqueeze(1)
         model.to(device)
@@ -875,8 +1191,10 @@ if __name__ == "__main__":
         generated=torch.cat([generated,generated_seq.flatten(0,1)])
 
       quickLundPlot(
-        [original.numpy(), generated.numpy()],
-        epoch_losses=train_epoch_losses,
-        out_dir=args.log_dir,
-        loss_curves=(loss_curves if doMultiLossPlot else None)
+          [original.numpy(), generated.numpy()],
+          epoch_losses=train_epoch_losses,
+          out_dir=args.log_dir,
+          loss_curves=(loss_curves if doMultiLossPlot else None),
+          hist2d_range=[[-3, 20], [-20, 7]],
+          hist1d_ranges=[[-3, 20], [-20, 7]],
       )
