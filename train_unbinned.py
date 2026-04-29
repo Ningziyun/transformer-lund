@@ -111,6 +111,38 @@ def validate(model,test_loader,input_shape,args):
         generated=torch.cat([generated,generated_seq])
 
       projection_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()],outdir=args.log_dir)
+      
+      hist1d_ranges = None
+      if args.hist1d_ranges is not None:
+        if len(args.hist1d_ranges) != 4:
+          raise ValueError("--hist1d-ranges should be: kt_min kt_max dr_min dr_max")
+        hist1d_ranges = [
+          [args.hist1d_ranges[0], args.hist1d_ranges[1]],
+          [args.hist1d_ranges[2], args.hist1d_ranges[3]],
+        ]
+
+      flat_original = original.flatten(0, 1).numpy()
+      flat_generated = generated.flatten(0, 1).numpy()
+
+      plot_combined_1dhist(
+          [flat_original, flat_generated],
+          labels=["original", "generated"],
+          out_dir=args.log_dir,
+          hist1d_ranges=hist1d_ranges,
+          hist1d_bins=args.hist1d_bins,
+          logy=False,
+          out_name="hist1d",
+      )
+
+      plot_combined_1dhist(
+          [flat_original, flat_generated],
+          labels=["original", "generated"],
+          out_dir=args.log_dir,
+          hist1d_ranges=hist1d_ranges,
+          hist1d_bins=args.hist1d_bins,
+          logy=True,
+          out_name="hist1d_logy",
+      )
 
       if args.input_format=="ktdr":
         lund_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()],outdir=args.log_dir)

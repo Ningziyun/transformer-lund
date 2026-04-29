@@ -578,7 +578,49 @@ def parse_input():
     # logging / checkpointing
     p.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
     p.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
-    p.add_argument("--model-path", dest="model_path", type=str, default="",help="Path to model/log_dir to load when --contin is set")
+    p.add_argument("--model-path", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/log_dir to load when --contin is set")
+    
+    # plotting options
+    p.add_argument(
+        "--hist2d-xrange",
+        type=float,
+        nargs=2,
+        default=None,
+        help="2D Lund histogram x range: xmin xmax",
+    )
+    p.add_argument(
+        "--hist2d-yrange",
+        type=float,
+        nargs=2,
+        default=None,
+        help="2D Lund histogram y range: ymin ymax",
+    )
+    p.add_argument(
+        "--hist2d-bins",
+        type=int,
+        nargs=2,
+        default=[20, 20],
+        help="2D Lund histogram bins: xbins ybins",
+    )
+    p.add_argument(
+        "--hist1d-ranges",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Flattened 1D ranges: kt_min kt_max dr_min dr_max",
+    )
+    p.add_argument(
+        "--hist1d-bins",
+        type=int,
+        default=30,
+        help="Number of bins for 1D histograms",
+    )
+    p.add_argument(
+        "--hist1d-logy",
+        action="store_true",
+        default=False,
+        help="Also save log-y 1D histograms",
+    )
     return p.parse_args()
 
 def save_arguments(args):
@@ -678,7 +720,14 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
   fig.savefig(os.path.join(outdir,name+".pdf"))
   plt.close(fig)
 
-def lund_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots/"):
+def lund_plot(
+    inputs,
+    labels=["original","generated","predicted"],
+    outdir="./Plots/",
+    hist2d_xrange=None,
+    hist2d_yrange=None,
+    hist2d_bins=(20, 20),
+):
 
   if not os.path.exists(outdir):
     os.makedirs(outdir)
@@ -700,14 +749,195 @@ def lund_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots
 
   #Make plot
   if Ndim>=2:
-    fig, axs = plt.subplots(Nin,1,figsize=(8.0,8.0))
-    for jj in range(Nin):
-      pos=axs[jj].hist2d(inputs[jj][:,0],inputs[jj][:,1],range=[[mins[0],maxs[0]],[mins[1],maxs[1]]],bins=[20,20],cmap="Blues", norm="log")
-    fig.colorbar(pos[3],ax=axs)
+    # Create subplots for each input (original, generated, etc.)
+    fig, axs = plt.subplots(Nin, 1, figsize=(8.5, 4.2 * Nin))
 
-    name="lund"
-    fig.savefig(os.path.join(outdir,name+".png"))
-    fig.savefig(os.path.join(outdir,name+".pdf"))
+    # Ensure axs is always iterable
+    if Nin == 1:
+        axs = [axs]
+
+    for jj in range(Nin):
+
+        # Determine plotting range
+        x_range = hist2d_xrange if hist2d_xrange is not None else [mins[1], maxs[1]]
+        y_range = hist2d_yrange if hist2d_yrange is not None else [mins[0], maxs[0]]
+
+        # Plot 2D histogram
+        h = axs[jj].hist2d(
+            inputs[jj][:, 1],   # x = log(kt)
+            inputs[jj][:, 0],   # y = log(1/deltaR)
+            range=[x_range, y_range],
+            bins=hist2d_bins,
+            cmap="Blues",
+            norm="log"
+        )
+
+        # --------------------------
+        # Add titles and labels
+        # --------------------------
+
+        # Panel title (original / generated / etc.)
+        if jj < len(labels):
+            axs[jj].set_title(labels[jj])
+        else:
+            axs[jj].set_title(f"sample_{jj}")
+
+        # Axis labels
+        axs[jj].set_xlabel(r"$\log(k_t)$")
+        axs[jj].set_ylabel(r"$\log(1/\Delta R)$")
+
+    # --------------------------
+    # Add colorbar (shared)
+    # --------------------------
+    # Leave space on the right for colorbar
+    fig.subplots_adjust(
+        left=0.10,
+        right=0.80,   # <-- KEY: reserve space
+        bottom=0.08,
+        top=0.90,
+        hspace=0.35
+    )
+
+    # Create a dedicated axis for the colorbar
+    cbar_ax = fig.add_axes([0.83, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
+
+    cbar = fig.colorbar(h[3], cax=cbar_ax)
+    cbar.set_label("Density (log scale)")
+
+    # Global title
+    fig.suptitle("Lund Plane Distribution", fontsize=14)
+
+    # Save
+    name = "lund"
+    fig.savefig(os.path.join(outdir, name + ".png"), bbox_inches="tight")
+    fig.savefig(os.path.join(outdir, name + ".pdf"), bbox_inches="tight")
+    plt.close(fig)
+
+def plot_combined_1dhist(
+    inputs,
+    labels=None,
+    out_dir="./Plots/",
+    hist1d_ranges=None,
+    hist1d_bins=30,
+    logy=False,
+    out_name=None,
+    logy_floor_mode="clamped",
+):
+    """
+    Plot overlaid 1D histograms for Lund features.
+
+    Expected feature order:
+      inputs[:, 0] = log(1/deltaR)
+      inputs[:, 1] = log(kt)
+
+    The top panel is log(kt), and the bottom panel is log(1/deltaR).
+    This matches the plotting convention used in plot_ublund.py.
+    """
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    if labels is None:
+        labels = [f"sample_{i}" for i in range(len(inputs))]
+
+    linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
+    Ndim = inputs[0].shape[1]
+
+    if hist1d_ranges is None:
+        hist1d_ranges = []
+
+        for ii in range(Ndim):
+            feature_idx = ii  # No swap: panel ii uses column ii directly
+
+            all_values = []
+            for arr in inputs:
+                values = arr[:, feature_idx]
+                values = values[np.isfinite(values)]
+                all_values.append(values)
+
+            all_values = np.concatenate(all_values)
+
+            vmin = np.min(all_values)
+            vmax = np.max(all_values)
+
+            # Add a small margin so the edge bins are not clipped
+            margin = 0.05 * (vmax - vmin)
+            if margin == 0:
+                margin = 1.0
+
+            hist1d_ranges.append([vmin - margin, vmax + margin])
+
+    fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
+    if Ndim == 1:
+        axs = [axs]
+
+    axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
+
+    for ii in range(Ndim):
+        # For ktdr input, column 0 is log(1/deltaR), column 1 is log(kt).
+        # Swap display order so the top panel is log(kt).
+        feature_idx = ii
+
+        all_hist_counts = []
+        positive_hist_counts = []
+
+        for jj, arr in enumerate(inputs):
+            values = arr[:, feature_idx]
+
+            hist_counts, _ = np.histogram(
+                values,
+                bins=hist1d_bins,
+                range=hist1d_ranges[ii],
+                density=True,
+            )
+
+            all_hist_counts.append(hist_counts)
+            positive_hist_counts.extend(hist_counts[hist_counts > 0.0])
+
+            axs[ii].hist(
+                values,
+                bins=hist1d_bins,
+                range=hist1d_ranges[ii],
+                histtype="step",
+                density=True,
+                linestyle=linestyles[jj % len(linestyles)],
+                label=labels[jj] if jj < len(labels) else f"sample_{jj}",
+            )
+
+        axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
+        axs[ii].set_xlabel("value")
+        axs[ii].set_ylabel("Density")
+
+        ymax = max([np.max(h) for h in all_hist_counts if h.size > 0], default=1.0)
+
+        if logy:
+            axs[ii].set_yscale("log")
+            if len(positive_hist_counts) > 0:
+                min_positive = min(positive_hist_counts)
+                max_positive = max(positive_hist_counts)
+
+                if logy_floor_mode == "tail":
+                    y_min = min_positive / 3.0
+                else:
+                    y_min = max(min_positive / 3.0, 1e-4)
+
+                y_max = max_positive * 1.5
+                if y_max <= y_min:
+                    y_max = y_min * 10.0
+
+                axs[ii].set_ylim(y_min, y_max)
+            else:
+                axs[ii].set_ylim(1e-4, 1.0)
+        else:
+            axs[ii].set_ylim(0.0, ymax * 1.15 if ymax > 0 else 1.0)
+
+    axs[0].legend(fontsize=9, framealpha=0.9)
+    fig.tight_layout()
+
+    if out_name is None:
+        out_name = "hist1d_logy" if logy else "hist1d"
+
+    fig.savefig(os.path.join(out_dir, out_name + ".png"))
+    fig.savefig(os.path.join(out_dir, out_name + ".pdf"))
     plt.close(fig)
 
 def loss_plot(loss_train,loss_test,outdir="./Plots/"):
