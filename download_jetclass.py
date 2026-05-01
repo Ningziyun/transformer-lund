@@ -72,7 +72,7 @@ if __name__ == "__main__":
   os.makedirs(path, exist_ok=True)
   os.chdir(path)
 
-  for ii in range(1,10):
+  for ii in range(10):
     unpack(f"https://zenodo.org/records/6619768/files/JetClass_Pythia_train_100M_part{ii}.tar")
 
   os.chdir(cwd)
