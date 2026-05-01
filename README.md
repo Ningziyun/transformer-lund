@@ -8,7 +8,7 @@ pip install -r requirements.txt
 **Install for GPU:**
 
 ```
-conda create --name torch_env python=3.9
+conda create --name torch_env python=3.11
 conda activate torch_env
 conda install pytorch cudatoolkit=11.3 -c pytorch
 pip install -r requirements.txt
@@ -16,16 +16,19 @@ pip install -r requirements.txt
 
 
 **Get dataset**
-Input files for this code can be found at https://zenodo.org/records/2603256
-
-Setup the directory structure and download the files as such for the rest of the automation to work
+Input files for the top-benchmark dataset can be found here https://zenodo.org/records/2603256 and download via
 ```
 mkdir inputFiles/top_benchmark
 cd inputFiles/top_benchmark
 wget https://zenodo.org/records/2603256/files/train.h5
 wget https://zenodo.org/records/2603256/files/test.h5
 wget https://zenodo.org/records/2603256/files/val.h5
-cd ..
+cd ../..
+```
+
+Input files from the jetclass dataset from https://zenodo.org/records/6619768 can be downloaded via
+```
+python download_jetclass.py
 ```
 
 **Data Setup**

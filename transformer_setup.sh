@@ -1,3 +1,4 @@
-module load miniforge root
-source /oscar/runtime/software/external/miniforge/23.11.0-0/etc/profile.d/conda.sh
-conda activate torch_env
+
+module load cuda cudnn
+. ~/.conda_init
+conda activate /oscar/home/nyan9/.conda/envs/torch_env11
