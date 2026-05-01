@@ -28,7 +28,7 @@ cd ../..
 
 Input files from the jetclass dataset from https://zenodo.org/records/6619768 can be downloaded via
 ```
-download_jetclass.py
+python download_jetclass.py
 ```
 
 **Data Setup**

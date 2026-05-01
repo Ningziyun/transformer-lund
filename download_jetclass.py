@@ -1,30 +1,68 @@
 #!/usr/bin/env python3
 
-import subprocess,os
+import os
+import re
+import subprocess
 import requests
 from tqdm import tqdm
 
-def _download(url, fname, chunk_size=1024):
-    '''Copied mostly from https://gist.github.com/yanqd0/c13ed29e29432e3cf3e7c38467f42f51'''
-    resp = requests.get(url, stream=True)
-    total = int(resp.headers.get('content-length', 0))
-    with open(fname, 'wb') as file, tqdm(
+def _remote_size(url):
+    resp = requests.head(url, allow_redirects=True, timeout=30)
+    resp.raise_for_status()
+    return int(resp.headers.get("content-length", 0))
+
+def _content_range_total(resp):
+    match = re.match(r"bytes \d+-\d+/(\d+)", resp.headers.get("content-range", ""))
+    return int(match.group(1)) if match else 0
+
+def _download(url, fname, chunk_size=1024 * 1024):
+    part_name = f"{fname}.part"
+    remote_size = _remote_size(url)
+
+    if os.path.exists(fname):
+        local_size = os.path.getsize(fname)
+        if remote_size and local_size == remote_size:
+            return
+        os.replace(fname, part_name)
+
+    resume_from = os.path.getsize(part_name) if os.path.exists(part_name) else 0
+    headers = {"Range": f"bytes={resume_from}-"} if resume_from else {}
+    resp = requests.get(url, stream=True, headers=headers, timeout=60)
+    resp.raise_for_status()
+
+    if resume_from and resp.status_code != 206:
+        resume_from = 0
+        mode = "wb"
+    else:
+        mode = "ab" if resume_from else "wb"
+
+    total = _content_range_total(resp) or remote_size or int(resp.headers.get("content-length", 0))
+    with open(part_name, mode) as file, tqdm(
         desc=fname,
         total=total,
+        initial=resume_from,
         unit='iB',
         unit_scale=True,
         unit_divisor=1024,
     ) as bar:
         for data in resp.iter_content(chunk_size=chunk_size):
+            if not data:
+                continue
             size = file.write(data)
             bar.update(size)
 
+    if remote_size and os.path.getsize(part_name) != remote_size:
+        raise RuntimeError(f"Incomplete download for {fname}")
+    os.replace(part_name, fname)
+
 def unpack(url):
   fname=url.split("/")[-1]
-  if os.path.exists(fname): return
+  done=f"{fname}.done"
+  if os.path.exists(done): return
   _download(url,fname)
   subprocess.call(["tar","-xf",fname])
   subprocess.call(" ".join(["rm","HTo*root","TTBarLep*root","*ToQQ_*.root"]),shell=True)
+  open(done, "w").close()
 
 
 if __name__ == "__main__":
