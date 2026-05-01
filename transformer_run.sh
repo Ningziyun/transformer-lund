@@ -1,2 +1,7 @@
-python train.py  --num_epochs 100 --lr 0.0005 --num_features 2 --num_bins 100 100  --data_path inputFiles/kt_deltaR.h5
-python sample_jets_auto.py --num_samples 10000 --model_dir models/test_5/
+python train_unbinned.py --train-file inputFiles/jetclass.h5 --val-file inputFiles/jetclass.h5
+python plot_unbinned.py \
+  --model-path models/test/model_0.pt \
+  --train-file inputFiles/jetclass.h5 \
+  --val-file inputFiles/jetclass.h5 \
+  --input_format ktdr \
+  --num-workers 0

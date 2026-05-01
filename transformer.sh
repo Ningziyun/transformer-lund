@@ -8,6 +8,5 @@
 #SBATCH --mail-user=ning_yan@brown.edu
 
 source transformer_setup.sh
-#source data_setup.sh
-#source transformer_run.sh
-python train_unbinned.py --train-file inputFiles/jetclass.h5 --val-file inputFiles/jetclass.h5
+source data_setup.sh
+source transformer_run.sh

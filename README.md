@@ -8,7 +8,7 @@ pip install -r requirements.txt
 **Install for GPU:**
 
 ```
-conda create --name torch_env python=3.9
+conda create --name torch_env python=3.11
 conda activate torch_env
 conda install pytorch cudatoolkit=11.3 -c pytorch
 pip install -r requirements.txt
