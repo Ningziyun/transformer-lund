@@ -1,17 +1,16 @@
 import os,sys
 import time
+os.environ.setdefault("MPLCONFIGDIR", os.path.join("/tmp", f"matplotlib-{os.environ.get('USER', 'user')}"))
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 import numpy as np
 import pandas as pd
 import h5py
-import ROOT
 import math
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 import argparse
 
-import fastjet
-import ljpHelpers
 import gc
 
 import torch
@@ -546,6 +545,10 @@ def parse_input():
     p.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     p.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     p.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
+    p.add_argument("--num-features", dest="num_features", type=int, default=2,
+                   help="Feature dimension per constituent (default: 2 = [deltaR, kt])")
+    p.add_argument("--num-bins", dest="num_bins", type=int, nargs="+", default=[20, 20],
+                   help="Binning spec for compatibility with binned training scripts")
 
     # training
     p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
@@ -571,6 +574,11 @@ def parse_input():
 
     # mdn hyperparams
     p.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
+
+    # auxiliary diagnostics
+    p.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for auxiliary flow nets")
+    p.add_argument("--multi-loss-plot", action="store_true", default=False,
+                   help="Log multiple loss definitions without affecting main training")
 
     # misc
     p.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
@@ -601,6 +609,23 @@ def parse_input():
         nargs=2,
         default=[20, 20],
         help="2D Lund histogram bins: xbins ybins",
+    )
+    p.add_argument(
+        "--hist2d-shape",
+        "--hist2d_shape",
+        "--hist2d-layout",
+        dest="hist2d_shape",
+        type=int,
+        nargs=2,
+        default=None,
+        metavar=("ROWS", "COLS"),
+        help="Manual 2D Lund subplot shape. Default auto: 2 -> 1x2, 3 -> 1x3, 4 -> 2x2",
+    )
+    p.add_argument(
+        "--plot-max-batches",
+        type=int,
+        default=None,
+        help="Only plot this many validation batches. Default: plot all batches",
     )
     p.add_argument(
         "--hist1d-ranges",
@@ -644,6 +669,9 @@ def set_seeds(seed):
 
 
 def make_lundplane(input_vec, pad_length=15):
+  import fastjet
+  import ljpHelpers
+
   #Assume input is dimensions [Nevents, Nconstituents, 4-vecs]
   jetDef10 = fastjet.JetDefinition(fastjet.antikt_algorithm, 1.0, fastjet.E_scheme)
   #jetDefCA = fastjet.JetDefinition1Param(fastjet.cambridge_algorithm, 10.0)
@@ -727,12 +755,12 @@ def lund_plot(
     hist2d_xrange=None,
     hist2d_yrange=None,
     hist2d_bins=(20, 20),
+    hist2d_shape=None,
+    hist2d_layout=None,
 ):
 
   if not os.path.exists(outdir):
     os.makedirs(outdir)
-
-  linestyles=["-","--","-.",":"]
 
   #Get ranges
   Ndim=inputs[0].shape[1]
@@ -750,20 +778,27 @@ def lund_plot(
   #Make plot
   if Ndim>=2:
     # Create subplots for each input (original, generated, etc.)
-    fig, axs = plt.subplots(Nin, 1, figsize=(8.5, 4.2 * Nin))
+    if hist2d_shape is None:
+      hist2d_shape = hist2d_layout
+    nrows, ncols = resolve_hist2d_shape(Nin, hist2d_shape)
+    fig, axs = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(5.0 * ncols + 0.6, 4.2 * nrows),
+        squeeze=False,
+    )
+    flat_axs = axs.ravel()
+    used_axs = flat_axs[:Nin]
 
-    # Ensure axs is always iterable
-    if Nin == 1:
-        axs = [axs]
-
+    last_hist = None
     for jj in range(Nin):
-
+        ax = used_axs[jj]
         # Determine plotting range
         x_range = hist2d_xrange if hist2d_xrange is not None else [mins[1], maxs[1]]
         y_range = hist2d_yrange if hist2d_yrange is not None else [mins[0], maxs[0]]
 
         # Plot 2D histogram
-        h = axs[jj].hist2d(
+        last_hist = ax.hist2d(
             inputs[jj][:, 1],   # x = log(kt)
             inputs[jj][:, 0],   # y = log(1/deltaR)
             range=[x_range, y_range],
@@ -778,40 +813,55 @@ def lund_plot(
 
         # Panel title (original / generated / etc.)
         if jj < len(labels):
-            axs[jj].set_title(labels[jj])
+            ax.set_title(labels[jj])
         else:
-            axs[jj].set_title(f"sample_{jj}")
+            ax.set_title(f"sample_{jj}")
 
         # Axis labels
-        axs[jj].set_xlabel(r"$\log(k_t)$")
-        axs[jj].set_ylabel(r"$\log(1/\Delta R)$")
+        ax.set_xlabel(r"$\log(k_t)$")
+        ax.set_ylabel(r"$\log(1/\Delta R)$")
+
+    for ax in flat_axs[Nin:]:
+        ax.set_visible(False)
 
     # --------------------------
     # Add colorbar (shared)
     # --------------------------
-    # Leave space on the right for colorbar
-    fig.subplots_adjust(
-        left=0.10,
-        right=0.80,   # <-- KEY: reserve space
-        bottom=0.08,
-        top=0.90,
-        hspace=0.35
-    )
-
-    # Create a dedicated axis for the colorbar
-    cbar_ax = fig.add_axes([0.83, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
-
-    cbar = fig.colorbar(h[3], cax=cbar_ax)
+    cbar = fig.colorbar(last_hist[3], ax=used_axs.tolist(), fraction=0.025, pad=0.02)
     cbar.set_label("Density (log scale)")
 
     # Global title
     fig.suptitle("Lund Plane Distribution", fontsize=14)
+    fig.subplots_adjust(left=0.08, right=0.90, bottom=0.10, top=0.88, wspace=0.30, hspace=0.35)
 
     # Save
     name = "lund"
     fig.savefig(os.path.join(outdir, name + ".png"), bbox_inches="tight")
     fig.savefig(os.path.join(outdir, name + ".pdf"), bbox_inches="tight")
     plt.close(fig)
+
+def resolve_hist2d_shape(nplots, hist2d_shape=None):
+  if hist2d_shape is not None:
+    nrows, ncols = hist2d_shape
+    if nrows < 1 or ncols < 1:
+      raise ValueError("--hist2d-shape values must be positive")
+    if nrows * ncols < nplots:
+      raise ValueError(
+          f"--hist2d-shape {nrows} {ncols} has only {nrows * ncols} slots for {nplots} plots"
+      )
+    return nrows, ncols
+
+  if nplots <= 3:
+    return 1, nplots
+  if nplots == 4:
+    return 2, 2
+
+  ncols = math.ceil(math.sqrt(nplots * 1.6))
+  nrows = math.ceil(nplots / ncols)
+  return nrows, ncols
+
+def resolve_hist2d_layout(nplots, hist2d_layout=None):
+  return resolve_hist2d_shape(nplots, hist2d_layout)
 
 def plot_combined_1dhist(
     inputs,
@@ -939,6 +989,117 @@ def plot_combined_1dhist(
     fig.savefig(os.path.join(out_dir, out_name + ".png"))
     fig.savefig(os.path.join(out_dir, out_name + ".pdf"))
     plt.close(fig)
+
+def validate_unbinned_models(
+    models,
+    test_loader,
+    input_shape,
+    args,
+    labels=None,
+    make_projection=False,
+):
+  if args.plot_max_batches is not None and args.plot_max_batches <= 0:
+    raise ValueError("--plot-max-batches must be a positive integer")
+
+  if labels is None:
+    labels = ["original"]
+    if len(models) == 1:
+      labels.append("generated")
+    else:
+      labels.extend([f"generated_{ii}" for ii in range(len(models))])
+
+  with torch.no_grad():
+      original = torch.empty([0, input_shape[-2], input_shape[-1]])
+      generated_list = [
+          torch.empty([0, input_shape[-2], input_shape[-1]])
+          for _ in models
+      ]
+
+      device = "cpu"
+      for model in models:
+        model.to(device)
+        model.eval()
+
+      for batch, X in enumerate(test_loader):
+        if args.plot_max_batches is not None and batch >= args.plot_max_batches:
+          break
+
+        X = X.to(device)
+        start = X[:, 0, :].unsqueeze(1)
+        original = torch.cat([original, X])
+
+        for imodel, model in enumerate(models):
+          generated_seq = model.generate(start, steps=X.shape[1] - 1)
+
+          if args.mixed_loss:
+            generated_seq[:, :, -1] = torch.sigmoid(generated_seq[:, :, -1])
+            generated_seq[:, 0, -1] = X[:, 0, -1]
+
+          if batch == 0 and imodel == 0:
+            print("Input example")
+            print(X[0])
+            print("Generate example")
+            print(generated_seq[0])
+
+          generated_list[imodel] = torch.cat([generated_list[imodel], generated_seq])
+
+      if len(original) == 0:
+        raise ValueError("No validation batches were plotted")
+
+      flat_original = original.flatten(0, 1).numpy()
+      flat_generated_list = [g.flatten(0, 1).numpy() for g in generated_list]
+      plot_inputs = [flat_original] + flat_generated_list
+
+      if make_projection:
+        projection_plot(plot_inputs, labels=labels, outdir=args.log_dir)
+
+      hist1d_ranges = None
+      if args.hist1d_ranges is not None:
+        if len(args.hist1d_ranges) != 4:
+          raise ValueError("--hist1d-ranges should be: kt_min kt_max dr_min dr_max")
+        hist1d_ranges = [
+          [args.hist1d_ranges[0], args.hist1d_ranges[1]],
+          [args.hist1d_ranges[2], args.hist1d_ranges[3]],
+        ]
+
+      plot_combined_1dhist(
+          plot_inputs,
+          labels=labels,
+          out_dir=args.log_dir,
+          hist1d_ranges=hist1d_ranges,
+          hist1d_bins=args.hist1d_bins,
+          logy=False,
+          out_name="hist1d",
+      )
+
+      plot_combined_1dhist(
+          plot_inputs,
+          labels=labels,
+          out_dir=args.log_dir,
+          hist1d_ranges=hist1d_ranges,
+          hist1d_bins=args.hist1d_bins,
+          logy=True,
+          out_name="hist1d_logy",
+      )
+
+      if args.input_format == "ktdr":
+        lund_inputs = plot_inputs
+      else:
+        lund_original = make_lundplane(original.numpy())
+        lund_inputs = [lund_original.reshape(-1, lund_original.shape[-1])]
+        for generated in generated_list:
+          lund_generated = make_lundplane(generated.numpy())
+          lund_inputs.append(lund_generated.reshape(-1, lund_generated.shape[-1]))
+
+      lund_plot(
+          lund_inputs,
+          labels=labels,
+          outdir=args.log_dir,
+          hist2d_xrange=args.hist2d_xrange,
+          hist2d_yrange=args.hist2d_yrange,
+          hist2d_bins=args.hist2d_bins,
+          hist2d_shape=args.hist2d_shape,
+      )
 
 def loss_plot(loss_train,loss_test,outdir="./Plots/"):
 
