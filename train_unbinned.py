@@ -35,6 +35,8 @@ def evaluate_loss(model,X,args):
 
 def train(model,train_loader,args):
   bestloss=1e6
+  epoch_loss=0.0
+  n_batches=0
   for batch, X in enumerate(train_loader):
       X = X.to(device)
       optimizer.zero_grad()
@@ -42,6 +44,8 @@ def train(model,train_loader,args):
       loss=evaluate_loss(model, X, args)
 
       loss.backward()
+      if args.grad_clip is not None and args.grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
       optimizer.step()
 
       loss=loss/X.shape[0] #average the loss across batch
@@ -49,9 +53,13 @@ def train(model,train_loader,args):
       if batch % 100 == 0:
         print(f"batch: {batch} loss:{loss.item()}", flush=True)
       if loss.item()<bestloss: bestloss=loss.item()
+      epoch_loss += loss.item()
+      n_batches += 1
 
-  print(f"train loss={bestloss}", flush=True)
-  loss_train.append(bestloss)
+  avg_loss = epoch_loss / max(n_batches, 1)
+  print(f"train loss={avg_loss} best_batch_loss={bestloss}", flush=True)
+  loss_train.append(avg_loss)
+  return avg_loss
 
 def test(model, test_loader, args):
   model.eval()  # disable dropout for evaluation
@@ -68,7 +76,7 @@ def test(model, test_loader, args):
     epochloss /= num_samples
     print(f"test loss ={epochloss}", flush=True)
     loss_test.append(epochloss)
-    return
+    return epochloss
 
   # Non-CNF models can safely disable grads during evaluation
   with torch.no_grad():
@@ -84,11 +92,10 @@ def test(model, test_loader, args):
     epochloss /= num_samples # average loss across whole epoch
     print(f"test loss ={epochloss}", flush=True)
     loss_test.append(epochloss)
+    return epochloss
 
 if __name__ == "__main__":
     args = parse_input()
-    save_arguments(args)
-    print(f"Logging to {args.log_dir}", flush=True)
     set_seeds(args.seed)
 
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
@@ -105,6 +112,43 @@ if __name__ == "__main__":
     X_example=next(iter(train_loader))
     print("Input shape,",X_example.shape, flush=True)
 
+    # construct model
+    resume_state = None
+    if args.contin:
+        if len(args.model_path) == 0:
+          raise ValueError("--contin requires --model-path/--checkpoint")
+        load_path = args.model_path[0] if isinstance(args.model_path, list) else args.model_path
+        loaded = load_model(load_path)
+        if isinstance(loaded, dict) and "model_state_dict" in loaded:
+          resume_state = loaded
+          loaded_args = loaded.get("args", {})
+          for key in (
+              "cnf",
+              "mdn",
+              "mixed_loss",
+              "embed_dim",
+              "num_heads",
+              "num_layers",
+              "ff_dim",
+              "n_mix",
+              "cnf_hidden",
+              "cnf_steps",
+              "flow_hidden",
+          ):
+            if key in loaded_args:
+              setattr(args, key, loaded_args[key])
+          model = build_unbinned_model(X_example.shape[2], args)
+          model.load_state_dict(loaded["model_state_dict"])
+        else:
+          model = loaded
+        print("Loaded model", flush=True)
+    else:
+        model = build_unbinned_model(X_example.shape[2], args)
+
+    save_arguments(args)
+    append_training_metadata(args)
+    print(f"Logging to {args.log_dir}", flush=True)
+
     doCNF = args.cnf
     doMDN = args.mdn
     doMixedLoss = args.mixed_loss
@@ -113,24 +157,6 @@ if __name__ == "__main__":
     if doCNF:
       doMDN = False
       doMixedLoss = False
-
-    # construct model
-    if args.contin:
-        model = load_model(model_path=args.model_path)
-        print("Loaded model", flush=True)
-    else:
-        if args.cnf:
-            model = model_transformer_CNF(input_dim=X_example.shape[2],embed_dim=args.embed_dim,num_heads=args.num_heads,
-                                num_layers=args.num_layers,ff_dim=args.ff_dim,cnf_hidden=args.cnf_hidden,cnf_steps=args.cnf_steps,)
-        elif args.mdn:
-          model=model_transformer_MDN(input_dim=X_example.shape[2],n_mix=args.n_mix,embed_dim=args.embed_dim,num_heads=args.num_heads,
-                                num_layers=args.num_layers,ff_dim=args.ff_dim,)
-        else:
-          model = test_model(
-            input_dim=X_example.shape[2],
-            embed_dim=args.embed_dim, num_heads=args.num_heads,
-            num_layers=args.num_layers, ff_dim=args.ff_dim
-          )
 
     #Set the loss
     if args.cnf:
@@ -154,26 +180,17 @@ if __name__ == "__main__":
       print(f"Model params: {n_params}", flush=True)
     model.to(device)
 
-    aux_mdn_head = None
-    aux_cnf_flow = None
-    aux_optimizer = None
+    optimizer = make_optimizer(args, model)
+    scheduler = make_scheduler(args, optimizer)
 
-    if doMultiLossPlot:
-      # We train ONLY the auxiliary head parameters on detached context,
-      # so it never affects the main model iteration.
-      if doCNF:
-        # CNF main: log MDN-NLL with an auxiliary MDN head
-        aux_mdn_head = _MDNHeadFromContext(
-          context_dim=args.embed_dim, input_dim=X_example.shape[2], n_mix=args.n_mix
-        ).to(device)
-        aux_optimizer = torch.optim.Adam(aux_mdn_head.parameters(), lr=args.lr)
-
-      elif doMDN:
-        # MDN main: log CNF-NLL with an auxiliary flow head
-        aux_cnf_flow = _CondRealNVP2D(context_dim=args.embed_dim, hidden=args.flow_hidden).to(device)
-        aux_optimizer = torch.optim.Adam(aux_cnf_flow.parameters(), lr=args.lr)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    start_epoch = 0
+    if resume_state is not None:
+      if resume_state.get("optimizer_state_dict", None) is not None:
+        optimizer.load_state_dict(resume_state["optimizer_state_dict"])
+      if scheduler is not None and resume_state.get("scheduler_state_dict", None) is not None:
+        scheduler.load_state_dict(resume_state["scheduler_state_dict"])
+      start_epoch = int(resume_state.get("epoch", -1)) + 1
+      print(f"Resuming after ep {start_epoch}", flush=True)
 
     # Loss functions
     if doCNF:
@@ -186,30 +203,92 @@ if __name__ == "__main__":
     else:
       loss_fn=mdn_loss
 
-    best_loss=1e6
+    best_loss=float("inf")
+    best_epoch=-1
     patience_counter=0
     patience = args.patience
     loss_test=[]
     loss_train=[]
+    lr_history=[]
+    loss_curves={}
+    if resume_state is not None:
+      best_loss = resume_state.get("best_loss", best_loss)
+      if best_loss is None:
+        best_loss = float("inf")
+      else:
+        best_loss = float(best_loss)
+      best_epoch = resume_state.get("best_epoch", best_epoch)
+      loss_test = list(resume_state.get("test_losses", []))
+      loss_train = list(resume_state.get("train_losses", []))
+      lr_history = list(resume_state.get("lr_history", []))
+      loss_curves = dict(resume_state.get("loss_curves", {}))
     epochs=args.epochs 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
       print(f"\nEpoch {epoch+1}\n-------------------------------", flush=True)
       starttime=time.time()
-      train(model,train_loader,args)
-      test(model,test_loader,args)
+      train_loss = train(model,train_loader,args)
+      test_loss = test(model,test_loader,args)
       print("Took %.2f minutes to run"%((time.time()-starttime)/60), flush=True)
-      save_model(model, args.log_dir, str(epoch))
-  
-      if loss_train[-1]<best_loss:
-        best_loss=loss_train[-1]
+      current_lr = optimizer.param_groups[0]["lr"]
+      lr_history.append(current_lr)
+
+      best_metric = test_loss if test_loss is not None else train_loss
+      improved = best_metric<best_loss
+      if improved:
+        best_loss=best_metric
+        best_epoch=epoch
         patience_counter=0
       else:
         patience_counter+=1
-        if patience_counter>=patience:
-          print("Early stoping", flush=True)
-          break
 
-    loss_plot(loss_train,loss_test,outdir=args.log_dir)
+      step_scheduler(scheduler, args, metric=best_metric)
+
+      save_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=epoch,
+        loss=best_metric,
+        args=args,
+        train_losses=loss_train,
+        test_losses=loss_test,
+        loss_curves=loss_curves,
+        lr_history=lr_history,
+        best_epoch=best_epoch,
+        best_loss=best_loss,
+        current_lr=current_lr,
+      )
+
+      if improved:
+        save_checkpoint(
+          model=model,
+          optimizer=optimizer,
+          scheduler=scheduler,
+          epoch=epoch,
+          loss=best_loss,
+          args=args,
+          ckpt_name="best.pt",
+          train_losses=loss_train,
+          test_losses=loss_test,
+          loss_curves=loss_curves,
+          lr_history=lr_history,
+          best_epoch=best_epoch,
+          best_loss=best_loss,
+          current_lr=current_lr,
+        )
+
+      loss_plot(loss_train,loss_test,outdir=args.log_dir,loss_curves=loss_curves)
+      save_lr_csv(lr_history, out_dir=args.log_dir)
+      save_lr_plot(lr_history, out_dir=args.log_dir)
+
+      if patience_counter>=patience:
+        print("Early stopping", flush=True)
+        break
+
+    append_training_metadata(args, best_epoch=best_epoch, best_loss=best_loss)
+    loss_plot(loss_train,loss_test,outdir=args.log_dir,loss_curves=loss_curves)
+    save_lr_csv(lr_history, out_dir=args.log_dir)
+    save_lr_plot(lr_history, out_dir=args.log_dir)
     validate_unbinned_models(
       [model],
       test_loader,

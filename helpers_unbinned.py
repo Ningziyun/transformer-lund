@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 import h5py
 import math
+import csv
+import re
+import textwrap
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
@@ -507,6 +510,114 @@ def get_cos_scheduler(num_epochs, num_batches, optimizer, eta_min=1e-6):
     )
     return scheduler
 
+def get_cos_damping_scheduler(
+    optimizer,
+    base_lr,
+    num_epochs,
+    cos_start_epoch=0,
+    cos_end_epoch=None,
+    cos_damping_final_lr=5e-5,
+    cos_damping_amplitude=0.1,
+    cos_damping_period_epochs=1.0,
+):
+    start_epoch = max(int(cos_start_epoch), 0)
+    if cos_end_epoch is None:
+        cos_end_epoch = num_epochs
+    end_epoch = max(int(cos_end_epoch), start_epoch + 1)
+
+    final_ratio = max(float(cos_damping_final_lr) / float(base_lr), 1e-12)
+    period_epochs = max(float(cos_damping_period_epochs), 1e-12)
+
+    def lr_lambda(epoch):
+        if epoch < start_epoch:
+            return 1.0
+        if epoch >= end_epoch:
+            return final_ratio
+
+        progress = (epoch - start_epoch) / float(end_epoch - start_epoch)
+        baseline = 1.0 + (final_ratio - 1.0) * progress
+        phase = 2.0 * math.pi * (epoch - start_epoch) / period_epochs
+        oscillation_factor = 1.0 + cos_damping_amplitude * math.cos(phase)
+        return max(baseline * oscillation_factor, 1e-12)
+
+    return LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+def get_epoch_cosine_scheduler(optimizer, num_epochs, eta_min=1e-6):
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(int(num_epochs), 1),
+        eta_min=eta_min,
+    )
+
+def get_plateau_scheduler(
+    optimizer,
+    factor=0.5,
+    patience=2,
+    min_lr=1e-6,
+):
+    return torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=factor,
+        patience=patience,
+        min_lr=min_lr,
+    )
+
+def make_scheduler(args, optimizer):
+    scheduler_name = getattr(args, "scheduler", "none")
+    if scheduler_name == "cos_damping":
+        return get_cos_damping_scheduler(
+            optimizer=optimizer,
+            base_lr=args.lr,
+            num_epochs=args.epochs,
+            cos_start_epoch=args.cos_damping_start_epoch,
+            cos_end_epoch=args.cos_damping_end_epoch,
+            cos_damping_final_lr=args.cos_damping_final_lr,
+            cos_damping_amplitude=args.cos_damping_amplitude,
+            cos_damping_period_epochs=args.cos_damping_period_epochs,
+        )
+    if scheduler_name == "cosine":
+        return get_epoch_cosine_scheduler(
+            optimizer=optimizer,
+            num_epochs=args.epochs,
+            eta_min=args.scheduler_min_lr,
+        )
+    if scheduler_name == "plateau":
+        return get_plateau_scheduler(
+            optimizer=optimizer,
+            factor=args.plateau_factor,
+            patience=args.plateau_patience,
+            min_lr=args.scheduler_min_lr,
+        )
+    return None
+
+def step_scheduler(scheduler, args, metric=None):
+    if scheduler is None:
+        return
+    if getattr(args, "scheduler", "none") == "plateau":
+        scheduler.step(metric)
+    else:
+        scheduler.step()
+
+def make_optimizer(args, model):
+    optimizer_name = getattr(args, "optimizer", "adam")
+    if optimizer_name == "adamw":
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+    return torch.optim.Adam(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+
+def _torch_load(path, map_location=None):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 def save_opt_states(optimizer, scheduler, scaler, log_dir):
     torch.save(
@@ -530,8 +641,405 @@ def save_model(model, log_dir, name):
     torch.save(model, os.path.join(log_dir, f"model_{name}.pt"))
 
 def load_model(model_path):
-    model = torch.load(model_path)
+    model = _torch_load(model_path, map_location="cpu")
     return model
+
+def _config_get(args_or_dict, key, default=None):
+    if isinstance(args_or_dict, dict):
+        return args_or_dict.get(key, default)
+    return getattr(args_or_dict, key, default)
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+def _as_int(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() in ("none", "null", ""):
+            return default
+        match = re.search(r"-?\d+", text)
+        if match is None:
+            return default
+        return int(match.group(0))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _as_float(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() in ("none", "null", ""):
+            return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _epoch_display_from_index(epoch):
+    epoch_idx = _as_int(epoch, None)
+    if epoch_idx is None or epoch_idx < 0:
+        return None
+    return epoch_idx + 1
+
+def resolved_model_mode(args_or_dict):
+    if _as_bool(_config_get(args_or_dict, "cnf", False)):
+        return "CNF"
+    if _as_bool(_config_get(args_or_dict, "mdn", False)):
+        return "MDN"
+    return "Regression"
+
+def build_unbinned_model(input_dim, args_or_dict):
+    get = lambda key, default=None: _config_get(args_or_dict, key, default)
+    if _as_bool(get("cnf", False)):
+        return model_transformer_CNF(
+            input_dim=input_dim,
+            embed_dim=_as_int(get("embed_dim", 256), 256),
+            num_heads=_as_int(get("num_heads", 1), 1),
+            num_layers=_as_int(get("num_layers", 2), 2),
+            ff_dim=_as_int(get("ff_dim", 128), 128),
+            cnf_hidden=_as_int(get("cnf_hidden", get("flow_hidden", 128)), 128),
+            cnf_steps=_as_int(get("cnf_steps", 8), 8),
+        )
+    if _as_bool(get("mdn", False)):
+        return model_transformer_MDN(
+            input_dim=input_dim,
+            n_mix=_as_int(get("n_mix", 25), 25),
+            embed_dim=_as_int(get("embed_dim", 256), 256),
+            num_heads=_as_int(get("num_heads", 1), 1),
+            num_layers=_as_int(get("num_layers", 2), 2),
+            ff_dim=_as_int(get("ff_dim", 128), 128),
+        )
+    return model_transformer(
+        input_dim=input_dim,
+        embed_dim=_as_int(get("embed_dim", 256), 256),
+        num_heads=_as_int(get("num_heads", 1), 1),
+        num_layers=_as_int(get("num_layers", 2), 2),
+        ff_dim=_as_int(get("ff_dim", 128), 128),
+    )
+
+def save_checkpoint(
+    model,
+    optimizer,
+    epoch,
+    loss,
+    args,
+    ckpt_name=None,
+    train_losses=None,
+    test_losses=None,
+    loss_curves=None,
+    lr_history=None,
+    scheduler=None,
+    best_epoch=None,
+    best_loss=None,
+    current_lr=None,
+):
+    save_mode = _config_get(args, "save_mode", "checkpoint")
+    if save_mode == "none":
+        return None
+    if save_mode not in ("checkpoint", "model"):
+        raise ValueError("--save-mode must be one of: checkpoint, model, none")
+
+    ckpt_dir = os.path.join(_config_get(args, "log_dir"), "checkpoints")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    if ckpt_name is None:
+        ckpt_name = f"epoch_{epoch:03d}.pt"
+
+    args_dict = dict(args) if isinstance(args, dict) else vars(args).copy()
+    best_epoch_display = _epoch_display_from_index(best_epoch)
+    ckpt_path = os.path.join(ckpt_dir, ckpt_name)
+
+    payload = {
+        "artifact_type": "checkpoint" if save_mode == "checkpoint" else "model_state",
+        "save_mode": save_mode,
+        "epoch": epoch,
+        "epoch_display": _epoch_display_from_index(epoch),
+        "model_state_dict": model.state_dict(),
+        "loss": loss,
+        "best_epoch": best_epoch,
+        "best_epoch_display": best_epoch_display,
+        "best_loss": best_loss,
+        "args": args_dict,
+        "model_mode": resolved_model_mode(args),
+        "doCNF": _as_bool(_config_get(args, "cnf", False)),
+        "doMDN": _as_bool(_config_get(args, "mdn", False)) and not _as_bool(_config_get(args, "cnf", False)),
+        "doMixedLoss": _as_bool(_config_get(args, "mixed_loss", False)),
+    }
+
+    if save_mode == "checkpoint":
+        payload.update(
+            {
+                "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
+                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+                "scheduler": _config_get(args, "scheduler", "none"),
+                "optimizer": _config_get(args, "optimizer", "adam"),
+                "weight_decay": _config_get(args, "weight_decay", 0.0),
+                "grad_clip": _config_get(args, "grad_clip", 0.0),
+                "lr": _config_get(args, "lr", None),
+                "current_lr": current_lr if current_lr is not None else (optimizer.param_groups[0]["lr"] if optimizer is not None else None),
+                "next_lr": optimizer.param_groups[0]["lr"] if optimizer is not None else None,
+                "train_losses": train_losses if train_losses is not None else [],
+                "test_losses": test_losses if test_losses is not None else [],
+                "loss_curves": loss_curves if loss_curves is not None else {},
+                "lr_history": lr_history if lr_history is not None else [],
+            }
+        )
+
+    torch.save(payload, ckpt_path)
+    saved_what = "checkpoint" if save_mode == "checkpoint" else "model state"
+    print(f"Saved {saved_what} to {ckpt_path}", flush=True)
+    return ckpt_path
+
+def load_unbinned_model_for_plot(model_path, input_dim, device="cpu"):
+    obj = _torch_load(model_path, map_location="cpu")
+    metadata = {}
+
+    if isinstance(obj, dict) and "model_state_dict" in obj:
+        ckpt_args = obj.get("args", {})
+        metadata.update(ckpt_args)
+        for key in (
+            "artifact_type",
+            "save_mode",
+            "epoch",
+            "epoch_display",
+            "loss",
+            "best_epoch",
+            "best_epoch_display",
+            "best_loss",
+            "model_mode",
+            "scheduler",
+            "optimizer",
+            "weight_decay",
+            "grad_clip",
+            "current_lr",
+            "next_lr",
+        ):
+            if key in obj:
+                metadata[key] = obj[key]
+        metadata["resolved_model_mode"] = obj.get("model_mode", resolved_model_mode(ckpt_args))
+        model = build_unbinned_model(input_dim, ckpt_args)
+        model.load_state_dict(obj["model_state_dict"])
+    else:
+        model = obj
+
+    model.to(device)
+    model.eval()
+    return model, metadata
+
+def infer_log_dir_from_path(model_path):
+    parent = os.path.dirname(os.path.abspath(model_path))
+    if os.path.basename(parent) == "checkpoints":
+        return os.path.dirname(parent)
+    return parent
+
+def parse_arguments_txt(txt_path):
+    meta = {}
+    if not os.path.exists(txt_path):
+        return meta
+    with open(txt_path, "r") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                key, value = line.split(":", 1)
+                meta[key.strip()] = value.strip()
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                meta[parts[0].strip()] = " ".join(parts[1:]).strip()
+    return meta
+
+def _format_scalar(value):
+    as_float = _as_float(value, None)
+    if as_float is None:
+        return str(value)
+    return f"{as_float:g}"
+
+def _display_epoch_from_meta(meta, key):
+    display = _as_int(meta.get(f"{key}_display", None), None)
+    if display is not None:
+        return display
+    index = _as_int(meta.get(key, None), None)
+    if index is None:
+        return None
+    return index + 1
+
+def _artifact_label_from_name(name):
+    if name is None:
+        return None
+    base = os.path.splitext(os.path.basename(str(name)))[0]
+    if base == "best":
+        return "best"
+    match = re.search(r"epoch[_-](\d+)", base)
+    if match is not None:
+        return f"ep {int(match.group(1)) + 1}"
+    return base if base else None
+
+def build_run_caption(meta, fallback=None):
+    model_mode = meta.get("resolved_model_mode", meta.get("model_mode", "model"))
+    batch_size = meta.get("batch_size", meta.get("batch-size", "?"))
+    lr = meta.get("lr", "?")
+    epochs = meta.get("epochs", meta.get("total_epochs", None))
+    scheduler = meta.get("scheduler", "none")
+    best_epoch_display = _display_epoch_from_meta(meta, "best_epoch")
+    epoch_display = _display_epoch_from_meta(meta, "epoch")
+
+    artifact_label = None
+    fallback_label = _artifact_label_from_name(fallback)
+    if fallback_label == "best":
+        artifact_label = f"best ep {best_epoch_display}" if best_epoch_display is not None else "best"
+    elif epoch_display is not None:
+        artifact_label = f"ep {epoch_display}"
+    else:
+        artifact_label = fallback_label
+
+    first_line = [str(model_mode)]
+    if artifact_label is not None:
+        first_line.append(artifact_label)
+    if best_epoch_display is not None and (artifact_label is None or not artifact_label.startswith("best")):
+        first_line.append(f"best ep {best_epoch_display}")
+
+    second_line = [f"bs {batch_size}", f"lr {_format_scalar(lr)}"]
+    if epochs is not None:
+        second_line.append(f"tot {epochs}")
+
+    lines = [" ".join(first_line), " ".join(second_line)]
+    if scheduler not in (None, "none"):
+        sched_label = {
+            "cos_damping": "cos damp",
+            "cosine": "cos",
+            "plateau": "plateau",
+        }.get(str(scheduler), str(scheduler))
+        sched_line = [f"sched {sched_label}"]
+        if scheduler == "cos_damping":
+            start_epoch = meta.get("cos_damping_start_epoch", meta.get("cos_start_epoch", None))
+            start_display = _epoch_display_from_index(start_epoch)
+            final_lr = meta.get("cos_damping_final_lr", meta.get("cos_final_lr", None))
+            if start_display is not None:
+                sched_line.append(f"start ep {start_display}")
+            if final_lr is not None:
+                sched_line.append(f"lr_f {_format_scalar(final_lr)}")
+        elif scheduler in ("cosine", "plateau") and meta.get("scheduler_min_lr", None) is not None:
+            sched_line.append(f"min lr {_format_scalar(meta.get('scheduler_min_lr'))}")
+        lines.append(" ".join(sched_line))
+    return "\n".join(lines)
+
+def save_loss_csv(epoch_losses=None, loss_curves=None, out_dir=""):
+    if ((epoch_losses is None or len(epoch_losses) == 0) and
+        (loss_curves is None or len(loss_curves) == 0)):
+        return
+
+    os.makedirs(out_dir, exist_ok=True)
+    metric_names = []
+    if epoch_losses is not None and len(epoch_losses) > 0:
+        metric_names.append("self_loss")
+    if loss_curves is not None:
+        for metric_name, curve in loss_curves.items():
+            if curve is not None and len(curve) > 0:
+                metric_names.append(metric_name)
+
+    max_len = len(epoch_losses) if epoch_losses is not None else 0
+    if loss_curves is not None:
+        for curve in loss_curves.values():
+            if curve is not None:
+                max_len = max(max_len, len(curve))
+
+    csv_path = os.path.join(out_dir, "loss_history.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch"] + metric_names)
+        for i in range(max_len):
+            row = [i + 1]
+            for metric_name in metric_names:
+                if metric_name == "self_loss":
+                    value = epoch_losses[i] if i < len(epoch_losses) else ""
+                else:
+                    curve = loss_curves.get(metric_name, None) if loss_curves is not None else None
+                    value = curve[i] if (curve is not None and i < len(curve)) else ""
+                row.append(value)
+            writer.writerow(row)
+    print(f"Saved loss CSV to {csv_path}", flush=True)
+
+def load_loss_history_csv(csv_path):
+    if not os.path.exists(csv_path):
+        return {}
+    curves = {}
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for name in reader.fieldnames or []:
+            if name != "epoch":
+                curves[name] = []
+        for row in reader:
+            for name in curves:
+                value = row.get(name, "")
+                curves[name].append(np.nan if value in (None, "") else float(value))
+    return curves
+
+def save_lr_csv(lr_history, out_dir=""):
+    if lr_history is None or len(lr_history) == 0:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    csv_path = os.path.join(out_dir, "lr_history.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "lr"])
+        for i, lr in enumerate(lr_history):
+            writer.writerow([i + 1, lr])
+    print(f"Saved LR CSV to {csv_path}", flush=True)
+
+def save_lr_plot(lr_history, out_dir=""):
+    if lr_history is None or len(lr_history) == 0:
+        return
+    fig = plt.figure(figsize=(6.0, 4.0))
+    plt.plot(range(1, len(lr_history) + 1), lr_history, marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate vs Epoch")
+    plt.grid(True)
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.png"))
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.pdf"))
+    plt.close(fig)
+
+def append_training_metadata(args, best_epoch=None, best_loss=None):
+    txt_path = os.path.join(args.log_dir, "arguments.txt")
+    with open(txt_path, "a") as f:
+        if best_epoch is None:
+            f.write("\n")
+            f.write(f"{'resolved_model_mode':20s} {resolved_model_mode(args)}\n")
+            f.write(f"{'save_mode':20s} {args.save_mode}\n")
+            f.write(f"{'optimizer':20s} {args.optimizer}\n")
+            f.write(f"{'weight_decay':20s} {args.weight_decay}\n")
+            f.write(f"{'grad_clip':20s} {args.grad_clip}\n")
+            f.write(f"{'scheduler':20s} {args.scheduler}\n")
+            f.write(f"{'scheduler_min_lr':20s} {args.scheduler_min_lr}\n")
+            f.write(f"{'plateau_factor':20s} {args.plateau_factor}\n")
+            f.write(f"{'plateau_patience':20s} {args.plateau_patience}\n")
+            f.write(f"{'cos_damping_start_epoch':20s} {args.cos_damping_start_epoch}\n")
+            f.write(f"{'cos_damping_end_epoch':20s} {args.cos_damping_end_epoch if args.cos_damping_end_epoch is not None else args.epochs}\n")
+            f.write(f"{'cos_damping_final_lr':20s} {args.cos_damping_final_lr}\n")
+            f.write(f"{'cos_damping_amplitude':20s} {args.cos_damping_amplitude}\n")
+            f.write(f"{'cos_damping_period_epochs':20s} {args.cos_damping_period_epochs}\n")
+        else:
+            best_epoch_display = _epoch_display_from_index(best_epoch)
+            f.write("\n")
+            f.write("# Best training result\n")
+            f.write(f"best_epoch: {best_epoch_display}\n")
+            f.write(f"best_epoch_display: {best_epoch_display}\n")
+            f.write(f"best_epoch_index: {best_epoch}\n")
+            f.write(f"best_loss: {best_loss}\n")
+            if args.save_mode != "none":
+                f.write("best_checkpoint: checkpoints/best.pt\n")
 
 def parse_input():
     """Parse_Input args. Defaults match the current hard-coded values."""
@@ -553,6 +1061,18 @@ def parse_input():
     # training
     p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    p.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw"], help="Optimizer")
+    p.add_argument("--weight-decay", type=float, default=0.0, help="Optimizer weight decay")
+    p.add_argument("--grad-clip", type=float, default=0.0, help="Gradient norm clipping. Set <=0 to disable")
+    p.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "plateau"], help="Learning rate scheduler")
+    p.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="Minimum LR for cosine/plateau schedulers")
+    p.add_argument("--plateau-factor", type=float, default=0.5, help="LR multiplier for --scheduler plateau")
+    p.add_argument("--plateau-patience", type=int, default=2, help="Plateau epochs before reducing LR")
+    p.add_argument("--cos-damping-start-epoch", type=int, default=0, help="Epoch where cosine damping starts")
+    p.add_argument("--cos-damping-end-epoch", type=int, default=None, help="Epoch where cosine damping ends")
+    p.add_argument("--cos-damping-final-lr", type=float, default=5e-5, help="Final LR for cosine damping")
+    p.add_argument("--cos-damping-amplitude", type=float, default=0.0, help="Cosine oscillation amplitude")
+    p.add_argument("--cos-damping-period-epochs", type=float, default=1.0, help="Cosine oscillation period in epochs")
     p.add_argument("--patience", type=int, default=5, help="Early stopping patience")
     p.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
 
@@ -585,8 +1105,10 @@ def parse_input():
 
     # logging / checkpointing
     p.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
+    p.add_argument("--save-mode", type=str, default="checkpoint", choices=["checkpoint", "model", "none"],
+                   help="Saved training artifact: full checkpoint, model-state only, or none")
     p.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
-    p.add_argument("--model-path", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/log_dir to load when --contin is set")
+    p.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
     
     # plotting options
     p.add_argument(
@@ -888,15 +1410,20 @@ def plot_combined_1dhist(
 
     if labels is None:
         labels = [f"sample_{i}" for i in range(len(inputs))]
+    plot_labels = [
+        "\n".join(textwrap.wrap(str(label), width=34, break_long_words=False)) or str(label)
+        for label in labels
+    ]
 
     linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
     Ndim = inputs[0].shape[1]
+    display_order = [1, 0] if Ndim >= 2 else list(range(Ndim))
 
     if hist1d_ranges is None:
         hist1d_ranges = []
 
         for ii in range(Ndim):
-            feature_idx = ii  # No swap: panel ii uses column ii directly
+            feature_idx = display_order[ii] if ii < len(display_order) else ii
 
             all_values = []
             for arr in inputs:
@@ -925,7 +1452,7 @@ def plot_combined_1dhist(
     for ii in range(Ndim):
         # For ktdr input, column 0 is log(1/deltaR), column 1 is log(kt).
         # Swap display order so the top panel is log(kt).
-        feature_idx = ii
+        feature_idx = display_order[ii] if ii < len(display_order) else ii
 
         all_hist_counts = []
         positive_hist_counts = []
@@ -950,7 +1477,7 @@ def plot_combined_1dhist(
                 histtype="step",
                 density=True,
                 linestyle=linestyles[jj % len(linestyles)],
-                label=labels[jj] if jj < len(labels) else f"sample_{jj}",
+                label=plot_labels[jj] if jj < len(plot_labels) else f"sample_{jj}",
             )
 
         axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
@@ -980,15 +1507,68 @@ def plot_combined_1dhist(
         else:
             axs[ii].set_ylim(0.0, ymax * 1.15 if ymax > 0 else 1.0)
 
-    axs[0].legend(fontsize=9, framealpha=0.9)
-    fig.tight_layout()
+    handles, legend_labels = axs[0].get_legend_handles_labels()
+    max_label_width = max((max(len(part) for part in label.splitlines()) for label in legend_labels), default=0)
+    right_edge = 0.68 if (max_label_width > 24 or len(legend_labels) > 2) else 0.74
+    fig.tight_layout(rect=[0.0, 0.0, right_edge, 1.0])
+    if len(handles) > 0:
+        fig.legend(
+            handles,
+            legend_labels,
+            loc="center left",
+            bbox_to_anchor=(right_edge + 0.02, 0.5),
+            fontsize=8,
+            framealpha=0.95,
+        )
 
     if out_name is None:
         out_name = "hist1d_logy" if logy else "hist1d"
 
-    fig.savefig(os.path.join(out_dir, out_name + ".png"))
-    fig.savefig(os.path.join(out_dir, out_name + ".pdf"))
+    fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
+    fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
     plt.close(fig)
+
+def plot_combined_losses(run_infos, out_dir):
+    metric_names = set()
+    for info in run_infos:
+        for metric_name, curve in info.get("loss_curves_csv", {}).items():
+            if curve is not None and len(curve) > 0:
+                metric_names.add(metric_name)
+
+    for metric_name in sorted(metric_names):
+        fig = plt.figure(figsize=(6.0, 4.0))
+        used_any = False
+        for info in run_infos:
+            curve = info.get("loss_curves_csv", {}).get(metric_name, None)
+            if curve is None or len(curve) == 0:
+                continue
+            y = np.asarray(curve, dtype=float)
+            x = np.arange(1, len(y) + 1)
+            mask = ~np.isnan(y)
+            if np.any(mask):
+                plt.plot(
+                    x[mask],
+                    y[mask],
+                    linestyle="-",
+                    linewidth=2,
+                    alpha=0.7,
+                    label=info.get("caption", info.get("checkpoint_path", "run")),
+                )
+                used_any = True
+
+        if not used_any:
+            plt.close(fig)
+            continue
+
+        plt.xlabel("Epoch")
+        plt.ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
+        plt.title(f"Loss vs Epoch ({metric_name})")
+        plt.grid(True)
+        plt.legend(fontsize=8, framealpha=0.9)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.png"))
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"))
+        plt.close(fig)
 
 def validate_unbinned_models(
     models,
@@ -1101,7 +1681,7 @@ def validate_unbinned_models(
           hist2d_shape=args.hist2d_shape,
       )
 
-def loss_plot(loss_train,loss_test,outdir="./Plots/"):
+def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
 
   if not os.path.exists(outdir):
     os.makedirs(outdir)
@@ -1119,6 +1699,12 @@ def loss_plot(loss_train,loss_test,outdir="./Plots/"):
   fig.savefig(os.path.join(outdir,"loss_vs_epoch.png"))
   fig.savefig(os.path.join(outdir,"loss_vs_epoch.pdf"))
   plt.close(fig)
+
+  save_loss_csv(
+    epoch_losses=loss_train,
+    loss_curves={"test_loss": loss_test, **(loss_curves or {})},
+    out_dir=outdir,
+  )
 
 if __name__ == "__main__":
     pass
