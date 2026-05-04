@@ -941,6 +941,90 @@ def build_run_caption(meta, fallback=None):
         lines.append(" ".join(sched_line))
     return "\n".join(lines)
 
+def _parse_caption_fields(label):
+    text = str(label).replace("\n", " ")
+    fields = {}
+    parts = str(label).splitlines()
+    if len(parts) > 0:
+        first_tokens = parts[0].split()
+        if len(first_tokens) > 0:
+            fields["model"] = first_tokens[0]
+
+    match = re.search(r"\bbest ep\s+\d+", text)
+    if match:
+        fields["checkpoint"] = match.group(0)
+    else:
+        match = re.search(r"\bep\s+\d+", text)
+        if match:
+            fields["checkpoint"] = match.group(0)
+
+    for key, pattern, label_text in (
+        ("bs", r"\bbs\s+([^\s]+)", "bs"),
+        ("lr", r"\blr\s+([^\s]+)", "lr"),
+        ("tot", r"\btot\s+([^\s]+)", "tot"),
+        ("min_lr", r"\bmin lr\s+([^\s]+)", "min lr"),
+        ("lr_f", r"\blr_f\s+([^\s]+)", "lr_f"),
+        ("start_ep", r"\bstart ep\s+([^\s]+)", "start ep"),
+    ):
+        match = re.search(pattern, text)
+        if match:
+            fields[key] = f"{label_text} {match.group(1)}"
+
+    sched_match = re.search(r"\bsched\s+(.+?)(?:\s+start ep|\s+lr_f|\s+min lr|$)", text)
+    if sched_match:
+        fields["sched"] = f"sched {sched_match.group(1).strip()}"
+    elif "cos damping" in text:
+        fields["sched"] = "sched cos damping"
+    elif "cosine" in text:
+        fields["sched"] = "sched cosine"
+    elif "plateau" in text:
+        fields["sched"] = "sched plateau"
+
+    return fields
+
+def _caption_comparison(labels, first_run_idx=1):
+    run_labels = list(labels[first_run_idx:])
+    field_order = ["model", "checkpoint", "bs", "lr", "tot", "sched", "start_ep", "lr_f", "min_lr"]
+    parsed = [_parse_caption_fields(label) for label in run_labels]
+
+    common = []
+    diff_labels = []
+    for idx, fields in enumerate(parsed):
+        items = []
+        for key in field_order:
+            values = [item.get(key) for item in parsed]
+            present_values = [value for value in values if value not in (None, "")]
+            if len(present_values) == len(parsed) and len(set(present_values)) == 1:
+                continue
+            if fields.get(key):
+                items.append(fields[key])
+        diff_labels.append("\n".join(items) if items else f"run {idx + 1}")
+
+    if parsed:
+        for key in field_order:
+            values = [item.get(key) for item in parsed]
+            present_values = [value for value in values if value not in (None, "")]
+            if len(present_values) == len(parsed) and len(set(present_values)) == 1:
+                common.append(present_values[0])
+
+    return diff_labels, common
+
+def _plot_note_from_common(common_items, unavailable_notes=None):
+    note_lines = []
+    if common_items:
+        note_lines.append("Plot: " + "; ".join(common_items))
+    if unavailable_notes:
+        note_lines.extend(
+            f"{str(label).replace(chr(10), ' ')}: unavailable ({reason})"
+            for label, reason in unavailable_notes
+        )
+    return note_lines
+
+def _wrapped_note(note_lines, width=150):
+    if not note_lines:
+        return ""
+    return "\n".join(textwrap.wrap(" | ".join(note_lines), width=width, break_long_words=False))
+
 def save_loss_csv(epoch_losses=None, loss_curves=None, out_dir=""):
     if ((epoch_losses is None or len(epoch_losses) == 0) and
         (loss_curves is None or len(loss_curves) == 0)):
@@ -1302,14 +1386,16 @@ def lund_plot(
     unavailable_notes=None,
 ):
 
-  if not os.path.exists(outdir):
-    os.makedirs(outdir)
-
   #Get ranges
   Ndim=inputs[0].shape[1]
   Nin=len(inputs)
   unavailable_notes = unavailable_notes or []
   Nplots = Nin + len(unavailable_notes)
+  use_compared_titles = Nplots > 1
+  diff_labels, common_items = _caption_comparison(labels, first_run_idx=1) if use_compared_titles else ([], [])
+
+  if not os.path.exists(outdir):
+    os.makedirs(outdir)
   mins=np.zeros(Ndim)
   maxs=np.zeros(Ndim)
   for ii in range(Ndim):
@@ -1329,7 +1415,7 @@ def lund_plot(
     fig, axs = plt.subplots(
         nrows,
         ncols,
-        figsize=(5.0 * ncols + 0.6, 4.2 * nrows),
+        figsize=(5.0 * ncols + 1.0, 4.4 * nrows + 0.6),
         squeeze=False,
     )
     flat_axs = axs.ravel()
@@ -1356,11 +1442,16 @@ def lund_plot(
         # Add titles and labels
         # --------------------------
 
-        # Panel title (original / generated / etc.)
-        if jj < len(labels):
-            ax.set_title(labels[jj])
+        if use_compared_titles:
+            if jj == 0:
+                panel_label = "original"
+            elif jj - 1 < len(diff_labels):
+                panel_label = diff_labels[jj - 1]
+            else:
+                panel_label = f"run {jj}"
         else:
-            ax.set_title(f"sample_{jj}")
+            panel_label = str(labels[jj]) if jj < len(labels) else f"sample_{jj}"
+        ax.set_title(panel_label, pad=8, fontsize=10)
 
         # Axis labels
         ax.set_xlabel(r"$\log(k_t)$")
@@ -1389,12 +1480,22 @@ def lund_plot(
     # Add colorbar (shared)
     # --------------------------
     if last_hist is not None:
-      cbar = fig.colorbar(last_hist[3], ax=used_axs.tolist(), fraction=0.025, pad=0.02)
+      cbar = fig.colorbar(last_hist[3], ax=used_axs.tolist(), fraction=0.022, pad=0.055)
       cbar.set_label("Density (log scale)")
 
-    # Global title
-    fig.suptitle("Lund Plane Distribution", fontsize=14)
-    fig.subplots_adjust(left=0.08, right=0.90, bottom=0.10, top=0.88, wspace=0.30, hspace=0.35)
+    fig.suptitle("Lund Plane Distribution", fontsize=14, y=0.985)
+    caption_lines = _plot_note_from_common(common_items, unavailable_notes)
+    bottom_margin = 0.13 if caption_lines else 0.09
+    fig.subplots_adjust(left=0.08, right=0.88, bottom=bottom_margin, top=0.90, wspace=0.30, hspace=0.55)
+    if caption_lines:
+      fig.text(
+        0.08,
+        0.025,
+        _wrapped_note(caption_lines, width=150),
+        ha="left",
+        va="bottom",
+        fontsize=8,
+      )
 
     # Save
     name = "lund"
@@ -1418,7 +1519,7 @@ def resolve_hist2d_shape(nplots, hist2d_shape=None):
   if nplots == 4:
     return 2, 2
 
-  ncols = math.ceil(math.sqrt(nplots * 1.6))
+  ncols = math.ceil(math.sqrt(nplots))
   nrows = math.ceil(nplots / ncols)
   return nrows, ncols
 
@@ -1451,10 +1552,9 @@ def plot_combined_1dhist(
 
     if labels is None:
         labels = [f"sample_{i}" for i in range(len(inputs))]
-    plot_labels = [
-        "\n".join(textwrap.wrap(str(label), width=34, break_long_words=False)) or str(label)
-        for label in labels
-    ]
+    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
+    plot_labels = ["original"]
+    plot_labels.extend(diff_labels)
 
     linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
     Ndim = inputs[0].shape[1]
@@ -1523,7 +1623,7 @@ def plot_combined_1dhist(
 
         axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
         axs[ii].set_xlabel("value")
-        axs[ii].set_ylabel("Density")
+        axs[ii].set_ylabel("Density (log scale)" if logy else "Density")
 
         ymax = max([np.max(h) for h in all_hist_counts if h.size > 0], default=1.0)
 
@@ -1549,30 +1649,27 @@ def plot_combined_1dhist(
             axs[ii].set_ylim(0.0, ymax * 1.15 if ymax > 0 else 1.0)
 
     handles, legend_labels = axs[0].get_legend_handles_labels()
-    max_label_width = max((max(len(part) for part in label.splitlines()) for label in legend_labels), default=0)
-    right_edge = 0.68 if (max_label_width > 24 or len(legend_labels) > 2) else 0.74
-    fig.tight_layout(rect=[0.0, 0.0, right_edge, 1.0])
+    note_lines = _plot_note_from_common(common_items, unavailable_notes)
+    has_caption = bool(note_lines)
+    bottom_edge = 0.20 if has_caption else 0.08
+    fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
     if len(handles) > 0:
-        fig.legend(
-            handles,
-            legend_labels,
-            loc="center left",
-            bbox_to_anchor=(right_edge + 0.02, 0.5),
-            fontsize=8,
-            framealpha=0.95,
-        )
-    if unavailable_notes:
-        note_text = "Unavailable:\n" + "\n".join(
-            f"{label}: {reason}" for label, reason in unavailable_notes
-        )
+        for ax in axs:
+            ax.legend(
+                handles,
+                legend_labels,
+                loc="best",
+                fontsize=8,
+                framealpha=0.90,
+            )
+    if note_lines:
         fig.text(
-            right_edge + 0.02,
-            0.08,
-            note_text,
+            0.02,
+            0.02,
+            _wrapped_note(note_lines, width=145),
             ha="left",
             va="bottom",
             fontsize=8,
-            wrap=True,
         )
 
     if out_name is None:
@@ -1583,6 +1680,10 @@ def plot_combined_1dhist(
     plt.close(fig)
 
 def plot_combined_losses(run_infos, out_dir):
+    diff_labels, common_items = _caption_comparison(
+        ["original"] + [info.get("caption", info.get("checkpoint_path", f"run {i + 1}")) for i, info in enumerate(run_infos)],
+        first_run_idx=1,
+    )
     metric_names = set()
     for info in run_infos:
         for metric_name, curve in info.get("loss_curves_csv", {}).items():
@@ -1590,9 +1691,12 @@ def plot_combined_losses(run_infos, out_dir):
                 metric_names.add(metric_name)
 
     for metric_name in sorted(metric_names):
-        fig = plt.figure(figsize=(6.0, 4.0))
+        fig, ax = plt.subplots(figsize=(7.2, 4.8))
         used_any = False
-        for info in run_infos:
+        prop_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+        markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+        linestyles = ["-", "--", "-.", ":", (0, (5, 1)), (0, (3, 1, 1, 1))]
+        for irun, info in enumerate(run_infos):
             curve = info.get("loss_curves_csv", {}).get(metric_name, None)
             if curve is None or len(curve) == 0:
                 continue
@@ -1606,15 +1710,19 @@ def plot_combined_losses(run_infos, out_dir):
                 x = x[:first_bad]
                 truncated = True
             if len(y) > 0 and np.all(np.isfinite(y)):
-                label = info.get("caption", info.get("checkpoint_path", "run"))
+                label = diff_labels[irun] if irun < len(diff_labels) else f"run {irun + 1}"
                 if truncated:
                     label = f"{label}\nvalid through ep {len(y)}"
-                plt.plot(
+                ax.plot(
                     x,
                     y,
-                    linestyle="-",
-                    linewidth=2,
-                    alpha=0.7,
+                    color=prop_cycle[irun % len(prop_cycle)] if prop_cycle else None,
+                    linestyle=linestyles[irun % len(linestyles)],
+                    marker=markers[irun % len(markers)],
+                    markersize=4,
+                    markevery=max(len(x) // 12, 1),
+                    linewidth=2.0,
+                    alpha=0.9,
                     label=label,
                 )
                 used_any = True
@@ -1623,14 +1731,35 @@ def plot_combined_losses(run_infos, out_dir):
             plt.close(fig)
             continue
 
-        plt.xlabel("Epoch")
-        plt.ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
-        plt.title(f"Loss vs Epoch ({metric_name})")
-        plt.grid(True)
-        plt.legend(fontsize=8, framealpha=0.9)
-        fig.tight_layout()
-        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.png"))
-        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"))
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
+        ax.set_title(f"Loss vs Epoch ({metric_name})")
+        ax.grid(True, alpha=0.35)
+        legend_kwargs = dict(fontsize=8, framealpha=0.92)
+        if len(run_infos) <= 5:
+            ax.legend(loc="best", **legend_kwargs)
+            bottom_edge = 0.14 if common_items else 0.06
+        else:
+            ax.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.18),
+                ncol=2,
+                **legend_kwargs,
+            )
+            bottom_edge = 0.28 if common_items else 0.22
+        fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
+        note_lines = _plot_note_from_common(common_items)
+        if note_lines:
+            fig.text(
+                0.02,
+                0.02,
+                _wrapped_note(note_lines, width=130),
+                ha="left",
+                va="bottom",
+                fontsize=8,
+            )
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.png"), bbox_inches="tight")
+        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"), bbox_inches="tight")
         plt.close(fig)
 
 def validate_unbinned_models(
