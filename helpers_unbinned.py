@@ -836,6 +836,12 @@ def load_unbinned_model_for_plot(model_path, input_dim, device="cpu"):
     model.eval()
     return model, metadata
 
+def model_has_nonfinite_parameters(model):
+    for tensor in model.state_dict().values():
+        if torch.is_tensor(tensor) and not torch.isfinite(tensor).all():
+            return True
+    return False
+
 def infer_log_dir_from_path(model_path):
     parent = os.path.dirname(os.path.abspath(model_path))
     if os.path.basename(parent) == "checkpoints":
@@ -1055,7 +1061,7 @@ def parse_input():
     p.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
     p.add_argument("--num-features", dest="num_features", type=int, default=2,
                    help="Feature dimension per constituent (default: 2 = [deltaR, kt])")
-    p.add_argument("--num-bins", dest="num_bins", type=int, nargs="+", default=[20, 20],
+    p.add_argument("--num-bins", dest="num_bins", type=int, nargs="+", default=[50, 50],
                    help="Binning spec for compatibility with binned training scripts")
 
     # training
@@ -1105,6 +1111,14 @@ def parse_input():
 
     # logging / checkpointing
     p.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
+    p.add_argument(
+        "--plot-dir",
+        "--plot-out-dir",
+        dest="plot_dir",
+        type=str,
+        default=None,
+        help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",
+    )
     p.add_argument("--save-mode", type=str, default="checkpoint", choices=["checkpoint", "model", "none"],
                    help="Saved training artifact: full checkpoint, model-state only, or none")
     p.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
@@ -1239,7 +1253,7 @@ def make_lundplane(input_vec, pad_length=15):
   return lund_plane
 
 
-def projection_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots/"):
+def projection_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots/", unavailable_notes=None):
 
   if not os.path.exists(outdir):
     os.makedirs(outdir)
@@ -1265,6 +1279,12 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
     if ii==0: axs[0].legend()
     axs[ii].set_yscale("log")
 
+  if unavailable_notes:
+    note_text = "Unavailable:\n" + "\n".join(
+      f"{label}: {reason}" for label, reason in unavailable_notes
+    )
+    fig.text(0.98, 0.5, note_text, ha="right", va="center", fontsize=8)
+
   name="projection"
   fig.savefig(os.path.join(outdir,name+".png"))
   fig.savefig(os.path.join(outdir,name+".pdf"))
@@ -1279,6 +1299,7 @@ def lund_plot(
     hist2d_bins=(20, 20),
     hist2d_shape=None,
     hist2d_layout=None,
+    unavailable_notes=None,
 ):
 
   if not os.path.exists(outdir):
@@ -1287,6 +1308,8 @@ def lund_plot(
   #Get ranges
   Ndim=inputs[0].shape[1]
   Nin=len(inputs)
+  unavailable_notes = unavailable_notes or []
+  Nplots = Nin + len(unavailable_notes)
   mins=np.zeros(Ndim)
   maxs=np.zeros(Ndim)
   for ii in range(Ndim):
@@ -1302,7 +1325,7 @@ def lund_plot(
     # Create subplots for each input (original, generated, etc.)
     if hist2d_shape is None:
       hist2d_shape = hist2d_layout
-    nrows, ncols = resolve_hist2d_shape(Nin, hist2d_shape)
+    nrows, ncols = resolve_hist2d_shape(Nplots, hist2d_shape)
     fig, axs = plt.subplots(
         nrows,
         ncols,
@@ -1310,7 +1333,7 @@ def lund_plot(
         squeeze=False,
     )
     flat_axs = axs.ravel()
-    used_axs = flat_axs[:Nin]
+    used_axs = flat_axs[:Nplots]
 
     last_hist = None
     for jj in range(Nin):
@@ -1343,14 +1366,31 @@ def lund_plot(
         ax.set_xlabel(r"$\log(k_t)$")
         ax.set_ylabel(r"$\log(1/\Delta R)$")
 
-    for ax in flat_axs[Nin:]:
-        ax.set_visible(False)
+    for offset, (label, reason) in enumerate(unavailable_notes):
+        ax = used_axs[Nin + offset]
+        ax.set_title(label)
+        ax.text(
+            0.5,
+            0.5,
+            f"Plot unavailable\n{reason}",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=10,
+            wrap=True,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for ax in flat_axs[Nplots:]:
+      ax.set_visible(False)
 
     # --------------------------
     # Add colorbar (shared)
     # --------------------------
-    cbar = fig.colorbar(last_hist[3], ax=used_axs.tolist(), fraction=0.025, pad=0.02)
-    cbar.set_label("Density (log scale)")
+    if last_hist is not None:
+      cbar = fig.colorbar(last_hist[3], ax=used_axs.tolist(), fraction=0.025, pad=0.02)
+      cbar.set_label("Density (log scale)")
 
     # Global title
     fig.suptitle("Lund Plane Distribution", fontsize=14)
@@ -1394,6 +1434,7 @@ def plot_combined_1dhist(
     logy=False,
     out_name=None,
     logy_floor_mode="clamped",
+    unavailable_notes=None,
 ):
     """
     Plot overlaid 1D histograms for Lund features.
@@ -1520,6 +1561,19 @@ def plot_combined_1dhist(
             fontsize=8,
             framealpha=0.95,
         )
+    if unavailable_notes:
+        note_text = "Unavailable:\n" + "\n".join(
+            f"{label}: {reason}" for label, reason in unavailable_notes
+        )
+        fig.text(
+            right_edge + 0.02,
+            0.08,
+            note_text,
+            ha="left",
+            va="bottom",
+            fontsize=8,
+            wrap=True,
+        )
 
     if out_name is None:
         out_name = "hist1d_logy" if logy else "hist1d"
@@ -1544,15 +1598,24 @@ def plot_combined_losses(run_infos, out_dir):
                 continue
             y = np.asarray(curve, dtype=float)
             x = np.arange(1, len(y) + 1)
-            mask = ~np.isnan(y)
-            if np.any(mask):
+            finite = np.isfinite(y)
+            truncated = False
+            if np.any(~finite):
+                first_bad = int(np.argmax(~finite))
+                y = y[:first_bad]
+                x = x[:first_bad]
+                truncated = True
+            if len(y) > 0 and np.all(np.isfinite(y)):
+                label = info.get("caption", info.get("checkpoint_path", "run"))
+                if truncated:
+                    label = f"{label}\nvalid through ep {len(y)}"
                 plt.plot(
-                    x[mask],
-                    y[mask],
+                    x,
+                    y,
                     linestyle="-",
                     linewidth=2,
                     alpha=0.7,
-                    label=info.get("caption", info.get("checkpoint_path", "run")),
+                    label=label,
                 )
                 used_any = True
 
@@ -1577,6 +1640,7 @@ def validate_unbinned_models(
     args,
     labels=None,
     make_projection=False,
+    unavailable_model_reasons=None,
 ):
   if args.plot_max_batches is not None and args.plot_max_batches <= 0:
     raise ValueError("--plot-max-batches must be a positive integer")
@@ -1589,49 +1653,108 @@ def validate_unbinned_models(
       labels.extend([f"generated_{ii}" for ii in range(len(models))])
 
   with torch.no_grad():
-      original = torch.empty([0, input_shape[-2], input_shape[-1]])
-      generated_list = [
-          torch.empty([0, input_shape[-2], input_shape[-1]])
-          for _ in models
-      ]
+      original_chunks = []
+      generated_chunks = [[] for _ in models]
+      active_models = [True for _ in models]
+      unavailable_reasons = [None for _ in models]
 
       device = "cpu"
-      for model in models:
+      for imodel, model in enumerate(models):
         model.to(device)
         model.eval()
+        forced_reason = None
+        if unavailable_model_reasons is not None and imodel < len(unavailable_model_reasons):
+          forced_reason = unavailable_model_reasons[imodel]
+        if forced_reason:
+          reason = forced_reason
+          print(f"Generated plot unavailable for model {imodel}: {reason}.", flush=True)
+          active_models[imodel] = False
+          unavailable_reasons[imodel] = reason
+        elif model_has_nonfinite_parameters(model):
+          reason = "non-finite model parameters"
+          print(f"Generated plot unavailable for model {imodel}: {reason}.", flush=True)
+          active_models[imodel] = False
+          unavailable_reasons[imodel] = reason
 
+      printed_example = False
       for batch, X in enumerate(test_loader):
         if args.plot_max_batches is not None and batch >= args.plot_max_batches:
           break
 
         X = X.to(device)
         start = X[:, 0, :].unsqueeze(1)
-        original = torch.cat([original, X])
+        original_chunks.append(X.cpu())
 
         for imodel, model in enumerate(models):
-          generated_seq = model.generate(start, steps=X.shape[1] - 1)
+          if not active_models[imodel]:
+            continue
+
+          try:
+            generated_seq = model.generate(start, steps=X.shape[1] - 1)
+          except RuntimeError as err:
+            reason = f"generation failed: {err}"
+            print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)
+            active_models[imodel] = False
+            generated_chunks[imodel] = []
+            unavailable_reasons[imodel] = reason
+            continue
+
+          if not torch.isfinite(generated_seq).all():
+            reason = "generated sequence contains nan/inf"
+            print(f"Generated plot unavailable for model {imodel}: {reason}.", flush=True)
+            active_models[imodel] = False
+            generated_chunks[imodel] = []
+            unavailable_reasons[imodel] = reason
+            continue
 
           if args.mixed_loss:
             generated_seq[:, :, -1] = torch.sigmoid(generated_seq[:, :, -1])
             generated_seq[:, 0, -1] = X[:, 0, -1]
 
-          if batch == 0 and imodel == 0:
+          if not printed_example:
             print("Input example")
             print(X[0])
             print("Generate example")
             print(generated_seq[0])
+            printed_example = True
 
-          generated_list[imodel] = torch.cat([generated_list[imodel], generated_seq])
+          generated_chunks[imodel].append(generated_seq.cpu())
 
-      if len(original) == 0:
+      if len(original_chunks) == 0:
         raise ValueError("No validation batches were plotted")
+
+      original = torch.cat(original_chunks)
+      generated_list = [
+          torch.cat(chunks)
+          for chunks in generated_chunks
+          if len(chunks) > 0
+      ]
+      active_labels = [labels[0]]
+      active_labels.extend(
+          labels[imodel + 1]
+          for imodel, chunks in enumerate(generated_chunks)
+          if len(chunks) > 0 and imodel + 1 < len(labels)
+      )
+      unavailable_notes = [
+          (
+              labels[imodel + 1] if imodel + 1 < len(labels) else f"generated_{imodel}",
+              reason,
+          )
+          for imodel, reason in enumerate(unavailable_reasons)
+          if reason is not None
+      ]
 
       flat_original = original.flatten(0, 1).numpy()
       flat_generated_list = [g.flatten(0, 1).numpy() for g in generated_list]
       plot_inputs = [flat_original] + flat_generated_list
 
       if make_projection:
-        projection_plot(plot_inputs, labels=labels, outdir=args.log_dir)
+        projection_plot(
+            plot_inputs,
+            labels=active_labels,
+            outdir=args.log_dir,
+            unavailable_notes=unavailable_notes,
+        )
 
       hist1d_ranges = None
       if args.hist1d_ranges is not None:
@@ -1644,22 +1767,24 @@ def validate_unbinned_models(
 
       plot_combined_1dhist(
           plot_inputs,
-          labels=labels,
+          labels=active_labels,
           out_dir=args.log_dir,
           hist1d_ranges=hist1d_ranges,
           hist1d_bins=args.hist1d_bins,
           logy=False,
           out_name="hist1d",
+          unavailable_notes=unavailable_notes,
       )
 
       plot_combined_1dhist(
           plot_inputs,
-          labels=labels,
+          labels=active_labels,
           out_dir=args.log_dir,
           hist1d_ranges=hist1d_ranges,
           hist1d_bins=args.hist1d_bins,
           logy=True,
           out_name="hist1d_logy",
+          unavailable_notes=unavailable_notes,
       )
 
       if args.input_format == "ktdr":
@@ -1673,12 +1798,13 @@ def validate_unbinned_models(
 
       lund_plot(
           lund_inputs,
-          labels=labels,
+          labels=active_labels,
           outdir=args.log_dir,
           hist2d_xrange=args.hist2d_xrange,
           hist2d_yrange=args.hist2d_yrange,
           hist2d_bins=args.hist2d_bins,
           hist2d_shape=args.hist2d_shape,
+          unavailable_notes=unavailable_notes,
       )
 
 def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
@@ -1686,11 +1812,36 @@ def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
   if not os.path.exists(outdir):
     os.makedirs(outdir)
 
-  epochs=range(1, len(loss_train) + 1)
+  train_arr = np.asarray(loss_train, dtype=float)
+  test_arr = np.asarray(loss_test, dtype=float)
+  n_epochs = min(len(train_arr), len(test_arr))
+  train_arr = train_arr[:n_epochs]
+  test_arr = test_arr[:n_epochs]
+  finite = np.isfinite(train_arr) & np.isfinite(test_arr)
+  truncated = False
+  if np.any(~finite):
+    first_bad = int(np.argmax(~finite))
+    train_arr = train_arr[:first_bad]
+    test_arr = test_arr[:first_bad]
+    n_epochs = first_bad
+    truncated = True
+
+  epochs=range(1, n_epochs + 1)
 
   fig,ax = plt.subplots(figsize=(6.0, 4.0))
-  ax.plot(epochs, loss_train, marker="o", label="Train")
-  ax.plot(epochs, loss_test , marker="o", label="Test")
+  if n_epochs > 0:
+    ax.plot(epochs, train_arr, marker="o", label="Train")
+    ax.plot(epochs, test_arr, marker="o", label="Test")
+  if truncated:
+    ax.text(
+      0.5,
+      0.5,
+      f"Loss history truncated at epoch {n_epochs}\nnext epoch contains nan/inf",
+      ha="center",
+      va="center",
+      transform=ax.transAxes,
+      fontsize=9,
+    )
   ax.legend()
   ax.set_xlabel("Epoch")
   ax.set_ylabel("Loss")

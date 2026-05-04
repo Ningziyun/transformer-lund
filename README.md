@@ -255,7 +255,7 @@ python plot_unbinned.py \
   --input_format ktdr \
   --num-workers 0 \
   --plot-max-batches 100 \
-  --log-dir models/mdn_plots
+  --plot-dir models/mdn_plots
 ```
 
 Compare several runs:
@@ -274,7 +274,7 @@ python plot_unbinned.py \
   --hist1d-bins 50 \
   --hist2d-bins 40 40 \
   --hist2d-shape 2 2 \
-  --log-dir models/comparison_plots
+  --plot-dir models/comparison_plots
 ```
 
 Main outputs include:

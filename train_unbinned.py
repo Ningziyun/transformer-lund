@@ -2,6 +2,9 @@
 
 from helpers_unbinned import *
 
+class NonFiniteLossError(RuntimeError):
+  pass
+
 def evaluate_loss(model,X,args):
   inputs = X[:, :-1, :]   # all but last
   targets = X[:, 1:, :]   # all but first
@@ -34,6 +37,7 @@ def evaluate_loss(model,X,args):
   return loss
 
 def train(model,train_loader,args):
+  model.train()
   bestloss=1e6
   epoch_loss=0.0
   n_batches=0
@@ -42,13 +46,28 @@ def train(model,train_loader,args):
       optimizer.zero_grad()
 
       loss=evaluate_loss(model, X, args)
+      loss_per_sample = loss / X.shape[0]
+      if not torch.isfinite(loss_per_sample):
+        raise NonFiniteLossError(
+          f"Non-finite training loss at batch {batch}: {loss_per_sample.item()}"
+        )
 
       loss.backward()
+      for name, param in model.named_parameters():
+        if param.grad is not None and not torch.isfinite(param.grad).all():
+          raise NonFiniteLossError(
+            f"Non-finite gradient at batch {batch} in parameter {name}"
+          )
       if args.grad_clip is not None and args.grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
       optimizer.step()
+      for name, param in model.named_parameters():
+        if not torch.isfinite(param).all():
+          raise NonFiniteLossError(
+            f"Non-finite parameter after optimizer step at batch {batch}: {name}"
+          )
 
-      loss=loss/X.shape[0] #average the loss across batch
+      loss=loss_per_sample #average the loss across batch
 
       if batch % 100 == 0:
         print(f"batch: {batch} loss:{loss.item()}", flush=True)
@@ -70,6 +89,10 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
       X = X.to(device)
       loss = evaluate_loss(model, X, args)
+      if not torch.isfinite(loss):
+        raise NonFiniteLossError(
+          f"Non-finite test loss at batch {batch}: {loss.item()}"
+        )
       epochloss += loss.item() #sum the loss across epoch
       if batch % 100 == 0:
         print(f"test batch: {batch}", flush=True)
@@ -85,6 +108,10 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
       X = X.to(device)
       loss = evaluate_loss(model, X, args)
+      if not torch.isfinite(loss):
+        raise NonFiniteLossError(
+          f"Non-finite test loss at batch {batch}: {loss.item()}"
+        )
       epochloss += loss.item() #sum the loss across epoch
       if batch % 100 == 0:
         print(f"test batch: {batch}", flush=True)
@@ -211,6 +238,7 @@ if __name__ == "__main__":
     loss_train=[]
     lr_history=[]
     loss_curves={}
+    stopped_nonfinite = False
     if resume_state is not None:
       best_loss = resume_state.get("best_loss", best_loss)
       if best_loss is None:
@@ -226,8 +254,13 @@ if __name__ == "__main__":
     for epoch in range(start_epoch, epochs):
       print(f"\nEpoch {epoch+1}\n-------------------------------", flush=True)
       starttime=time.time()
-      train_loss = train(model,train_loader,args)
-      test_loss = test(model,test_loader,args)
+      try:
+        train_loss = train(model,train_loader,args)
+        test_loss = test(model,test_loader,args)
+      except NonFiniteLossError as err:
+        print(f"Stopping due to non-finite value: {err}", flush=True)
+        stopped_nonfinite = True
+        break
       print("Took %.2f minutes to run"%((time.time()-starttime)/60), flush=True)
       current_lr = optimizer.param_groups[0]["lr"]
       lr_history.append(current_lr)
@@ -289,11 +322,23 @@ if __name__ == "__main__":
     loss_plot(loss_train,loss_test,outdir=args.log_dir,loss_curves=loss_curves)
     save_lr_csv(lr_history, out_dir=args.log_dir)
     save_lr_plot(lr_history, out_dir=args.log_dir)
-    validate_unbinned_models(
-      [model],
-      test_loader,
-      X_example.shape,
-      args,
-      labels=["original", "generated"],
-      make_projection=True,
-    )
+    if stopped_nonfinite:
+      print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
+      validate_unbinned_models(
+        [model],
+        test_loader,
+        X_example.shape,
+        args,
+        labels=["original", "generated"],
+        make_projection=True,
+        unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],
+      )
+    else:
+      validate_unbinned_models(
+        [model],
+        test_loader,
+        X_example.shape,
+        args,
+        labels=["original", "generated"],
+        make_projection=True,
+      )

@@ -10,6 +10,8 @@ def main():
     if args.log_dir == "models/test":
         # For multiple models, use the log directory of the first model/checkpoint as the default output directory.
         args.log_dir = infer_log_dir_from_path(args.model_path[0])
+    plot_dir = args.plot_dir or args.log_dir
+    args.log_dir = plot_dir
 
     train_loader, test_loader = get_loaders(
         args.input_format,
@@ -25,11 +27,16 @@ def main():
     # Load all models/checkpoints passed from --model-path/--checkpoint.
     models = []
     labels = ["original"]
+    unavailable_model_reasons = []
     run_infos = []
     for model_path in args.model_path:
         print(f"Loading model: {model_path}")
         model, ckpt_meta = load_unbinned_model_for_plot(model_path, X_example.shape[2], device=device)
         models.append(model)
+        if model_has_nonfinite_parameters(model):
+            unavailable_model_reasons.append("checkpoint contains nan/inf parameters")
+        else:
+            unavailable_model_reasons.append(None)
 
         log_dir = infer_log_dir_from_path(model_path)
         txt_meta = parse_arguments_txt(os.path.join(log_dir, "arguments.txt"))
@@ -53,10 +60,11 @@ def main():
         args,
         labels=labels,
         make_projection=False,
+        unavailable_model_reasons=unavailable_model_reasons,
     )
 
-    plot_combined_losses(run_infos=run_infos, out_dir=args.log_dir)
-    print(f"Plots written to: {args.log_dir}")
+    plot_combined_losses(run_infos=run_infos, out_dir=plot_dir)
+    print(f"Plots written to: {plot_dir}")
 
 
 if __name__ == "__main__":
