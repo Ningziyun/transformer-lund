@@ -8,7 +8,7 @@ pip install -r requirements.txt
 **Install for GPU:**
 
 ```
-conda create --name torch_env python=3.9
+conda create --name torch_env python=3.11
 conda activate torch_env
 conda install pytorch cudatoolkit=11.3 -c pytorch
 pip install -r requirements.txt
@@ -28,7 +28,7 @@ cd ../..
 
 Input files from the jetclass dataset from https://zenodo.org/records/6619768 can be downloaded via
 ```
-download_jetclass.py
+python download_jetclass.py
 ```
 
 **Data Setup**
@@ -57,7 +57,36 @@ To perform the training, the lund input files must be discretized, output to h5 
 ```
 python discretize_auto.py --data_path inputFiles/qcd_lund_cut.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
 ```
+**Training & Plot**
+```
+ython train_ublund.py --epochs 300 \
+ --patience 300 \
+ --lr 0.001 \
+ --batch-size 1000 \
+ --multi-loss-plot \
+ --scheduler cos_damping \
+ --cos-damping-start-epoch 50 \
+ --cos-damping-end-epoch 300 \
+ --cos-damping-final-lr 0.001 \
+ --cos-damping-amplitude 0.10 \
+ --cos-damping-period-epochs 5.0 \
+ --train-file inputFiles/qcd_lund_nrb_train.h5 \
+ --val-file inputFiles/qcd_lund_nrb_val.h5
 
+python train_ublund.py --epochs 300 \
+ --patience 300 \
+ --lr 0.001 \
+  --scheduler none \
+ --batch-size 1000 \
+ --multi-loss-plot \
+ --train-file inputFiles/qcd_lund_nrb_train.h5 \
+ --val-file inputFiles/qcd_lund_nrb_val.h5
+
+python plot_ublund.py --checkpoint models/test_1/checkpoints/best.pt \
+ models/test_2/checkpoints/best.pt \
+ models/test_3/checkpoints/best.pt \
+ --out-dir models/plot \
+ --hist1d-ranges -5 6 -3 10```
 **Training**
 
 To train a model run:
