@@ -1,4 +1,3 @@
-import ROOT
 import fastjet
 import math
 
@@ -69,7 +68,6 @@ def jet_declusterings(jet_in):
       jj = j1;
 
   return result;
-
 
 
 

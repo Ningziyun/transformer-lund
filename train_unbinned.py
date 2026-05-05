@@ -2,6 +2,9 @@
 
 from helpers_unbinned import *
 
+class NonFiniteLossError(RuntimeError):
+  pass
+
 def evaluate_loss(model,X,args):
   inputs = X[:, :-1, :]   # all but last
   targets = X[:, 1:, :]   # all but first
@@ -34,24 +37,48 @@ def evaluate_loss(model,X,args):
   return loss
 
 def train(model,train_loader,args):
+  model.train()
   bestloss=1e6
+  epoch_loss=0.0
+  n_batches=0
   for batch, X in enumerate(train_loader):
       X = X.to(device)
       optimizer.zero_grad()
 
       loss=evaluate_loss(model, X, args)
+      loss_per_sample = loss / X.shape[0]
+      if not torch.isfinite(loss_per_sample):
+        raise NonFiniteLossError(
+          f"Non-finite training loss at batch {batch}: {loss_per_sample.item()}"
+        )
 
       loss.backward()
+      for name, param in model.named_parameters():
+        if param.grad is not None and not torch.isfinite(param.grad).all():
+          raise NonFiniteLossError(
+            f"Non-finite gradient at batch {batch} in parameter {name}"
+          )
+      if args.grad_clip is not None and args.grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
       optimizer.step()
+      for name, param in model.named_parameters():
+        if not torch.isfinite(param).all():
+          raise NonFiniteLossError(
+            f"Non-finite parameter after optimizer step at batch {batch}: {name}"
+          )
 
-      loss=loss/X.shape[0] #average the loss across batch
+      loss=loss_per_sample #average the loss across batch
 
       if batch % 100 == 0:
-        print(f"batch: {batch} loss:{loss.item()}")
+        print(f"batch: {batch} loss:{loss.item()}", flush=True)
       if loss.item()<bestloss: bestloss=loss.item()
+      epoch_loss += loss.item()
+      n_batches += 1
 
-  print(f"train loss={bestloss}")
-  loss_train.append(bestloss)
+  avg_loss = epoch_loss / max(n_batches, 1)
+  print(f"train loss={avg_loss} best_batch_loss={bestloss}", flush=True)
+  loss_train.append(avg_loss)
+  return avg_loss
 
 def test(model, test_loader, args):
   model.eval()  # disable dropout for evaluation
@@ -62,11 +89,17 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
       X = X.to(device)
       loss = evaluate_loss(model, X, args)
+      if not torch.isfinite(loss):
+        raise NonFiniteLossError(
+          f"Non-finite test loss at batch {batch}: {loss.item()}"
+        )
       epochloss += loss.item() #sum the loss across epoch
+      if batch % 100 == 0:
+        print(f"test batch: {batch}", flush=True)
     epochloss /= num_samples
-    print(f"test loss ={epochloss}")
+    print(f"test loss ={epochloss}", flush=True)
     loss_test.append(epochloss)
-    return
+    return epochloss
 
   # Non-CNF models can safely disable grads during evaluation
   with torch.no_grad():
@@ -75,121 +108,82 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
       X = X.to(device)
       loss = evaluate_loss(model, X, args)
+      if not torch.isfinite(loss):
+        raise NonFiniteLossError(
+          f"Non-finite test loss at batch {batch}: {loss.item()}"
+        )
       epochloss += loss.item() #sum the loss across epoch
+      if batch % 100 == 0:
+        print(f"test batch: {batch}", flush=True)
 
     epochloss /= num_samples # average loss across whole epoch
-    print(f"test loss ={epochloss}")
+    print(f"test loss ={epochloss}", flush=True)
     loss_test.append(epochloss)
-
-def validate(model,test_loader,input_shape,args):
-  with torch.no_grad():
-      original=torch.empty([0,input_shape[-2],input_shape[-1]]) #[Ninput,Nconst,dimension]
-      generated=torch.empty([0,input_shape[-2],input_shape[-1]])
-      predicted=torch.empty([0,input_shape[-2],input_shape[-1]])
-
-      device="cpu"
-      for batch, X in enumerate(train_loader):
-        if batch>=5: break
-        X = X.to(device)
-        start=X[:,0,:].unsqueeze(1)
-        model.to(device)
-        pred= model(X)
-        generated_seq = model.generate(start, steps=X.shape[1]-1)
-
-        if args.mixed_loss:
-          pred[:,:,-1]=sigmoid(pred[:,:,-1])
-          generated_seq[:,:,-1]=sigmoid(generated_seq[:,:,-1])
-          generated_seq[:,0,-1]=X[:,0,-1]
-
-        if batch==0:
-          print("Input example")
-          print(X[0])
-          print("Generate example")
-          print(generated_seq[0])
-
-        original=torch.cat([original, X])
-        generated=torch.cat([generated,generated_seq])
-
-      projection_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()],outdir=args.log_dir)
-      
-      hist1d_ranges = None
-      if args.hist1d_ranges is not None:
-        if len(args.hist1d_ranges) != 4:
-          raise ValueError("--hist1d-ranges should be: kt_min kt_max dr_min dr_max")
-        hist1d_ranges = [
-          [args.hist1d_ranges[0], args.hist1d_ranges[1]],
-          [args.hist1d_ranges[2], args.hist1d_ranges[3]],
-        ]
-
-      flat_original = original.flatten(0, 1).numpy()
-      flat_generated = generated.flatten(0, 1).numpy()
-
-      plot_combined_1dhist(
-          [flat_original, flat_generated],
-          labels=["original", "generated"],
-          out_dir=args.log_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=False,
-          out_name="hist1d",
-      )
-
-      plot_combined_1dhist(
-          [flat_original, flat_generated],
-          labels=["original", "generated"],
-          out_dir=args.log_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=True,
-          out_name="hist1d_logy",
-      )
-
-      if args.input_format=="ktdr":
-        lund_plot([original.flatten(0,1).numpy(),generated.flatten(0,1).numpy()],outdir=args.log_dir)
-      else:
-        #original=original[:5,:,:]
-        #generated=generated[:5,:,:]
-        lund_original=make_lundplane(original.numpy())
-        lund_generated=make_lundplane(generated.numpy())
-        lund_plot([lund_original.reshape(-1, lund_original.shape[-1]),lund_generated.reshape(-1, lund_generated.shape[-1])],outdir=args.log_dir)
+    return epochloss
 
 if __name__ == "__main__":
     args = parse_input()
-    save_arguments(args)
-    print(f"Logging to {args.log_dir}")
     set_seeds(args.seed)
 
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
-    print(f"Running on device: {device}")
+    print(f"Running on device: {device}", flush=True)
 
     num_features = args.num_features
     num_bins = tuple(args.num_bins)
 
     # load and preprocess data
-    print(f"Loading training set")
+    print(f"Loading training set", flush=True)
     #train_loader,test_loader=get_loaders(train_file=args.train_file,val_file=args.val_file,batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
     train_loader,test_loader=get_loaders(args.input_format,train_file=args.train_file,val_file=args.val_file,
     batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
     X_example=next(iter(train_loader))
-    print("Input shape,",X_example.shape)
+    print("Input shape,",X_example.shape, flush=True)
 
     # construct model
+    resume_state = None
     if args.contin:
-        model = load_model(model_path=args.model_path)
-        print("Loaded model")
-    else:
-        if args.cnf:
-            model = model_transformer_CNF(input_dim=X_example.shape[2],embed_dim=args.embed_dim,num_heads=args.num_heads,
-                                num_layers=args.num_layers,ff_dim=args.ff_dim,cnf_hidden=args.cnf_hidden,cnf_steps=args.cnf_steps,)
-        elif args.mdn:
-          model=model_transformer_MDN(input_dim=X_example.shape[2],n_mix=args.n_mix,embed_dim=args.embed_dim,num_heads=args.num_heads,
-                                num_layers=args.num_layers,ff_dim=args.ff_dim,)
+        if len(args.model_path) == 0:
+          raise ValueError("--contin requires --model-path/--checkpoint")
+        load_path = args.model_path[0] if isinstance(args.model_path, list) else args.model_path
+        loaded = load_model(load_path)
+        if isinstance(loaded, dict) and "model_state_dict" in loaded:
+          resume_state = loaded
+          loaded_args = loaded.get("args", {})
+          for key in (
+              "cnf",
+              "mdn",
+              "mixed_loss",
+              "embed_dim",
+              "num_heads",
+              "num_layers",
+              "ff_dim",
+              "n_mix",
+              "cnf_hidden",
+              "cnf_steps",
+              "flow_hidden",
+          ):
+            if key in loaded_args:
+              setattr(args, key, loaded_args[key])
+          model = build_unbinned_model(X_example.shape[2], args)
+          model.load_state_dict(loaded["model_state_dict"])
         else:
-          model = test_model(
-            input_dim=X.shape[2],
-            embed_dim=args.embed_dim, num_heads=args.num_heads,
-            num_layers=args.num_layers, ff_dim=args.ff_dim
-          )
+          model = loaded
+        print("Loaded model", flush=True)
+    else:
+        model = build_unbinned_model(X_example.shape[2], args)
+
+    save_arguments(args)
+    append_training_metadata(args)
+    print(f"Logging to {args.log_dir}", flush=True)
+
+    doCNF = args.cnf
+    doMDN = args.mdn
+    doMixedLoss = args.mixed_loss
+    doMultiLossPlot = args.multi_loss_plot
+
+    if doCNF:
+      doMDN = False
+      doMixedLoss = False
 
     #Set the loss
     if args.cnf:
@@ -206,33 +200,24 @@ if __name__ == "__main__":
     #Plot the model summary
     if not args.cnf:
       summary(model, input_data=[X_example[:,:-1,:]], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(X_example[:,:-1,:]).shape)
+      print("Output shape,", model(X_example[:,:-1,:]).shape, flush=True)
     else:
       # Skip torchinfo for CNF to avoid autograd-mode issues.
       n_params = sum(p.numel() for p in model.parameters())
-      print(f"Model params: {n_params}")
+      print(f"Model params: {n_params}", flush=True)
     model.to(device)
 
-    aux_mdn_head = None
-    aux_cnf_flow = None
-    aux_optimizer = None
+    optimizer = make_optimizer(args, model)
+    scheduler = make_scheduler(args, optimizer)
 
-    if doMultiLossPlot:
-      # We train ONLY the auxiliary head parameters on detached context,
-      # so it never affects the main model iteration.
-      if doCNF:
-        # CNF main: log MDN-NLL with an auxiliary MDN head
-        aux_mdn_head = _MDNHeadFromContext(
-          context_dim=args.embed_dim, input_dim=X.shape[2], n_mix=args.n_mix
-        ).to(device)
-        aux_optimizer = torch.optim.Adam(aux_mdn_head.parameters(), lr=args.lr)
-
-      elif doMDN:
-        # MDN main: log CNF-NLL with an auxiliary flow head
-        aux_cnf_flow = _CondRealNVP2D(context_dim=args.embed_dim, hidden=args.flow_hidden).to(device)
-        aux_optimizer = torch.optim.Adam(aux_cnf_flow.parameters(), lr=args.lr)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    start_epoch = 0
+    if resume_state is not None:
+      if resume_state.get("optimizer_state_dict", None) is not None:
+        optimizer.load_state_dict(resume_state["optimizer_state_dict"])
+      if scheduler is not None and resume_state.get("scheduler_state_dict", None) is not None:
+        scheduler.load_state_dict(resume_state["scheduler_state_dict"])
+      start_epoch = int(resume_state.get("epoch", -1)) + 1
+      print(f"Resuming after ep {start_epoch}", flush=True)
 
     # Loss functions
     if doCNF:
@@ -245,28 +230,115 @@ if __name__ == "__main__":
     else:
       loss_fn=mdn_loss
 
-    best_loss=1e6
+    best_loss=float("inf")
+    best_epoch=-1
     patience_counter=0
     patience = args.patience
     loss_test=[]
     loss_train=[]
+    lr_history=[]
+    loss_curves={}
+    stopped_nonfinite = False
+    if resume_state is not None:
+      best_loss = resume_state.get("best_loss", best_loss)
+      if best_loss is None:
+        best_loss = float("inf")
+      else:
+        best_loss = float(best_loss)
+      best_epoch = resume_state.get("best_epoch", best_epoch)
+      loss_test = list(resume_state.get("test_losses", []))
+      loss_train = list(resume_state.get("train_losses", []))
+      lr_history = list(resume_state.get("lr_history", []))
+      loss_curves = dict(resume_state.get("loss_curves", {}))
     epochs=args.epochs 
-    for epoch in range(epochs):
-      print(f"\nEpoch {epoch+1}\n-------------------------------")
+    for epoch in range(start_epoch, epochs):
+      print(f"\nEpoch {epoch+1}\n-------------------------------", flush=True)
       starttime=time.time()
-      train(model,train_loader,args)
-      test(model,test_loader,args)
-      print("Took %.2f minutes to run"%((time.time()-starttime)/60))
-      save_model(model, args.log_dir, str(epoch))
-  
-      if loss_train[-1]<best_loss:
-        best_loss=loss_train[-1]
+      try:
+        train_loss = train(model,train_loader,args)
+        test_loss = test(model,test_loader,args)
+      except NonFiniteLossError as err:
+        print(f"Stopping due to non-finite value: {err}", flush=True)
+        stopped_nonfinite = True
+        break
+      print("Took %.2f minutes to run"%((time.time()-starttime)/60), flush=True)
+      current_lr = optimizer.param_groups[0]["lr"]
+      lr_history.append(current_lr)
+
+      best_metric = test_loss if test_loss is not None else train_loss
+      improved = best_metric<best_loss
+      if improved:
+        best_loss=best_metric
+        best_epoch=epoch
         patience_counter=0
       else:
         patience_counter+=1
-        if patience_counter>=patience:
-          print("Early stoping")
-          break
 
-    loss_plot(loss_train,loss_test,outdir=args.log_dir)
-    validate(model,test_loader,X_example.shape,args)
+      step_scheduler(scheduler, args, metric=best_metric)
+
+      save_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=epoch,
+        loss=best_metric,
+        args=args,
+        train_losses=loss_train,
+        test_losses=loss_test,
+        loss_curves=loss_curves,
+        lr_history=lr_history,
+        best_epoch=best_epoch,
+        best_loss=best_loss,
+        current_lr=current_lr,
+      )
+
+      if improved:
+        save_checkpoint(
+          model=model,
+          optimizer=optimizer,
+          scheduler=scheduler,
+          epoch=epoch,
+          loss=best_loss,
+          args=args,
+          ckpt_name="best.pt",
+          train_losses=loss_train,
+          test_losses=loss_test,
+          loss_curves=loss_curves,
+          lr_history=lr_history,
+          best_epoch=best_epoch,
+          best_loss=best_loss,
+          current_lr=current_lr,
+        )
+
+      loss_plot(loss_train,loss_test,outdir=args.log_dir,loss_curves=loss_curves)
+      save_lr_csv(lr_history, out_dir=args.log_dir)
+      save_lr_plot(lr_history, out_dir=args.log_dir)
+
+      if patience_counter>=patience:
+        print("Early stopping", flush=True)
+        break
+
+    append_training_metadata(args, best_epoch=best_epoch, best_loss=best_loss)
+    loss_plot(loss_train,loss_test,outdir=args.log_dir,loss_curves=loss_curves)
+    save_lr_csv(lr_history, out_dir=args.log_dir)
+    save_lr_plot(lr_history, out_dir=args.log_dir)
+    if stopped_nonfinite:
+      print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
+      validate_unbinned_models(
+        [model],
+        test_loader,
+        X_example.shape,
+        args,
+        labels=["original", "generated"],
+        make_projection=True,
+        unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],
+      )
+    else:
+      validate_unbinned_models(
+        [model],
+        test_loader,
+        X_example.shape,
+        args,
+        labels=["original", "generated"],
+        make_projection=True,
+      )
