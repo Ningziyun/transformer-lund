@@ -950,11 +950,14 @@ def _parse_caption_fields(label):
         if len(first_tokens) > 0:
             fields["model"] = first_tokens[0]
 
-    match = re.search(r"\bbest ep\s+\d+", text)
+    # Captions for intermediate checkpoints can include both the plotted
+    # checkpoint and the run's best epoch, e.g. "model ep 1 best ep 7".
+    # The comparison title should describe the plotted stage first.
+    match = re.search(r"(?<!best )\bep\s+\d+", text)
     if match:
         fields["checkpoint"] = match.group(0)
     else:
-        match = re.search(r"\bep\s+\d+", text)
+        match = re.search(r"\bbest ep\s+\d+", text)
         if match:
             fields["checkpoint"] = match.group(0)
 
