@@ -18,7 +18,7 @@ pip install -r requirements.txt
 **Get dataset**
 Input files for the top-benchmark dataset can be found here https://zenodo.org/records/2603256 and download via
 ```
-mkdir inputFiles/top_benchmark
+mkdir -p inputFiles/top_benchmark
 cd inputFiles/top_benchmark
 wget https://zenodo.org/records/2603256/files/train.h5
 wget https://zenodo.org/records/2603256/files/test.h5
