@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import torch
+import tables
 import os
 from tqdm import tqdm
 import ROOT
@@ -164,11 +165,29 @@ def discretize_data(
         cols = [item for sublist in zip(es, px, py, pz) for item in sublist]
         print(input_file) 
         #print(pd.read_hdf(input_file))
+        '''
+        #Used to work before newer numpy version
         df = pd.read_hdf(
             input_file,
             key="table",
             stop=nJets,
         )
+        '''
+        #Weird new way to get pandas object
+        with tables.open_file(input_file, "r") as f:
+            node = f.get_node("/table/table")
+            arr = node.read()
+
+        features = ["E", "PX", "PY", "PZ"]
+        cols0=[ f"{f}_{i}" for i in range(201) for f in features ]
+        cols1=["ttv","is_signal_new"]
+
+        df = pd.concat([
+            pd.DataFrame(arr["values_block_0"], columns=cols0),
+            pd.DataFrame(arr["values_block_1"], columns=cols1),
+        ], axis=1)
+
+        print(df)
         df = df[df["is_signal_new"] == class_label]
         df = df[cols]
         data = df.to_numpy()

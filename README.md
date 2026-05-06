@@ -2,24 +2,35 @@
 
 Transformer-based models for Lund-plane sequence generation. The current unbinned workflow is centered on `train_unbinned.py` and `plot_unbinned.py`. The older binned workflow is still available, but the examples below focus on the current scripts.
 
-**Install Dependencies for CPU:**
+## Install
+### Install Dependencies for CPU
 ```
 python3.13 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Install for GPU:**
-
+### Install for GPU
 ```
-conda create --name torch_env python=3.11
+conda create --name torch_env python=3.13
 conda activate torch_env
 conda install pytorch cudatoolkit=11.3 -c pytorch
 pip install -r requirements.txt
 ```
 
+## Get Data
+To download all the datasets you can run the quick bash script
+```
+source data_setup.sh
+```
+The main unifier is the last script `lunddata.py` which converts the intermediate root files into h5 with the same format and also calculates the lund-plane variables
+- `lundplane/dr` and `lundplane/kt` for `--input_format ktdr`
+- `constituents/E`, `PX`, `PY`, `PZ` for `--input_format 4vec`
 
-**Get dataset**
+
+Instructions for each dataset seperately are below
+
+### Top-benchmark
 Input files for the top-benchmark dataset can be found here https://zenodo.org/records/2603256 and download via
 ```
 mkdir -p inputFiles/top_benchmark
@@ -30,45 +41,32 @@ wget https://zenodo.org/records/2603256/files/val.h5
 cd ../..
 ```
 
+You then need to call the `discretize.sh` (which is a wrapper around `preprocess.py`),
+`preprocess.py` runs the original paper pt/eta discretization and outputs to a /discretized directory of the original, and outputs a root tree of pt/eta/phi to `./originalJets_*.root`
+
+Now takes these root files and combine them via:
+```
+./mergeTrees.py inputFiles/top_benchmark/rootified/originalJets_qcd.root inputFiles/top_benchmark/rootified/originalJets_qcd_*.root
+```
+
+Lastly convert them to nice h5 files with
+```
+inputFiles/top_benchmark/rootified/originalJets_qcd.root --outname topbenchmark.h5 --format topbenchmark
+```
+
+### Jet-class
 Input files from the jetclass dataset from https://zenodo.org/records/6619768 can be downloaded via
 ```
 python download_jetclass.py
 ```
+This just handles the download and unpacking of the many tarballs associated with these files
 
-**Data Setup**
-To process the input root after download the Input Files:
+Lastly convert them to nice h5 files with
 ```
-source data_setup.sh
-```
-This calls the scripts `discretize.sh` (which is a wrapper around `preprocess.py`), `addEnergy.py`, `lunddata.py`, `lund_select.py`, and `discretize_auto.py` in sequence
-
-`preprocess.py` runs the original paper pt/eta discretization and outputs to a /discretized directory of the original, and outputs a root tree of pt/eta/phi to `./originalJets_*.root`
-
-
-Use `--logMode` for `lunddata.py` in `data_setup.sh` to output in log(1/deltaR) and log(kt) format, and remove `--logMode` to produce deltaR and kt. Add `--swapAxes` to switch the tree order of root file from deltaR and kt. This overwrites `originalJets_*.root`.
-```
-python lunddata.py --logMode
+./lunddata.py inputFiles/jetclass/ZJetsToNuNu* --outname jetclass.h5 --format jetclass
 ```
 
-Use `lund_select.py` to cut the output. `--xmin --xmax` is the cut on kt, and `--ymin --ymax` is the cut on deltaR. Reads `inputFiles/qcd_lund.root` and outputs `inputFiles/qcd_lund_cut.root`.
-```
-python lund_select.py --in inputFiles/qcd_lund.root --out inputFiles/qcd_lund_cut.root --mode cut --xmin 0 --xmax 8 --ymin -1 --ymax 8
-```
-Could also use --mode top10 to select first 10 emissions, --mode shuffle to shuffle the order of emissions
-
-
-To perform legacy binned training, the Lund input files must be discretized and written to H5 files in `inputFiles/discretized/`.
-
-```
-python discretize_auto.py --data_path inputFiles/qcd_lund_cut.root --nBins 41 31 --tag kt_deltaR --auto_const_q 0.9 --split_train_val --train_ratio 0.8
-```
-
-For the current unbinned workflow, `train_unbinned.py` expects an H5 file with either:
-
-- `lundplane/dr` and `lundplane/kt` for `--input_format ktdr`
-- `constituents/E`, `PX`, `PY`, `PZ` for `--input_format 4vec`
-
-**Unbinned Training**
+## Unbinned Training
 
 All current training modes share the same command structure:
 
@@ -94,7 +92,7 @@ Common options:
 - `--grad-clip`: gradient norm clipping; set `0` to disable.
 - `--log-dir`: output directory. If it exists, a suffix like `_1` is added.
 
-***Save Modes***
+### Save Modes
 
 Training artifacts are written under `<log-dir>/checkpoints/`.
 
@@ -134,7 +132,7 @@ python -u train_unbinned.py \
   --log-dir models/test_resume
 ```
 
-***Schedulers***
+### Schedulers
 
 No scheduler:
 
@@ -169,9 +167,9 @@ Cosine damping with optional oscillation:
 --cos-damping-period-epochs 5.0
 ```
 
-**Training Modes**
+### Training Modes
 
-***Regression***
+#### Regression
 
 Default mode. This trains a direct next-step regression head.
 
@@ -189,7 +187,7 @@ python -u train_unbinned.py \
   --log-dir models/regression
 ```
 
-***MDN***
+#### MDN
 
 Mixture Density Network head. This is the current example mode in `transformer_run.sh`.
 
@@ -209,7 +207,7 @@ python -u train_unbinned.py \
   --log-dir models/mdn
 ```
 
-***CNF***
+#### CNF
 
 Continuous Normalizing Flow head. CNF evaluation needs gradients during validation, so it is usually slower.
 
@@ -230,7 +228,7 @@ python -u train_unbinned.py \
   --log-dir models/cnf
 ```
 
-**Batch Running**
+### Batch Running
 
 For a batch job, edit `transformer_run.sh` with the desired `train_unbinned.py` command, then run or submit `transformer.sh`.
 
@@ -241,7 +239,7 @@ source transformer_run.sh
 
 `transformer.sh` sources `transformer_setup.sh` and `transformer_run.sh` in sequence.
 
-**Plot Unbinned Results**
+### Plot Unbinned Results
 
 Use `plot_unbinned.py` with one or more checkpoint/model-state files. Checkpoints saved as `epoch_000.pt` are displayed in plot captions as `ep 1`; `best.pt` displays the best epoch using the same 1-based convention.
 
@@ -284,7 +282,7 @@ Main outputs include:
 - `lund.png` / `lund.pdf`
 - `loss_combined__*.png` / `loss_combined__*.pdf` when loss CSVs are available
 
-**Legacy Binned Training**
+### Legacy Binned Training
 
 The older binned workflow is still available through `train.py`.
 
@@ -302,9 +300,9 @@ To process legacy sampled results:
 python sample_jets_auto.py --num_samples 10000 --model_dir models/test/
 ```
 
-**Other Plotting Utilities**
+## Other Plotting Utilities
 
-***Input Files (`fileList.txt` example)***
+### Input Files (`fileList.txt` example)
 
 One ROOT file path per line. Lines beginning with `#` are ignored.
 
@@ -313,7 +311,7 @@ One ROOT file path per line. Lines beginning with `#` are ignored.
 #/path/to/subdir/sample_B.root
 ```
 
-***plot.py***
+### plot.py
 
 Main Lund-plane plotter. Reads one or multiple ROOT files, extracts kt and deltaR or their logarithms, and produces 2D histograms.
 
@@ -321,7 +319,7 @@ Main Lund-plane plotter. Reads one or multiple ROOT files, extracts kt and delta
 python plot.py --file_list fileList.txt --zmin 0 --zmax 0.025 --maxN 10
 ```
 
-***plot_1dhist.py***
+### plot\_1dhist.py
 
 Draws 1D histograms of scalar observables, such as jet pT, eta, or custom quantities. Use `--mode kdr` for kt/deltaR or `--mode kin` for pt/eta/phi.
 
@@ -329,7 +327,7 @@ Draws 1D histograms of scalar observables, such as jet pT, eta, or custom quanti
 python plot_1dhist.py --file_list fileList.txt --mode kdr --maxN 10
 ```
 
-***plot_bhist.py***
+### plot\_bhist.py
 
 Specialized binned histogram plotter for comparing distributions from multiple datasets or epochs.
 
@@ -337,7 +335,7 @@ Specialized binned histogram plotter for comparing distributions from multiple d
 python plot_bhist.py --file_list binList.txt
 ```
 
-***plot_corr.py***
+### plot\_corr.py
 
 Computes and visualizes correlation matrices between variables.
 
@@ -345,7 +343,7 @@ Computes and visualizes correlation matrices between variables.
 python plot_corr.py --file_list fileList.txt
 ```
 
-***plot_eem.py***
+### plot\_eem.py
 
 Emission-by-emission overlay plotter.
 
@@ -353,7 +351,7 @@ Emission-by-emission overlay plotter.
 python plot_eem.py --file_list fileList.txt
 ```
 
-***plot_loss.py***
+### plot\_loss.py
 
 Reads training-history ROOT files and plots loss vs epoch curves across multiple files.
 
@@ -362,22 +360,3 @@ python plot_loss.py --file_list fileList.txt
 ```
 
 Loss function files can be found under `models/test` for legacy workflows.
-
-
-**CITATION**
-
-If this code is used for a scientific publication, please add the following citation:
-```
-@article{Finke:2023veq,
-    author = {Finke, Thorben and Kr\"amer, Michael and M\"uck, Alexander and T\"onshoff, Jan},
-    title = "{Learning the language of QCD jets with transformers}",
-    eprint = "2303.07364",
-    archivePrefix = "arXiv",
-    primaryClass = "hep-ph",
-    doi = "10.1007/JHEP06(2023)184",
-    journal = "JHEP",
-    volume = "06",
-    pages = "184",
-    year = "2023"
-}
-```

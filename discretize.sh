@@ -1,8 +1,6 @@
 #!/bin/bash
-for dataset in "train" "test" "val"
-do
-  for i in 0 1
-  do
+for dataset in "train" "test" "val"; do
+  for i in 0 1; do
    echo "Processing $dataset $i"
     python preprocess.py \
       --class_label $i \

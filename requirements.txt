@@ -1,7 +1,6 @@
 numpy
 pandas
 tables
-torch
 torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 tqdm
 requests
@@ -16,8 +15,6 @@ hdf5plugin
 torchinfo
 torchviz
 tensorboard
-
 root
 uproot 
-pandas
 fastjet
