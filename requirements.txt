@@ -1,9 +1,9 @@
 numpy
 pandas
 tables
-torch
 torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 tqdm
+requests
 tensorboard
 matplotlib
 Pillow
@@ -12,12 +12,9 @@ pyroot
 protobuf
 h5py 
 hdf5plugin
-pytables
 torchinfo
 torchviz
 tensorboard
-
 root
 uproot 
-pandas
 fastjet

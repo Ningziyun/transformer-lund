@@ -81,12 +81,19 @@ def unpack(url):
   done=f"{fname}.done"
   if os.path.exists(done): return
   _download(url,fname)
-  subprocess.check_call(["tar","-xf",fname])
-  for pattern in ["HTo*root", "TTBarLep*root", "*ToQQ_*.root"]:
-    for path in glob.glob(pattern):
-      os.remove(path)
+  subprocess.call(["tar","-xf",fname])
+  if "train" in fname:
+    subprocess.call(" ".join(["rm","HTo*root","TTBarLep*root","*ToQQ_*.root"]),shell=True)
+  else:
+    subprocess.call(" ".join(["rm","*/HTo*root","*/TTBarLep*root","*/*ToQQ_*.root"]),shell=True)
+    if "test" in fname:
+        subprocess.call(" ".join(["mv","./test_20M/*","./"]),shell=True)
+        subprocess.call(" ".join(["rm", "-r","./test_20M/"]),shell=True)
+    if "val" in fname:
+        subprocess.call(" ".join(["mv","val_5M/*","./"]),shell=True)
+        subprocess.call(" ".join(["rm", "-r","./val_5M/"]),shell=True)
   open(done, "w").close()
-
+  subprocess.call(" ".join(["rm",fname]),shell=True)
 
 if __name__ == "__main__":
 
@@ -97,5 +104,7 @@ if __name__ == "__main__":
 
   for ii in range(10):
     unpack(f"https://zenodo.org/records/6619768/files/JetClass_Pythia_train_100M_part{ii}.tar")
+  unpack("https://zenodo.org/records/6619768/files/JetClass_Pythia_test_20M.tar")
+  unpack("https://zenodo.org/records/6619768/files/JetClass_Pythia_val_5M.tar")
 
   os.chdir(cwd)
