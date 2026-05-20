@@ -20,13 +20,16 @@ import torch
 from torchinfo import summary
 from torch import nn
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 from torch.distributions.multivariate_normal import MultivariateNormal
 from torch.optim.lr_scheduler import LambdaLR
 torch.multiprocessing.set_sharing_strategy("file_system")
 from torchviz import make_dot
 
+import normflows as nf
+
 class ktdr_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=50, add_stop=False, standardize=False):
+  def __init__(self, file_path, NConstituents=5, add_stop=False, standardize=False):
     super(ktdr_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
@@ -128,9 +131,10 @@ class model_DNN(nn.Module):
       x = torch.reshape(x,[x.shape[0],self.dim1,self.dim2])
       return x
 
-class model_transformer(nn.Module):
+
+class model_autoregressive_transformer(nn.Module):
   def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128):
-      super(model_transformer, self).__init__()
+      super(model_autoregressive_transformer, self).__init__()
 
       self.input_dim=input_dim
       self.embed_dim=embed_dim
@@ -138,10 +142,8 @@ class model_transformer(nn.Module):
       self.num_heads=num_heads
       self.num_layers=num_layers
 
-      self.register_buffer("pos_encoding", self._build_pos_encoding(10, self.embed_dim)) #makes a self.pos_encoding which is registered as buffer on correct device, saves a .to(x.device) call later
-
       #Add the embedding layer
-      self.embed=nn.Linear(input_dim,self.embed_dim)
+      self.embed=nn.Linear(input_dim, self.embed_dim)
 
       #specify the transformer block and number of layers
       encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.1, batch_first=True)
@@ -156,7 +158,6 @@ class model_transformer(nn.Module):
 
       # Embed the N-dim vector into the embedded space
       x=self.embed(x) # (batch, seq_len, embed_dim)
-      #x=x+self.pos_encoding[:, :seq_len, :]
 
       # Causal mask prevents looking ahead
       mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
@@ -164,15 +165,6 @@ class model_transformer(nn.Module):
       encoded = self.encoder(x, mask=mask)
       #encoded = self.encoder(x)
       return self.deembed(encoded)  # (batch, seq_len, feature_dim)
-
-  def _build_pos_encoding(self, max_len, d_model):
-        pos = torch.arange(max_len).unsqueeze(1)
-        i = torch.arange(0, d_model, 2)
-        div_term = torch.exp(-torch.log(torch.tensor(10000.0)) * i / d_model)
-        pos_encode = torch.zeros(max_len, d_model)
-        pos_encode[:, 0::2] = torch.sin(pos * div_term)
-        pos_encode[:, 1::2] = torch.cos(pos * div_term)
-        return pos_encode.unsqueeze(0)
 
   @torch.no_grad()
   def generate(self, x_init, steps):
@@ -184,9 +176,9 @@ class model_transformer(nn.Module):
       return seq
 
 
-class model_transformer_MDN(model_transformer):
+class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   def __init__(self, input_dim, n_mix=25, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
-      super(model_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim)
+      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim)
 
       self.n_mix=n_mix
 
@@ -458,32 +450,447 @@ class model_transformer_CNF(nn.Module):
       seq = torch.cat([seq, x_next.unsqueeze(1)], dim=1)
     return seq
 
+#==============================================================================================
+# Custom vanillar NFlows, not working great
+class FlowBatchNorm(nn.Module):
 
-class model_transformer_quantile(model_transformer):
-  def __init__(self, input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
-      super(model_transformer_quantile, self).__init__(input_dim, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128)
+    def __init__(self, feature_dim, eps=1e-5, momentum=0.9):
+        super().__init__()
 
-  def forward(self, x):
-      seq_len = x.shape[1] # (batch, seq_len, feature_dim)
+        self.eps = eps
+        self.momentum = momentum
 
-      # Embed the N-dim vector into the embedded space
-      x=self.embed(x) # (batch, seq_len, embed_dim)
-      #x=x+self.pos_encoding[:, :seq_len, :]
+        self.loggamma = nn.Parameter( torch.zeros(1, feature_dim))
+        self.beta = nn.Parameter( torch.zeros(1, feature_dim))
 
-      # Causal mask prevents looking ahead
-      mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
+        self.register_buffer("running_mean", torch.zeros(1, feature_dim))
+        self.register_buffer("running_var", torch.ones(1, feature_dim))
 
-      encoded = self.encoder(x)
-      return self.deembed(encoded)  # (batch, seq_len, feature_dim)
+    def forward(self, x):
 
-def quantile_loss(pred, target, quantiles):
-    # pred: [B, D, Q], target: [B, D]
-    losses = []
-    for i, q in enumerate(quantiles):
-      e = target - pred[:, :, i]
-      losses.append(torch.max(q*e, (q-1)*e))
-    return torch.sum(torch.stack(losses, dim=0))
+        #mean = x.mean(dim=[0], keepdim=True)
+        #var = x.var(dim=[0], keepdim=True)
 
+        if self.training:
+            mean = x.mean(dim=0, keepdim=True)
+            var = x.var(dim=0, keepdim=True)
+
+            # update running stats
+            self.running_mean = ( self.momentum * self.running_mean + (1 - self.momentum) * mean.detach())
+            self.running_var = ( self.momentum * self.running_var + (1 - self.momentum) * var.detach())
+
+        else:
+            mean = self.running_mean
+            var = self.running_var
+
+        x_hat = (x - mean) / torch.sqrt(var + self.eps) #standardize
+        u = torch.exp(self.loggamma) * x_hat + self.beta #learnable shift
+
+        log_det = (self.loggamma - 0.5*torch.log(var + self.eps)).sum(dim=1)
+        return u, log_det
+
+    def inverse(self, u):
+
+        #mean = u.mean(dim=[0], keepdim=True)
+        #var = u.var(dim=[0], keepdim=True)
+        mean = self.running_mean
+        var = self.running_var
+
+        x_hat = (u - self.beta) * torch.exp(-self.loggamma) #unshift
+        x = x_hat * torch.sqrt(var + self.eps) + mean #unstandardize
+
+        return x
+
+class realnvp_coupling_layer(nn.Module):
+    def __init__(self, input_dim, latent_dim=256, mask=None):
+        super().__init__()
+
+        if mask==None:
+            self.half_dim = input_dim // 2
+        else:
+            self.half_dim = input_dim
+
+        self.scale_net = nn.Sequential( nn.Linear(self.half_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, self.half_dim))
+        self.translate_net = nn.Sequential( nn.Linear(self.half_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, self.half_dim))
+
+        self.register_buffer("mask", mask)
+
+    def forward(self, x):
+        if self.mask==None:
+            x1 = x[:, :self.half_dim]
+            x2 = x[:, self.half_dim:]
+
+            s = 2.0 * torch.tanh(self.scale_net(x1))
+            t = self.translate_net(x1)
+
+            z2 = x2 * torch.exp(torch.clamp(s,-5,5)) + t
+            z = torch.cat([x1, z2], dim=1)
+            log_det = s.sum(dim=1)
+            return z, log_det, s
+
+        else:
+            x_mask = x * self.mask
+            s = 2.0 * torch.tanh(self.scale_net(x_mask)) #- x_mask # Scale
+            t = self.translate_net(x_mask) #- x_mask # Translation
+            z = x_mask + (1 - self.mask) * (x * torch.exp(torch.clamp(s,-5,5)) + t)
+            log_det = torch.sum(s * (1 - self.mask), dim=1)  # Log determinant
+
+            return z, log_det, s
+
+    def inverse(self, z):
+        if self.mask==None:
+            z1 = z[:, :self.half_dim]
+            z2 = z[:, self.half_dim:]
+
+            s = 2.0 * torch.tanh(self.scale_net(z1))
+            t = self.translate_net(z1)
+
+            x2 = (z2 - t) * torch.exp(-s)
+            x = torch.cat([z1, x2], dim=1)
+            return x
+        else:
+            z_mask = z * self.mask
+            s = 2.0 * torch.tanh(self.scale_net(z_mask)) #+ z_mask
+            t = self.translate_net(z_mask) #+  z_mask
+            x = z_mask + (1-self.mask)*(z - t)*torch.exp(-s)
+            return x
+
+class FlowBatchNormT(nn.Module):
+
+    def __init__(self, feature_dim, eps=1e-5):
+        super().__init__()
+
+        self.eps = eps
+
+        self.gamma = nn.Parameter( torch.zeros(1, 1, feature_dim))
+        self.beta = nn.Parameter( torch.zeros(1, 1, feature_dim))
+
+    def forward(self, x):
+
+        """
+        x: (B,O,F)
+        """
+
+        B, O, F = x.shape
+
+        mean = x.mean(dim=[0,1], keepdim=True)
+        var = x.var(dim=[0,1], keepdim=True)
+
+        x_hat = (x - mean) / torch.sqrt(var + self.eps)
+        y = torch.exp(self.gamma) * x_hat + self.beta
+
+        log_det = O * self.gamma.sum()
+        return y, log_det
+
+    def inverse(self, y):
+
+        mean = y.mean(dim=[0,1], keepdim=True)
+        var = y.var(dim=[0,1], keepdim=True)
+
+        x_hat = (y - self.beta) * torch.exp(-self.gamma)
+        x = x_hat * torch.sqrt(var + self.eps) + mean
+
+        return x
+
+class model_normalizing_flow(nn.Module):
+    def __init__(self, input_dim, num_flows=10, latent_dim=256, doMask=True, doBatchNorm=False):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.doMask = doMask
+        self.doBatchNorm=doBatchNorm
+
+        #Make alternating mask
+        if self.doMask:
+            masks = [torch.ones(self.input_dim) for _ in range(num_flows)]
+            for ii in range(num_flows):
+                masks[ii][::2] = 0 #Every second
+                #for jj in range(len(masks)//2): #every pair
+                #    masks[ii][4*jj]=0
+                #    masks[ii][4*jj+1]=0
+                if ii%2==0: masks[ii]=1-masks[ii]
+                print("Mask",ii,masks[ii], (masks[ii] == 0).sum())
+            self.layers = nn.ModuleList([ realnvp_coupling_layer(input_dim,latent_dim,masks[ii]) for ii in range(num_flows) ])
+        else:
+            self.layers = nn.ModuleList([ realnvp_coupling_layer(input_dim,latent_dim) for ii in range(num_flows) ])
+
+        #if self.doBatchNorm:
+        self.norms = nn.ModuleList([ FlowBatchNormT(input_dim) for _ in range(num_flows) ])
+
+    def forward(self, x):
+        log_det_total = 0
+        l2_norm=0
+        z = x
+
+        for layer,norm in zip(self.layers,self.norms):
+            z, log_det, s = layer(z)
+            if self.doBatchNorm:
+                z, log_det2 = norm(z)
+            if not self.doMask:
+                z = torch.flip(z, dims=[1])  # flip dimensions after each layer
+            log_det_total += log_det
+            if self.doBatchNorm: log_det_total+=log_det2
+            l2_norm+=s.pow(2)
+
+        return z, log_det_total,l2_norm
+
+    def inverse(self, z):
+        x = z
+
+        for layer,norm in reversed(list(zip(self.layers,self.norms))):
+            if not self.doMask:
+                x = torch.flip(x, dims=[1]) # flip dimensions after each layer
+            if self.doBatchNorm:
+                x = norm.inverse(x)
+            x = layer.inverse(x)
+
+        return x
+
+    def nll_loss(self, x):
+        z, log_det, l2_norm = self.forward(x)
+        log_pz = -0.5 * ( z.pow(2) + torch.log(torch.tensor(2 * torch.pi)) ).sum(dim=1)
+        return -log_pz - log_det + 1e-4*l2_norm.sum(dim=1)
+
+    @torch.no_grad()
+    def generate(self,out_dimensions):
+        with torch.no_grad():
+            z = torch.randn(out_dimensions[0],out_dimensions[1]*out_dimensions[2])
+            samples = self.inverse(z)
+            samples = samples.view(out_dimensions)
+            return samples
+
+
+#==============================================================================================
+# Vanilla NFlows, using nflows package, works okay
+class StableScaleNet(nn.Module):
+    def __init__(self, dim, hidden):
+        super().__init__()
+
+        self.net = nf.nets.MLP( [dim, hidden, hidden, dim], init_zeros=True,)
+
+    def forward(self, x):
+        # Clamp scaling factors
+        return 2.0 * torch.tanh(self.net(x))
+
+class RealNVPModel(nn.Module): #Using normflows package, works
+    def __init__(self, input_dim, num_flows=10, latent_dim=256):
+        super().__init__()
+
+        self.input_dim=input_dim
+
+        # Base distribution
+        base = nf.distributions.base.DiagGaussian(input_dim)
+
+        flows = []
+        for i in range(num_flows):
+            # Alternating binary mask
+            mask = self.create_mask(i)
+
+            # Scale network
+            #s_net = nf.nets.MLP([input_dim, latent_dim, latent_dim, input_dim], init_zeros=True)
+            s_net = StableScaleNet(input_dim, latent_dim)
+
+            # Translation network
+            t_net = nf.nets.MLP([input_dim, latent_dim, latent_dim, input_dim], init_zeros=True)
+
+            # RealNVP coupling layer
+            flows.append(nf.flows.MaskedAffineFlow( mask, t_net, s_net))
+            #flows.append(nf.flows.ActNorm(self.input_dim))
+
+        # Full normalizing flow model
+        self.flow = nf.NormalizingFlow(base, flows)
+
+    def create_mask(self, layer_idx):
+        mask = torch.zeros(self.input_dim)
+
+        if layer_idx % 2 == 0:
+            mask[::2] = 1.0
+        else:
+            mask[1::2] = 1.0
+
+        return mask
+
+    def forward(self, x):
+        """
+        Compute log probability of data.
+        """
+        return self.flow.log_prob(x)
+
+    def generate(self, out_dimensions):
+        """
+        Generate samples.
+        """
+        samples, log_prob = self.flow.sample(out_dimensions[0])
+        return samples.view(out_dimensions)
+
+    def nll_loss(self, x):
+        """
+        Compute log likelihood.
+        """
+        return -self.flow.log_prob(x)
+
+    def forward_kld(self, x):
+        """
+        Training objective.
+        """
+        return self.flow.forward_kld(x)
+
+#==============================================================================================
+# Custom transformer based autoregressive flow model, seems to be working
+class TransformerConditioner(nn.Module):
+    """
+    Causal transformer conditioner for object-set data.
+ 
+    Given a set of N objects each with F features, outputs (mu, log_sigma)
+    for each object, where object i only attends to objects j < i.
+ 
+    Args:
+        n_objects   : N, number of objects per sample
+        n_features  : F, features per object
+        embed_dim   : transformer hidden dimension
+        num_heads   : attention heads (must divide embed_dim)
+        num_layers  : transformer depth
+    """
+ 
+    def __init__(self, n_objects, n_features, embed_dim=64, num_heads=2, num_layers=2):
+        super().__init__()
+        self.n_objects  = n_objects
+        self.n_features = n_features
+ 
+        self.input_proj = nn.Linear(n_features, embed_dim)
+ 
+        encoder_layer = nn.TransformerEncoderLayer( d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim * 2, dropout=0.0, batch_first=True, norm_first=False,)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        self.output_proj = nn.Linear(embed_dim, 2 * n_features)  # mu + log_sigma
+ 
+        # Causal mask: object i cannot attend to object j >= i
+        causal_mask = torch.triu( torch.ones(n_objects, n_objects, dtype=torch.bool), diagonal=1)
+        self.register_buffer("causal_mask", causal_mask)
+ 
+    def forward(self, x):
+        """
+        Args:   x  (batch, n_objects, n_features)
+        Returns: mu, log_sigma — each (batch, n_objects, n_features)
+                 output for object i depends only on objects 0..i-1
+        """
+        h = self.input_proj(x)                            # (B, N, embed_dim)
+        h = self.encoder(h, mask=self.causal_mask)        # causal self-attention
+        mu, log_sigma = self.output_proj(h).chunk(2, dim=-1)
+        return mu, torch.tanh(log_sigma) * 2.0            # clamp log_sigma to [-2, 2]
+ 
+class TransformerAutoregressorLayer(nn.Module):
+
+    def __init__(self, n_objects, n_features, **conditioner_kwargs):
+        super().__init__()
+        self.n_objects = n_objects
+        self.n_features = n_features
+        self.conditioner = TransformerConditioner( n_objects, n_features, **conditioner_kwargs)
+
+    def forward(self, x):
+        B = x.shape[0]
+        x_obj = x.view(B, self.n_objects, self.n_features) #nflows assumed was flattend, unflatten then flatten again later
+
+        mu, log_sigma = self.conditioner(x_obj)
+        z = (x_obj - mu) * torch.exp(-log_sigma)
+        log_det = -log_sigma.sum(dim=(1,2))
+
+        return z.view(B, -1), log_det
+
+    def inverse(self, z):
+        B = z.shape[0]
+        z_obj = z.view(B, self.n_objects, self.n_features) #nflows assumed was flattend, unflatten then flatten again later
+
+        mu, log_sigma = self.conditioner(z_obj) 
+        x = z_obj * torch.exp(log_sigma) + mu
+        log_det = log_sigma.sum(dim=(1,2))
+
+        return x.view(B, -1), log_det
+
+class model_transformer_autoregressiveflow(nn.Module):
+    """
+    Use a transformer-based autoregressived flow with masking to model the flow as opposed to realNVP or MAF (which uses a MADE mask)
+ 
+    Args:
+        n_objects         : N, number of objects per sample
+        n_features        : F, features per object
+        num_flow_layers   : number of coupling layers (more = more expressive)
+        embed_dim         : transformer hidden dimension
+        num_heads         : attention heads
+        num_transformer_layers : transformer depth inside each coupling layer
+ 
+    Input/output shape: (batch, n_objects, n_features)
+    """
+ 
+    def __init__( self, n_objects, n_features, num_flows=4, embed_dim=64, num_heads=2, num_layers=2,):
+        super().__init__()
+        self.n_objects  = n_objects
+        self.n_features = n_features
+        self.dim = n_objects * n_features
+
+        flows = []
+        for i in range(num_flows):
+            flows.append( nf.flows.ActNorm(self.dim))
+            flows.append(TransformerAutoregressorLayer( n_objects, n_features, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers))
+ 
+        self.flow = nf.NormalizingFlow( q0=nf.distributions.DiagGaussian(self.dim, trainable=False), flows=flows,)
+ 
+    def forward(self, x):
+        x_flat = x.reshape(x.shape[0], -1) #Note that nflows always think its [batch, features]
+        return -self.flow.log_prob(x_flat)#.mean()
+ 
+    def nll_loss(self, x):
+        """Per-sample log p(x).  Shape: (batch,)"""
+        x_flat = x.reshape(x.shape[0], -1)
+        return -self.flow.log_prob(x_flat)
+ 
+    @torch.no_grad()
+    def generate(self, n_samples):
+        x,_ = self.flow.sample(n_samples)
+        return x.view(n_samples, self.n_objects, self.n_features)
+ 
+    @torch.no_grad()
+    def generate2(self, num_samples=1, x_init=None, steps=None, temperature=1.0, device="cpu"):
+        """
+        Unconditional generation:
+            samples = model.generate(num_samples=32, device='cuda')
+            # → (32, n_objects, n_features)
+ 
+        Partial generation (fill in missing objects given a prefix):
+            samples = model.generate(x_init=known_objects, steps=5)
+            # known_objects : (batch, n_known, n_features)
+            # → (batch, n_known + steps, n_features)
+        """
+        if x_init is None:
+            samples, _ = self.flow.sample(num_samples)
+            return samples.reshape(num_samples, self.n_objects, self.n_features)
+ 
+        dev   = x_init.device
+        batch = x_init.shape[0]
+        seq   = x_init.clone()
+        if steps is None:
+            steps = self.n_objects - x_init.shape[1]
+ 
+        for _ in range(steps):
+            n_known  = seq.shape[1]
+            next_idx = min(n_known, self.n_objects - 1)
+ 
+            # Pad to full n_objects
+            pad = torch.zeros(batch, self.n_objects - n_known, self.n_features, device=dev)
+            ctx = torch.cat([seq, pad], dim=1).reshape(batch, -1)
+ 
+            # Encode known objects to latent, sample the unknown suffix
+            z, _ = self.flow.inverse(ctx)
+            z[:, next_idx * self.n_features:] = (
+                torch.randn_like(z[:, next_idx * self.n_features:]) * temperature
+            )
+            x_new, _ = self.flow.forward(z)
+            x_new = x_new.reshape(batch, self.n_objects, self.n_features)
+ 
+            seq = torch.cat([seq, x_new[:, next_idx : next_idx + 1]], dim=1)
+ 
+        return seq  # (batch, n_known + steps, n_features)
+
+###############################
 def get_lin_scheduler(num_epochs, num_batches, lr_decay, optimizer):
     training_steps = num_epochs * num_batches
     lr_fn = lambda step: 1.0 - ((1.0 - lr_decay) * (step / training_steps))
@@ -703,7 +1110,7 @@ def build_unbinned_model(input_dim, args_or_dict):
     get = lambda key, default=None: _config_get(args_or_dict, key, default)
     if _as_bool(get("cnf", False)):
         return model_transformer_CNF(
-            input_dim=input_dim,
+            input_dim=input_dim[2],
             embed_dim=_as_int(get("embed_dim", 256), 256),
             num_heads=_as_int(get("num_heads", 1), 1),
             num_layers=_as_int(get("num_layers", 2), 2),
@@ -712,16 +1119,31 @@ def build_unbinned_model(input_dim, args_or_dict):
             cnf_steps=_as_int(get("cnf_steps", 8), 8),
         )
     if _as_bool(get("mdn", False)):
-        return model_transformer_MDN(
-            input_dim=input_dim,
+        return model_autoregressive_transformer_MDN(
+            input_dim=input_dim[2],
             n_mix=_as_int(get("n_mix", 25), 25),
             embed_dim=_as_int(get("embed_dim", 256), 256),
             num_heads=_as_int(get("num_heads", 1), 1),
             num_layers=_as_int(get("num_layers", 2), 2),
             ff_dim=_as_int(get("ff_dim", 128), 128),
         )
-    return model_transformer(
-        input_dim=input_dim,
+    if _as_bool(get("nf", False)):
+        return RealNVPModel(
+            input_dim=input_dim[1]*input_dim[2],
+            num_flows=10,
+            latent_dim=256,
+        )
+    if _as_bool(get("maf", False)):
+        return model_transformer_autoregressiveflow(
+                n_objects=input_dim[1],
+                n_features=input_dim[2],
+                num_flows=6, 
+                embed_dim=128, 
+                num_heads=2, 
+                num_layers=2,
+        )
+    return model_autoregressive_transformer(
+        input_dim=input_dim[2],
         embed_dim=_as_int(get("embed_dim", 256), 256),
         num_heads=_as_int(get("num_heads", 1), 1),
         num_layers=_as_int(get("num_layers", 2), 2),
@@ -1172,6 +1594,7 @@ def parse_input():
     # model switches
     p.add_argument("--mdn", action="store_true", default=False, help="Use MDN head (default: True)")
     p.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
+    p.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
     p.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
 
     # CNF switch (overrides mdn/regression)
@@ -1185,8 +1608,9 @@ def parse_input():
     p.add_argument("--num-layers", type=int, default=2, help="Transformer num layers")
     p.add_argument("--ff-dim", type=int, default=128, help="Transformer feedforward dim")
 
-    # mdn hyperparams
-    p.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
+    #
+    p.add_argument("--nf", action="store_true", default=False, help="Use NormFlows")
+    p.add_argument("--maf", action="store_true", default=False, help="Use Masked autoregressive flow")
 
     # auxiliary diagnostics
     p.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for auxiliary flow nets")
@@ -1357,6 +1781,12 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
       mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
       maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
 
+  #FIXME
+  mins[0]=-5
+  maxs[0]=7
+  mins[1]=-1
+  maxs[1]=10
+
   #make plot
   fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
   if Ndim==1: axs=[axs]
@@ -1406,8 +1836,11 @@ def lund_plot(
       mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
       maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
 
-  mins[1]=-3
-  maxs[0]=8
+  #FIXME
+  mins[0]=-5
+  maxs[0]=7
+  mins[1]=-1
+  maxs[1]=10
 
   #Make plot
   if Ndim>=2:
@@ -1765,15 +2198,7 @@ def plot_combined_losses(run_infos, out_dir):
         fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"), bbox_inches="tight")
         plt.close(fig)
 
-def validate_unbinned_models(
-    models,
-    test_loader,
-    input_shape,
-    args,
-    labels=None,
-    make_projection=False,
-    unavailable_model_reasons=None,
-):
+def validate_unbinned_models( models, test_loader, input_shape, args, labels=None, make_projection=False, unavailable_model_reasons=None,):
   if args.plot_max_batches is not None and args.plot_max_batches <= 0:
     raise ValueError("--plot-max-batches must be a positive integer")
 
@@ -1791,6 +2216,7 @@ def validate_unbinned_models(
       unavailable_reasons = [None for _ in models]
 
       device = "cpu"
+
       for imodel, model in enumerate(models):
         model.to(device)
         model.eval()
@@ -1822,7 +2248,12 @@ def validate_unbinned_models(
             continue
 
           try:
-            generated_seq = model.generate(start, steps=X.shape[1] - 1)
+            if args.nf:
+                generated_seq = model.generate(out_dimensions=X.shape)
+            elif args.maf:
+                generated_seq = model.generate(n_samples=X.shape[0])
+            else:
+                generated_seq = model.generate(start, steps=X.shape[1] - 1)
           except RuntimeError as err:
             reason = f"generation failed: {err}"
             print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)

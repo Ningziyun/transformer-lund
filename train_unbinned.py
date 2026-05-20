@@ -6,6 +6,13 @@ class NonFiniteLossError(RuntimeError):
   pass
 
 def evaluate_loss(model,X,args):
+  if args.nf:
+    loss=model.nll_loss(X).sum()
+    return loss
+  elif args.maf:
+    loss=model.nll_loss(X).sum()
+    return loss
+
   inputs = X[:, :-1, :]   # all but last
   targets = X[:, 1:, :]   # all but first
   pred = model(inputs)       # (batch, seq_len-1, feature_dim)
@@ -43,6 +50,7 @@ def train(model,train_loader,args):
   n_batches=0
   for batch, X in enumerate(train_loader):
       X = X.to(device)
+      if args.nf: X = X.view(X.shape[0], -1)
       optimizer.zero_grad()
 
       loss=evaluate_loss(model, X, args)
@@ -88,6 +96,7 @@ def test(model, test_loader, args):
     epochloss = 0.0
     for batch, X in enumerate(test_loader):
       X = X.to(device)
+      if args.nf: X = X.view(X.shape[0], -1)
       loss = evaluate_loss(model, X, args)
       if not torch.isfinite(loss):
         raise NonFiniteLossError(
@@ -107,6 +116,7 @@ def test(model, test_loader, args):
     epochloss = 0.0
     for batch, X in enumerate(test_loader):
       X = X.to(device)
+      if args.nf: X = X.view(X.shape[0], -1)
       loss = evaluate_loss(model, X, args)
       if not torch.isfinite(loss):
         raise NonFiniteLossError(
@@ -133,7 +143,6 @@ if __name__ == "__main__":
 
     # load and preprocess data
     print(f"Loading training set", flush=True)
-    #train_loader,test_loader=get_loaders(train_file=args.train_file,val_file=args.val_file,batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
     train_loader,test_loader=get_loaders(args.input_format,train_file=args.train_file,val_file=args.val_file,
     batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
     X_example=next(iter(train_loader))
@@ -164,31 +173,24 @@ if __name__ == "__main__":
           ):
             if key in loaded_args:
               setattr(args, key, loaded_args[key])
-          model = build_unbinned_model(X_example.shape[2], args)
+          model = build_unbinned_model(X_example.shape, args)
           model.load_state_dict(loaded["model_state_dict"])
         else:
           model = loaded
         print("Loaded model", flush=True)
     else:
-        model = build_unbinned_model(X_example.shape[2], args)
+        model = build_unbinned_model(X_example.shape, args)
 
     save_arguments(args)
     append_training_metadata(args)
     print(f"Logging to {args.log_dir}", flush=True)
 
-    doCNF = args.cnf
-    doMDN = args.mdn
-    doMixedLoss = args.mixed_loss
-    doMultiLossPlot = args.multi_loss_plot
-
-    if doCNF:
-      doMDN = False
-      doMixedLoss = False
+    if args.cnf:
+      args.mdn = False
+      args.mixed_loss = False
 
     #Set the loss
-    if args.cnf:
-      loss_fn = None  # CNF uses model.nll(...)
-    elif args.mdn:
+    if args.mdn:
       loss_fn=mdn_loss
     if not args.mdn and not args.cnf:
       loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
@@ -198,7 +200,16 @@ if __name__ == "__main__":
         sigmoid=nn.Sigmoid()
 
     #Plot the model summary
-    if not args.cnf:
+    if args.nf:
+      X_example = X_example.view(X_example.shape[0], -1)
+      print(X_example[0])
+      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(X_example)[0].shape, model(X_example)[1].shape, flush=True)
+    elif args.maf:
+      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      output=model(X_example)
+      print("Output shape, [", output[0].shape,output[1].shape,"]", flush=True)
+    elif not args.cnf:
       summary(model, input_data=[X_example[:,:-1,:]], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example[:,:-1,:]).shape, flush=True)
     else:
@@ -218,17 +229,6 @@ if __name__ == "__main__":
         scheduler.load_state_dict(resume_state["scheduler_state_dict"])
       start_epoch = int(resume_state.get("epoch", -1)) + 1
       print(f"Resuming after ep {start_epoch}", flush=True)
-
-    # Loss functions
-    if doCNF:
-      loss_fn = None  # we call cnf_loss(...) directly
-    elif not doMDN:
-      loss_fn = nn.MSELoss(reduction='none')
-      if doMixedLoss:
-        loss_fn2 = nn.BCEWithLogitsLoss(reduction='none')
-        sigmoid=nn.Sigmoid()
-    else:
-      loss_fn=mdn_loss
 
     best_loss=float("inf")
     best_epoch=-1
@@ -251,6 +251,8 @@ if __name__ == "__main__":
       lr_history = list(resume_state.get("lr_history", []))
       loss_curves = dict(resume_state.get("loss_curves", {}))
     epochs=args.epochs 
+
+
     for epoch in range(start_epoch, epochs):
       print(f"\nEpoch {epoch+1}\n-------------------------------", flush=True)
       starttime=time.time()
