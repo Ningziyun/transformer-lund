@@ -280,7 +280,7 @@ Main outputs include:
 
 - `hist1d.png` / `hist1d.pdf`
 - `hist1d_logy.png` / `hist1d_logy.pdf`
-- `hist1d_ratio_diff.png` / `hist1d_ratio_diff.pdf`, `hist1d_ratio_diff_logy.png` / `hist1d_ratio_diff_logy.pdf` with `--hist-ratio-diff`
+- `hist1d_ratio_diff.png` / `hist1d_ratio_diff.pdf` with `--hist-ratio-diff`
 - `lund.png` / `lund.pdf`
 - `lund_ratio_diff.png` / `lund_ratio_diff.pdf` with `--hist-ratio-diff`
 - `loss_combined__*.png` / `loss_combined__*.pdf` when loss CSVs are available

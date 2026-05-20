@@ -1277,6 +1277,18 @@ def parse_input():
         default=False,
         help="Also save generated-vs-original relative difference plots for multi-sample 1D/2D histograms",
     )
+    p.add_argument(
+        "--hist-ratio-min-count",
+        type=int,
+        default=5,
+        help="Mask 2D relative-difference bins with fewer original entries than this",
+    )
+    p.add_argument(
+        "--hist-ratio-vmax",
+        type=float,
+        default=1.0,
+        help="Symmetric color limit for 2D fractional relative-difference plots",
+    )
     return p.parse_args()
 
 def save_arguments(args):
@@ -1441,8 +1453,8 @@ def lund_plot(
 
         # Plot 2D histogram
         last_hist = ax.hist2d(
-            inputs[jj][:, 1],   # x = log(kt)
-            inputs[jj][:, 0],   # y = log(1/deltaR)
+            inputs[jj][:, 1],
+            inputs[jj][:, 0],
             range=[x_range, y_range],
             bins=hist2d_bins,
             cmap="Blues",
@@ -1465,8 +1477,8 @@ def lund_plot(
         ax.set_title(panel_label, pad=8, fontsize=10)
 
         # Axis labels
-        ax.set_xlabel(r"$\log(k_t)$")
-        ax.set_ylabel(r"$\log(1/\Delta R)$")
+        ax.set_xlabel(r"$\log(1/\Delta R)$")
+        ax.set_ylabel(r"$\log(k_t)$")
 
     for offset, (label, reason) in enumerate(unavailable_notes):
         ax = used_axs[Nin + offset]
@@ -1537,15 +1549,27 @@ def resolve_hist2d_shape(nplots, hist2d_shape=None):
 def resolve_hist2d_layout(nplots, hist2d_layout=None):
   return resolve_hist2d_shape(nplots, hist2d_layout)
 
-def _relative_hist_difference(reference_counts, comparison_counts):
-    reference_counts = np.nan_to_num(reference_counts, nan=0.0, posinf=0.0, neginf=0.0)
-    comparison_counts = np.nan_to_num(comparison_counts, nan=0.0, posinf=0.0, neginf=0.0)
-    positive_reference = reference_counts[reference_counts > 0.0]
-    denom_floor = np.min(positive_reference) if positive_reference.size > 0 else 1e-12
-    denom = np.where(reference_counts > 0.0, reference_counts, denom_floor)
-    ratio = (reference_counts - comparison_counts) / denom
-    ratio = np.where((reference_counts == 0.0) & (comparison_counts == 0.0), 0.0, ratio)
-    return np.nan_to_num(ratio, nan=0.0, posinf=0.0, neginf=0.0)
+def _default_hist1d_ranges(inputs, display_order, quantiles=(0.5, 99.5), margin_fraction=0.05):
+    ranges = []
+    reference = inputs[0]
+    for ii in range(reference.shape[1]):
+        feature_idx = display_order[ii] if ii < len(display_order) else ii
+        values = reference[:, feature_idx]
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            ranges.append([-1.0, 1.0])
+            continue
+
+        vmin, vmax = np.percentile(values, quantiles)
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+            vmin = np.min(values)
+            vmax = np.max(values)
+
+        margin = margin_fraction * (vmax - vmin)
+        if margin == 0:
+            margin = 1.0
+        ranges.append([vmin - margin, vmax + margin])
+    return ranges
 
 def _symmetric_limit(values, fallback=1.0):
     finite = []
@@ -1572,6 +1596,8 @@ def plot_combined_1dhist_ratio_diff(
     logy=False,
     out_name=None,
     unavailable_notes=None,
+    min_reference_count=5,
+    max_abs_diff=1.0,
 ):
     if len(inputs) <= 1:
         return
@@ -1585,24 +1611,10 @@ def plot_combined_1dhist_ratio_diff(
     comparison_labels = diff_labels if len(diff_labels) > 0 else labels[1:]
 
     Ndim = inputs[0].shape[1]
-    display_order = [1, 0] if Ndim >= 2 else list(range(Ndim))
+    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
 
     if hist1d_ranges is None:
-        hist1d_ranges = []
-        for ii in range(Ndim):
-            feature_idx = display_order[ii] if ii < len(display_order) else ii
-            all_values = []
-            for arr in inputs:
-                values = arr[:, feature_idx]
-                values = values[np.isfinite(values)]
-                all_values.append(values)
-            all_values = np.concatenate(all_values)
-            vmin = np.min(all_values)
-            vmax = np.max(all_values)
-            margin = 0.05 * (vmax - vmin)
-            if margin == 0:
-                margin = 1.0
-            hist1d_ranges.append([vmin - margin, vmax + margin])
+        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
 
     fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
     if Ndim == 1:
@@ -1617,8 +1629,11 @@ def plot_combined_1dhist_ratio_diff(
             inputs[0][:, feature_idx],
             bins=hist1d_bins,
             range=hist1d_ranges[ii],
-            density=True,
+            density=False,
         )
+        reference_total = np.sum(reference_counts)
+        reference_density = reference_counts / reference_total if reference_total > 0 else reference_counts
+        populated_reference = reference_counts >= max(1, int(min_reference_count))
         centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
         ratio_values = []
 
@@ -1627,14 +1642,22 @@ def plot_combined_1dhist_ratio_diff(
                 arr[:, feature_idx],
                 bins=hist1d_bins,
                 range=hist1d_ranges[ii],
-                density=True,
+                density=False,
             )
-            ratio_percent = 100.0 * _relative_hist_difference(reference_counts, comparison_counts)
-            ratio_values.append(ratio_percent)
+            comparison_total = np.sum(comparison_counts)
+            comparison_density = comparison_counts / comparison_total if comparison_total > 0 else comparison_counts
+            ratio = np.full_like(reference_density, np.nan, dtype=float)
+            np.divide(
+                reference_density - comparison_density,
+                reference_density,
+                out=ratio,
+                where=populated_reference & (reference_density > 0.0),
+            )
+            ratio_values.append(ratio)
             label_idx = jj - 1
             axs[ii].step(
                 centers,
-                ratio_percent,
+                ratio,
                 where="mid",
                 linestyle=linestyles[label_idx % len(linestyles)],
                 label=comparison_labels[label_idx] if label_idx < len(comparison_labels) else f"sample_{jj}",
@@ -1643,9 +1666,11 @@ def plot_combined_1dhist_ratio_diff(
         axs[ii].axhline(0.0, color="black", linewidth=0.8, alpha=0.55)
         axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
         axs[ii].set_xlabel("value")
-        axs[ii].set_ylabel("Relative diff [%]" + (" (symlog)" if logy else ""))
+        axs[ii].set_ylabel("Fractional diff" + (" (symlog)" if logy else ""))
 
         ymax = _symmetric_limit(ratio_values, fallback=1.0) * 1.15
+        if max_abs_diff is not None and max_abs_diff > 0:
+            ymax = min(ymax, float(max_abs_diff))
         if logy:
             axs[ii].set_yscale("symlog", linthresh=1.0)
             axs[ii].set_ylim(-ymax, ymax)
@@ -1654,6 +1679,11 @@ def plot_combined_1dhist_ratio_diff(
 
     handles, legend_labels = axs[0].get_legend_handles_labels()
     note_lines = _plot_note_from_common(common_items, unavailable_notes)
+    note_lines.append(
+        f"Masked original bins with < {max(1, int(min_reference_count))} entries; y clipped at +/- {max_abs_diff:g}"
+        if max_abs_diff is not None and max_abs_diff > 0
+        else f"Masked original bins with < {max(1, int(min_reference_count))} entries"
+    )
     bottom_edge = 0.20 if note_lines else 0.08
     fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
     if len(handles) > 0:
@@ -1670,7 +1700,7 @@ def plot_combined_1dhist_ratio_diff(
         )
 
     if out_name is None:
-        out_name = "hist1d_ratio_diff_logy" if logy else "hist1d_ratio_diff"
+        out_name = "hist1d_ratio_diff"
 
     fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
@@ -1691,8 +1721,8 @@ def plot_combined_1dhist(
     Plot overlaid 1D histograms for Lund features.
 
     Expected feature order:
-      inputs[:, 0] = log(1/deltaR)
-      inputs[:, 1] = log(kt)
+      inputs[:, 0] = log(kt)
+      inputs[:, 1] = log(1/deltaR)
 
     The top panel is log(kt), and the bottom panel is log(1/deltaR).
     This matches the plotting convention used in plot_ublund.py.
@@ -1708,31 +1738,10 @@ def plot_combined_1dhist(
 
     linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
     Ndim = inputs[0].shape[1]
-    display_order = [1, 0] if Ndim >= 2 else list(range(Ndim))
+    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
 
     if hist1d_ranges is None:
-        hist1d_ranges = []
-
-        for ii in range(Ndim):
-            feature_idx = display_order[ii] if ii < len(display_order) else ii
-
-            all_values = []
-            for arr in inputs:
-                values = arr[:, feature_idx]
-                values = values[np.isfinite(values)]
-                all_values.append(values)
-
-            all_values = np.concatenate(all_values)
-
-            vmin = np.min(all_values)
-            vmax = np.max(all_values)
-
-            # Add a small margin so the edge bins are not clipped
-            margin = 0.05 * (vmax - vmin)
-            if margin == 0:
-                margin = 1.0
-
-            hist1d_ranges.append([vmin - margin, vmax + margin])
+        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
 
     fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
     if Ndim == 1:
@@ -1741,8 +1750,8 @@ def plot_combined_1dhist(
     axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
 
     for ii in range(Ndim):
-        # For ktdr input, column 0 is log(1/deltaR), column 1 is log(kt).
-        # Swap display order so the top panel is log(kt).
+        # For ktdr plots, keep the top panel aligned with the Lund y-axis:
+        # log(kt) first, then log(1/deltaR).
         feature_idx = display_order[ii] if ii < len(display_order) else ii
 
         all_hist_counts = []
@@ -1839,6 +1848,8 @@ def plot_lund_ratio_diff(
     hist2d_shape=None,
     hist2d_layout=None,
     unavailable_notes=None,
+    min_reference_count=5,
+    max_abs_diff=1.0,
 ):
   if len(inputs) <= 1:
     return
@@ -1876,8 +1887,11 @@ def plot_lund_ratio_diff(
       inputs[0][:, 0],
       range=[x_range, y_range],
       bins=hist2d_bins,
-      density=True,
+      density=False,
   )
+  reference_total = np.sum(reference_counts)
+  reference_density = reference_counts / reference_total if reference_total > 0 else reference_counts
+  populated_reference = reference_counts >= max(1, int(min_reference_count))
 
   ratio_maps = []
   for arr in inputs[1:]:
@@ -1886,9 +1900,18 @@ def plot_lund_ratio_diff(
         arr[:, 0],
         range=[x_range, y_range],
         bins=hist2d_bins,
-        density=True,
+        density=False,
     )
-    ratio_maps.append(100.0 * _relative_hist_difference(reference_counts, comparison_counts))
+    comparison_total = np.sum(comparison_counts)
+    comparison_density = comparison_counts / comparison_total if comparison_total > 0 else comparison_counts
+    ratio_map = np.full_like(reference_density, np.nan, dtype=float)
+    np.divide(
+        reference_density - comparison_density,
+        reference_density,
+        out=ratio_map,
+        where=populated_reference & (reference_density > 0.0),
+    )
+    ratio_maps.append(ratio_map)
 
   if hist2d_shape is None:
     hist2d_shape = hist2d_layout
@@ -1903,7 +1926,11 @@ def plot_lund_ratio_diff(
   used_axs = flat_axs[:Nplots]
 
   vmax = _symmetric_limit(ratio_maps, fallback=1.0)
+  if max_abs_diff is not None and max_abs_diff > 0:
+    vmax = min(vmax, float(max_abs_diff))
   norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+  cmap = plt.get_cmap("coolwarm").copy()
+  cmap.set_bad(color="#d9d9d9")
   last_image = None
 
   for jj, ratio_map in enumerate(ratio_maps):
@@ -1913,12 +1940,12 @@ def plot_lund_ratio_diff(
         origin="lower",
         extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
         aspect="auto",
-        cmap="coolwarm",
+        cmap=cmap,
         norm=norm,
     )
     ax.set_title(comparison_labels[jj] if jj < len(comparison_labels) else f"sample_{jj + 1}", pad=8, fontsize=10)
-    ax.set_xlabel(r"$\log(k_t)$")
-    ax.set_ylabel(r"$\log(1/\Delta R)$")
+    ax.set_xlabel(r"$\log(1/\Delta R)$")
+    ax.set_ylabel(r"$\log(k_t)$")
 
   for offset, (label, reason) in enumerate(unavailable_notes):
     ax = used_axs[Ndiff + offset]
@@ -1940,11 +1967,14 @@ def plot_lund_ratio_diff(
     ax.set_visible(False)
 
   if last_image is not None:
-    cbar = fig.colorbar(last_image, ax=used_axs.tolist(), fraction=0.022, pad=0.055)
-    cbar.set_label(r"$(original - generated) / original$ [%]")
+    cbar = fig.colorbar(last_image, ax=used_axs.tolist(), fraction=0.022, pad=0.055, extend="both")
+    cbar.set_label(r"$(original - generated) / original$")
 
-  fig.suptitle("Lund Plane Relative Difference", fontsize=14, y=0.985)
+  fig.suptitle("Lund Plane Fractional Difference", fontsize=14, y=0.985)
   note_lines = _plot_note_from_common(common_items, unavailable_notes)
+  note_lines.append(
+      f"Masked original bins with < {max(1, int(min_reference_count))} entries; color clipped at +/- {vmax:.3g}"
+  )
   bottom_margin = 0.13 if note_lines else 0.09
   fig.subplots_adjust(left=0.08, right=0.88, bottom=bottom_margin, top=0.90, wspace=0.30, hspace=0.55)
   if note_lines:
@@ -2209,16 +2239,8 @@ def validate_unbinned_models(
             logy=False,
             out_name="hist1d_ratio_diff",
             unavailable_notes=unavailable_notes,
-        )
-        plot_combined_1dhist_ratio_diff(
-            plot_inputs,
-            labels=active_labels,
-            out_dir=args.log_dir,
-            hist1d_ranges=hist1d_ranges,
-            hist1d_bins=args.hist1d_bins,
-            logy=True,
-            out_name="hist1d_ratio_diff_logy",
-            unavailable_notes=unavailable_notes,
+            min_reference_count=args.hist_ratio_min_count,
+            max_abs_diff=args.hist_ratio_vmax,
         )
 
       if args.input_format == "ktdr":
@@ -2251,6 +2273,8 @@ def validate_unbinned_models(
             hist2d_bins=args.hist2d_bins,
             hist2d_shape=args.hist2d_shape,
             unavailable_notes=unavailable_notes,
+            min_reference_count=args.hist_ratio_min_count,
+            max_abs_diff=args.hist_ratio_vmax,
         )
 
 def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
