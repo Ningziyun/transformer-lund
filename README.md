@@ -270,6 +270,7 @@ python plot_unbinned.py \
   --num-workers 0 \
   --hist1d-ranges -5 6 -3 10 \
   --hist1d-bins 50 \
+  --hist-ratio-diff \
   --hist2d-bins 40 40 \
   --hist2d-shape 2 2 \
   --plot-dir models/comparison_plots
@@ -279,7 +280,9 @@ Main outputs include:
 
 - `hist1d.png` / `hist1d.pdf`
 - `hist1d_logy.png` / `hist1d_logy.pdf`
+- `hist1d_ratio_diff.png` / `hist1d_ratio_diff.pdf` with `--hist-ratio-diff`
 - `lund.png` / `lund.pdf`
+- `lund_ratio_diff.png` / `lund_ratio_diff.pdf` with `--hist-ratio-diff`
 - `loss_combined__*.png` / `loss_combined__*.pdf` when loss CSVs are available
 
 ### Legacy Binned Training
