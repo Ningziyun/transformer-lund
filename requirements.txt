@@ -18,3 +18,4 @@ tensorboard
 root
 uproot 
 fastjet
+normflows
