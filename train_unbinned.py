@@ -5,11 +5,16 @@ from helpers_unbinned import *
 class NonFiniteLossError(RuntimeError):
   pass
 
-def evaluate_loss(model,X,args):
+def evaluate_loss(model,X,mask,args):
   if args.nf:
+    X = X.view(X.shape[0], -1)
     loss=model.nll_loss(X).sum()
     return loss
-  elif args.maf:
+  elif args.cond_nf:
+    loss=model.nll_loss(X,mask).sum()
+    return loss
+  elif args.diff:
+    X = X.view(X.shape[0], -1)
     loss=model.nll_loss(X).sum()
     return loss
 
@@ -49,11 +54,14 @@ def train(model,train_loader,args):
   epoch_loss=0.0
   n_batches=0
   for batch, X in enumerate(train_loader):
+      mask=None
+      if args.cond_nf:
+        mask=X[1]
+        X=X[0]
       X = X.to(device)
-      if args.nf: X = X.view(X.shape[0], -1)
       optimizer.zero_grad()
 
-      loss=evaluate_loss(model, X, args)
+      loss=evaluate_loss(model, X, mask, args)
       loss_per_sample = loss / X.shape[0]
       if not torch.isfinite(loss_per_sample):
         raise NonFiniteLossError(
@@ -95,9 +103,12 @@ def test(model, test_loader, args):
     num_samples = len(test_loader.dataset)
     epochloss = 0.0
     for batch, X in enumerate(test_loader):
+      mask=None
+      if args.cond_nf:
+        mask=X[1]
+        X=X[0]
       X = X.to(device)
-      if args.nf: X = X.view(X.shape[0], -1)
-      loss = evaluate_loss(model, X, args)
+      loss = evaluate_loss(model, X, mask, args)
       if not torch.isfinite(loss):
         raise NonFiniteLossError(
           f"Non-finite test loss at batch {batch}: {loss.item()}"
@@ -115,9 +126,12 @@ def test(model, test_loader, args):
     num_samples = len(test_loader.dataset)
     epochloss = 0.0
     for batch, X in enumerate(test_loader):
+      mask=None
+      if args.cond_nf:
+        mask=X[1]
+        X=X[0]
       X = X.to(device)
-      if args.nf: X = X.view(X.shape[0], -1)
-      loss = evaluate_loss(model, X, args)
+      loss = evaluate_loss(model, X, mask, args)
       if not torch.isfinite(loss):
         raise NonFiniteLossError(
           f"Non-finite test loss at batch {batch}: {loss.item()}"
@@ -146,7 +160,6 @@ if __name__ == "__main__":
     train_loader,test_loader=get_loaders(args.input_format,train_file=args.train_file,val_file=args.val_file,
     batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
     X_example=next(iter(train_loader))
-    print("Input shape,",X_example.shape, flush=True)
 
     # construct model
     resume_state = None
@@ -179,7 +192,10 @@ if __name__ == "__main__":
           model = loaded
         print("Loaded model", flush=True)
     else:
-        model = build_unbinned_model(X_example.shape, args)
+        if args.cond_nf:
+            model = build_unbinned_model(X_example[0].shape, args)
+        else:
+            model = build_unbinned_model(X_example.shape, args)
 
     save_arguments(args)
     append_training_metadata(args)
@@ -202,17 +218,19 @@ if __name__ == "__main__":
     #Plot the model summary
     if args.nf:
       X_example = X_example.view(X_example.shape[0], -1)
-      print(X_example[0])
+      print("Input shape,",X_example.shape, flush=True)
       summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example)[0].shape, model(X_example)[1].shape, flush=True)
-    elif args.maf:
+    elif args.diff:
+      X_example = X_example.view(X_example.shape[0], -1)
       summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      output=model(X_example)
-      print("Output shape, [", output[0].shape,output[1].shape,"]", flush=True)
+      #print("Output shape, [", output.shape,"]", flush=True)
     elif not args.cnf:
+      print("Input shape,",X_example.shape, flush=True)
       summary(model, input_data=[X_example[:,:-1,:]], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example[:,:-1,:]).shape, flush=True)
     else:
+      print("Input shape,",X_example.shape, flush=True)
       # Skip torchinfo for CNF to avoid autograd-mode issues.
       n_params = sum(p.numel() for p in model.parameters())
       print(f"Model params: {n_params}", flush=True)
