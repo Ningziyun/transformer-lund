@@ -28,6 +28,9 @@ from torchviz import make_dot
 
 import normflows as nf
 
+import fastjet
+import ljpHelpers
+
 class ktdr_dataset(torch.utils.data.Dataset):
   def __init__(self, file_path, NConstituents=20, add_stop=False, add_mask=False, standardize=False):
     super(ktdr_dataset, self).__init__()
@@ -69,7 +72,7 @@ class ktdr_dataset(torch.utils.data.Dataset):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=50, add_stop=False):
+  def __init__(self, file_path, NConstituents=20, add_stop=False):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
@@ -104,15 +107,15 @@ def get_loaders(input_format="ktdr",train_file=None,val_file=None,batch_size=256
 
   if input_format=="ktdr":
     train_dataset = ktdr_dataset(train_file)
-    train_loader = DataLoader( train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
     test_dataset = ktdr_dataset(val_file)
-    test_loader = DataLoader( test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
 
   elif input_format=="4vec":
     train_dataset = constit_dataset(train_file)
-    train_loader = DataLoader( train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
     test_dataset = constit_dataset(val_file)
-    test_loader = DataLoader( test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
   return train_loader,test_loader
 
 class model_DNN(nn.Module):
@@ -168,36 +171,36 @@ class model_autoregressive_transformer(nn.Module):
       # Causal mask prevents looking ahead
       mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
 
-      encoded = self.encoder(x, mask=mask)
-      #encoded = self.encoder(x)
+      # Take the x[0:-1] embedded and learn the embedded x[1:]
+      encoded = self.encoder(x, mask=mask)  
       return self.deembed(encoded)  # (batch, seq_len, feature_dim)
 
   @torch.no_grad()
   def generate(self, x_init, steps):
-      seq = x_init.clone()
-      for ii in range(steps):
+      seq = x_init.clone() #Start with a seed x[0] where rest is padded out
+      for ii in range(steps): #loop over length
           pred = self.forward(seq) #get next element prediction, gives you N prediction for N inputs
-          next_pred = pred[:, -1:, :]  # Just take the last one
-          seq = torch.cat([seq, next_pred], dim=1) #append it
+          next_pred = pred[:, -1:, :]  # Just take the last prediction which is new
+          seq = torch.cat([seq, next_pred], dim=1) #append it to the sequence
       return seq
 
 class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
-  #exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid collapse to median
+  #exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   def __init__(self, input_dim, n_mix=25, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim)
 
       self.n_mix=n_mix
 
+      #Final space is now a multi-D Gaussian mixture model: prod \alpha_i Gaus(\arrow\mu_i,\arrow\sigma_i) , where dimension=length of ouput (aka 4 for 4-vec)
       self.deembed = nn.Linear(self.embed_dim, self.n_mix*(1+input_dim+input_dim))
 
   def forward(self, x):
 
-      #Get the usual network result
+      #Get the usual network result, note we overloaded the original forward to give MDN values and not truly auto-regressive
       encoded=super().forward(x) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
 
       # split into mixture components
       encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.input_dim)) #[Nbatch,Nconst,Nmix,(1+2*Ninput)]
-
       alpha=encoded[:,:,:,0] #[batch,Nconst,Nmix]
       mu=encoded[:,:,:,1:self.input_dim+1] #[batch,Nconst,Nmix,Ninput]
       sigma=encoded[:,:,:,self.input_dim+1:] #[batch,Nconst,Nmix,Ninput]
@@ -207,7 +210,36 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       sigma=sigma.clamp(min=0.001) #make positive
 
       return torch.cat([alpha.unsqueeze(-1),mu,sigma],dim=-1)
-      #return alpha, mu, sigma
+
+  def nll_loss(self, inputs, targets, mask=None):
+    ninputs=targets.shape[-1]
+
+    alpha=inputs[..., 0] #[Nbatch,NConst,Nmix]
+    mu=inputs[..., 1:ninputs+1] #target: [Nbatch,NConst,Nmix,Ninputs]
+    sig2=inputs[..., ninputs+1:] #target: [Nbatch,NConst,Nmix,Ninputs]
+
+    #target: [Nbatch,NConst,Ninputs]
+    targets = targets.unsqueeze(2)  # target: [Nbatch,NConst,1,Ninputs]
+
+    # central term, sum over the input vector dimension: (sum_{j=1}^{N_input} (x-mu_j)^2/2sigma_j^2)
+    Z_term = torch.sum(((targets - mu)**2 / (2*sig2)), dim=-1)  #[Nbatch,NConst,Nmix]
+
+    # Norm term: sum_{j=1}^{N_input} 0.5*log(det|Sigma|)+N_input/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
+    sig_term = 0.5*torch.sum(sig2+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
+    #sig_term = 0.5*torch.sum(sig2, dim=-1)
+
+    #the mixture term: log(alpha_i)
+    alpha_term=torch.log(alpha)
+
+    #Total log prob of the datapoint, sum over mixture: log(p_{sample})=log(sum_{i=1}^{N_mix} alpha,i*exp{-sig_term,i}*exp{-Z_term,i})
+    #Make simpler and more stabler by doing the log-sum-exp: log(p_sample)=log(sum_{i=1}^{N_mix} exp{alpha_term,i - Z_term,i -exp{sig_term,i})
+    log_prob = torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
+
+    # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
+    if mask is not None:
+      return -log_prob[mask].sum()  # mean over valid tokens only
+    else:
+      return -log_prob.sum() #Sum over all the training sample
 
   @torch.no_grad()
   def generate(self, x_init, steps):
@@ -226,44 +258,13 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
           # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
           comp = torch.multinomial(alpha, 1).squeeze(-1)  # (B,)
 
-          # Make the MVN distribution by getteing the mu and cov-matrix for this component and sample from it
+          # Sample the whole MDN distribution by getting the mu and cov-matrix for this component and sample from it
           loc=mu[batch_idx,comp,:] #(Nbatch,Ninput)
           covmatrix = torch.diag_embed(sig2[batch_idx,comp,:]**2) # (Nbatch, Ninput, Ninput)
           dist = MultivariateNormal(loc,covmatrix)
           next_pred=dist.sample().unsqueeze(dim=1)
           seq = torch.cat([seq, next_pred], dim=1) #append it
       return seq
-
-def mdn_loss(inputs, targets, mask=None):
-
-    ninputs=targets.shape[-1]
-
-    alpha=inputs[..., 0] #[Nbatch,NConst,Nmix]
-    mu=inputs[..., 1:ninputs+1] #target: [Nbatch,NConst,Nmix,Ninputs]
-    sig2=inputs[..., ninputs+1:] #target: [Nbatch,NConst,Nmix,Ninputs]
-
-    #target: [Nbatch,NConst,Ninputs]
-    targets = targets.unsqueeze(2)  # target: [Nbatch,NConst,1,Ninputs]
-
-    # central term, sum over the input vector dimension: (sum_{j=1}^{N_input} (x-mu_j)^2/2sigma_j^2)
-    Z_term = torch.sum( ((targets - mu)**2 / (2*sig2)), dim=-1)  #[Nbatch,NConst,Nmix]
-
-    # Norm term: sum_{j=1}^{N_input} 0.5*log(det|Sigma|)+N_input/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
-    sig_term = 0.5*torch.sum(sig2+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
-    #sig_term = 0.5*torch.sum(sig2, dim=-1)
-
-    #the mixture term: log(alpha_i)
-    alpha_term=torch.log(alpha)
-
-    #Total log prob of the datapoint, sum over mixture: log(p_{sample})=log(sum_{i=1}^{N_mix} alpha,i*exp{-sig_term,i}*exp{-Z_term,i})
-    #Make simpler and more stabler by doing the log-sum-exp: log(p_sample)=log(sum_{i=1}^{N_mix} exp{alpha_term,i - Z_term,i -exp{sig_term,i})
-    log_prob = torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
-
-    # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
-    if mask is not None:
-      return -log_prob[mask].sum()  # mean over valid tokens only
-    else:
-      return -log_prob.sum() #Sum over all the training sample
 
 # =========================
 # CNF (Continuous Normalizing Flow) components
@@ -374,7 +375,6 @@ class ConditionalCNF(nn.Module):
 
     return x
 
-
 class model_transformer_CNF(nn.Module):
   """
   Transformer context encoder + CNF head for conditional density p(x_{t+1} | x_{<=t}).
@@ -387,7 +387,7 @@ class model_transformer_CNF(nn.Module):
 
     # same embedding + transformer encoder as the autoregression model
     self.embed = nn.Linear(input_dim, embed_dim)
-    encoder_layer = nn.TransformerEncoderLayer( d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=0.1, batch_first=True)
+    encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=0.1, batch_first=True)
     self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
 
     # project hidden -> context vector for CNF
@@ -454,19 +454,191 @@ class model_transformer_CNF(nn.Module):
     return seq
 
 #==============================================================================================
+# Custom vanillar NFlows, not working great
+class realnvp_coupling_layer(nn.Module):
+    def __init__(self, input_dim, latent_dim=256, mask=None):
+        super().__init__()
+
+        #If you give it a mask, treats in 1-flow, otherwise splits into 2 halves manually
+        if mask==None:
+            self.half_dim = input_dim // 2
+        else:
+            self.half_dim = input_dim
+
+        #make the scale and translation networks
+        self.scale_net = nn.Sequential(nn.Linear(self.half_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, self.half_dim))
+        self.translate_net = nn.Sequential(nn.Linear(self.half_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, latent_dim), nn.ReLU(), nn.Linear(latent_dim, self.half_dim))
+
+        self.register_buffer("mask", mask)
+
+    def forward(self, x):
+
+        #forward coupling: z_1=x_1   z_2=x_2*exp(s(x_1)) + t(x_1)
+        #jacobean is J=exp(s(x_1))
+        if self.mask==None:
+            x1 = x[:, :self.half_dim]
+            x2 = x[:, self.half_dim:]
+
+            s = 2.0 * torch.tanh(self.scale_net(x1))
+            t = self.translate_net(x1)
+
+            z2 = x2 * torch.exp(torch.clamp(s,-5,5)) + t
+            z = torch.cat([x1, z2], dim=1)
+            log_det = s.sum(dim=1)
+            return z, log_det, s
+
+        else:
+            x_mask = x * self.mask
+            s = 2.0 * torch.tanh(self.scale_net(x_mask)) #- x_mask # Scale
+            t = self.translate_net(x_mask) #- x_mask # Translation
+            z = x_mask + (1 - self.mask) * (x * torch.exp(torch.clamp(s,-5,5)) + t)
+            log_det = torch.sum(s * (1 - self.mask), dim=1)  # Log determinant
+
+            return z, log_det, s
+
+    def inverse(self, z):
+
+        #Inverse is simple as well: x_1=z_1   x_2= (y_2-t(y_1))*exp(-s(y_1))
+        if self.mask==None:
+            z1 = z[:, :self.half_dim]
+            z2 = z[:, self.half_dim:]
+
+            s = 2.0 * torch.tanh(self.scale_net(z1))
+            t = self.translate_net(z1)
+
+            x2 = (z2 - t) * torch.exp(-s)
+            x = torch.cat([z1, x2], dim=1)
+            return x
+        else:
+            z_mask = z * self.mask
+            s = 2.0 * torch.tanh(self.scale_net(z_mask)) #+ z_mask
+            t = self.translate_net(z_mask) #+  z_mask
+            x = z_mask + (1-self.mask)*(z - t)*torch.exp(-s)
+            return x
+
+class FlowBatchNorm(nn.Module):
+
+    def __init__(self, feature_dim, eps=1e-5):
+        super().__init__()
+
+        #cap the sigma if needed
+        self.eps = eps
+
+        #learned parameters
+        self.gamma = nn.Parameter(torch.zeros(1, 1, feature_dim))
+        self.beta = nn.Parameter(torch.zeros(1, 1, feature_dim))
+
+    def forward(self, x):
+
+        """
+        x: (B,O,F)
+        """
+        B, O, F = x.shape
+
+        mean = x.mean(dim=[0,1], keepdim=True)
+        var = x.var(dim=[0,1], keepdim=True)
+
+        x_hat = (x - mean) / torch.sqrt(var + self.eps)
+        y = torch.exp(self.gamma) * x_hat + self.beta
+
+        log_det = O * self.gamma.sum()
+        return y, log_det
+
+    def inverse(self, y):
+
+        mean = y.mean(dim=[0,1], keepdim=True)
+        var = y.var(dim=[0,1], keepdim=True)
+
+        x_hat = (y - self.beta) * torch.exp(-self.gamma)
+        x = x_hat * torch.sqrt(var + self.eps) + mean
+
+        return x
+
+class model_normalizing_flow_custom(nn.Module):
+    def __init__(self, input_dim, num_flows=10, latent_dim=256, doMask=True, doBatchNorm=False):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.doMask = doMask
+        self.doBatchNorm=doBatchNorm
+
+        #Make alternating mask and add in flow layers
+        if self.doMask:
+            masks = [torch.ones(self.input_dim) for _ in range(num_flows)]
+            for ii in range(num_flows):
+                masks[ii][::2] = 0 #Every second
+                #for jj in range(len(masks)//2): #every pair
+                #    masks[ii][4*jj]=0
+                #    masks[ii][4*jj+1]=0
+                if ii%2==0: masks[ii]=1-masks[ii]
+                print("Mask",ii,masks[ii], (masks[ii] == 0).sum())
+            self.layers = nn.ModuleList([ realnvp_coupling_layer(input_dim,latent_dim,masks[ii]) for ii in range(num_flows) ])
+        else:
+            self.layers = nn.ModuleList([ realnvp_coupling_layer(input_dim,latent_dim) for ii in range(num_flows) ])
+
+        self.norms = nn.ModuleList([ FlowBatchNorm(input_dim) for _ in range(num_flows) ])
+
+    def forward(self, x):
+        log_det_total = 0
+        l2_norm=0
+        z = x
+
+        #loop over all the flow layers,  p(z)= p(f_1^{-1}(f_2^{-1}(...(x)))) |det J_1 + det J_2 +....|
+        for layer,norm in zip(self.layers,self.norms):
+            z, log_det, s = layer(z)
+            if self.doBatchNorm: #if batchnorm make sure to also propage this transform
+                z, log_det2 = norm(z)
+                log_det_total+=log_det2
+            if not self.doMask: #if alternating then flip dimension every layer
+                z = torch.flip(z, dims=[1]) 
+            log_det_total += log_det
+            l2_norm+=s.pow(2) #Store a L2 regulator for the sclae
+
+        return z, log_det_total, l2_norm
+
+    def inverse(self, z):
+        x = z
+
+        #Go backwards through the layers
+        for layer,norm in reversed(list(zip(self.layers,self.norms))):
+            if not self.doMask:
+                x = torch.flip(x, dims=[1]) # flip dimensions after each layer
+            if self.doBatchNorm:
+                x = norm.inverse(x)
+            x = layer.inverse(x)
+
+        return x
+
+    def nll_loss(self, x):
+        #if  p(z)= p(z)= p(f_1^{-1}(f_2^{-1}(...(x)))) |det J_1 + det J_2 +....|
+        #then nll = \sum -0.5(z_i^2 + log(2pi)) - |det J_i|
+        z, log_det, l2_norm = self.forward(x)
+        log_pz = -0.5 * (z.pow(2) + torch.log(torch.tensor(2 * torch.pi)) ).sum(dim=1)
+        return -log_pz - log_det + 1e-4*l2_norm.sum(dim=1)
+
+    @torch.no_grad()
+    def generate(self,out_dimensions):
+        with torch.no_grad():
+            z = torch.randn(out_dimensions[0],out_dimensions[1]*out_dimensions[2])
+            samples = self.inverse(z)
+            samples = samples.view(out_dimensions)
+            return samples
+
+
+#==============================================================================================
 # Vanilla NFlows
-class StableScaleNet(nn.Module):
+class StableScaleNet(nn.Module): #just a clamped mlp
     def __init__(self, dim, hidden):
         super().__init__()
 
-        self.net = nf.nets.MLP( [dim, hidden, hidden, dim], init_zeros=True,)
+        self.net = nf.nets.MLP([dim, hidden, hidden, dim], init_zeros=True,)
 
     def forward(self, x):
-        # Clamp scaling factors
+        # Clamp scaling factors to 2sigma
         return 2.0 * torch.tanh(self.net(x))
 
-class model_normalizing_flow(nn.Module):
-    #Normalizing flows, if have a invertible function x=f(z), and z~Gaus(z) then p(z)=Gaus(f^{-1}(x)) |det J| (aka change of variables). Can compose multiple function together in a flow and the only thing to keep track is the composed final function f=f_1\cdotf_2... and the prod of the jacobian detetermints. Trick is then using neural networks to learn the functions, but make sure everything invertible
+class model_normalizing_flow(nn.Module): #Using normflows package
+    #Normalizing flows, if have a invertible function x=f(z), and z~Gaus(z) then p(z)=p(f^{-1}(x)) |det J| (aka change of variables). Can compose multiple function together in a flow and the only thing to keep track is the composed final function f=f_1\cdotf_2... and the prod of the jacobian detetermints. Trick is then using neural networks to learn the functions, but make sure everything invertible
     def __init__(self, input_dim, num_flows=10, latent_dim=256, flow_type="neuralspline_coupling"):
         super().__init__()
 
@@ -489,7 +661,7 @@ class model_normalizing_flow(nn.Module):
 
                 # RealNVP coupling layer
                 #flows.append(nf.flows.ActNorm(self.input_dim))
-                flows.append(nf.flows.MaskedAffineFlow( mask, t_net, s_net))
+                flows.append(nf.flows.MaskedAffineFlow(mask, t_net, s_net))
                 #flows.append(nf.flows.ActNorm(self.input_dim))
             
             #Masked Autoregressive Flow: Applies a causal mask via MADE so that learns a product of conditionals on previous p(x_1,x_2,...)=prod p(x_i|p_{x<i}). Each of the transforms is still a affine, but input is all preceeding inputs (via mask) as opposed to half the input
@@ -545,102 +717,19 @@ class model_normalizing_flow(nn.Module):
 
 ################################
 # Diffusion model
-class TimeEmbedding(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
 
-    def forward(self, t):
-        half = self.dim // 2
-        freqs = torch.exp( -torch.log(torch.tensor(10000.0)) * torch.arange(half) / half).to(t.device)
-
-        args = t[:, None].float() * freqs[None]
-        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
-        return emb
-
-class Denoiser(nn.Module):
-    def __init__(self, n_feat, embed_dim=128, n_heads=4, num_layers=3):
-        super().__init__()
-
-        self.input_proj = nn.Linear(n_feat, embed_dim)
-        self.time_mlp = nn.Sequential( TimeEmbedding(embed_dim), nn.Linear(embed_dim, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim),)
-
-        encoder_layer = nn.TransformerEncoderLayer( d_model=embed_dim, nhead=n_heads, batch_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-        self.output_proj = nn.Linear(embed_dim, n_feat)
-
-    def forward(self, x, t):
-        """
-        x: [B, N_obj, N_feat]
-        t: [B]
-        """
-
-        h = self.input_proj(x)  # [B, N_obj, embed_dim]
-
-        t_emb = self.time_mlp(t)  # [B, embed_dim]
-        h = h + t_emb[:, None, :]  # broadcast to objects
-
-        h = self.transformer(h)
-        return self.output_proj(h)
-
-    @torch.no_grad()
-    def generate(diffusion, shape):
-        B, N_obj, N_feat = shape
-        x = torch.randn(shape)
-
-        for t in reversed(range(diffusion.T)):
-            t_batch = torch.full((B,), t, device=x.device)
-
-            eps = diffusion.model(x, t_batch)
-
-            beta = diffusion.betas[t]
-            alpha = diffusion.alphas[t]
-            alpha_bar = diffusion.alpha_bar[t]
-
-            x = (1 / torch.sqrt(alpha)) * ( x - (beta / torch.sqrt(1 - alpha_bar)) * eps)
-            if t > 0: x += torch.randn_like(x) * torch.sqrt(beta)
-
-        return x
-
-class Diffusion:
-    def __init__(self, model, timesteps=1000, beta_start=1e-4, beta_end=0.02):
-        self.model = model
-        self.T = timesteps
-
-        self.betas = torch.linspace(beta_start, beta_end, timesteps)
-        self.alphas = 1.0 - self.betas
-        self.alpha_bar = torch.cumprod(self.alphas, dim=0)
-
-    def q_sample(self, x0, t, noise=None):
-        if noise is None:
-            noise = torch.randn_like(x0)
-
-        a_bar = self.alpha_bar[t][:, None, None].to(x0.device)
-        return torch.sqrt(a_bar) * x0 + torch.sqrt(1 - a_bar) * noise, noise
-
-    def loss(self, x0):
-        B = x0.size(0)
-        t = torch.randint(0, self.T, (B,), device=x0.device)
-
-        x_t, noise = self.q_sample(x0, t)
-        pred_noise = self.model(x_t, t)
-
-        return F.mse_loss(pred_noise, noise)
-
-
-# ------------------------------------------------------------
-# Simple MLP noise predictor for diffusion
-# ------------------------------------------------------------
 class DiffusionMLP(nn.Module):
+    '''
+    Simple MLP noise predictor for diffusion. Learning cumulative added noise epsilon(x_{t-1}, t)
+    '''
     def __init__(self, input_dim, hidden_dim=256, time_embed_dim=128):
         super().__init__()
 
         self.time_embed_dim = time_embed_dim
-        self.time_mlp = nn.Sequential( nn.Linear(time_embed_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim),)
+        self.time_mlp = nn.Sequential(nn.Linear(time_embed_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim),)
 
-        #self.mlp = nn.Sequential( nn.Linear(input_dim + hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),) 
-        self.mlp = nn.Sequential( nn.Linear(input_dim + 1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
+        #self.mlp = nn.Sequential(nn.Linear(input_dim + hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),) 
+        self.mlp = nn.Sequential(nn.Linear(input_dim + 1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
 
     def sinusoidal_embedding(self, t, dim):
         """
@@ -652,7 +741,7 @@ class DiffusionMLP(nn.Module):
         half_dim = dim // 2
 
         emb_scale = math.log(10000) / (half_dim - 1)
-        emb = torch.exp( torch.arange(half_dim, device=device) * -emb_scale)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb_scale)
 
         emb = t[:, None] * emb[None, :]
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
@@ -666,10 +755,10 @@ class DiffusionMLP(nn.Module):
         """
 
         #Add the sinusioidal time conditioner
-        #t_emb = self.sinusoidal_embedding( t.float(), self.time_embed_dim)
+        #t_emb = self.sinusoidal_embedding(t.float(), self.time_embed_dim)
         #t_emb = self.time_mlp(t_emb)
 
-        #Linear timestep
+        #Linear timestep instead
         ##t_emb = t.float().view(-1, 1)
         t_emb = t.float().unsqueeze(-1)
         t_emb = t_emb / 1000.0 # normalize by max timestep
@@ -683,20 +772,33 @@ class DiffusionMLP(nn.Module):
 # ------------------------------------------------------------
 class model_diffusion(nn.Module):
     """
-    Basic DDPM-style diffusion model for vector/tabular data.
+    Basic DDPM-style diffusion model
 
-    Replaces the normalizing flow likelihood objective
-    with denoising score matching.
+    Consider diffusion/forward processa s function compostion   q(x_{1:T}|x_0)=prod^T q(x_t|x_{t-1})                where q(x_t|x_{t-1})=Gaus(sqrt(1-beta_t),beta_t))
+    and allows a closed form at step t                          q(x_t|x_0)=Gaus(sqrt(baralpha_t)*x0,1-baralpha_t)    where alpha_t=1-beta_t and baralpha_t=prod^t alpha_t
+    We can also re-paramtrize this as                           q(x_t|x_0)=sqrt(baralpha_t)*x0+(1-baralpha_t)*epsilon for epsilon=Gaus(0,1)
+    Note need increasing noisce beta_1 < beta_2 < ...
+
+    The reverse process is only defined when condtioned on x_0  q(x_{t-1}|x_t,x_0)=Gaus(tildemu_t(x_t,x_0),tildebeta_t)    with complicated expresions for tildemu and tildebeta
+    Want to learn reverse process                               p_theta(x_{0:T})=p(x_0) prod^T p_theta(x_{t_1}|x_t)      where p(x_{t-1}|x_t)=Gaus(mu_theta(x_t,t),beta_t^2)
+    Note setting the covariance matrix to beta_t^2 is a choice
+    Throught some tricky math, solution is to maximize D_KL(q(x_{t-1}|x_t,x_0)||p(x_{t-1}|x_t)) which is a simplification of E|-log(p_theta(x_{0:T})/q(x_{1:T}|x_0))|
+    With a bunch of simplifications can show the loss is        L=E_x0,t,epsilon|epsilon-epsilon_theta((baralpha_t)*x0+(1-baralpha_t)*epsilon, t )|^2
+
+    Update rules is                             x_{t-1}=1/sqrtalpha_t(x_t - (1-alpha_t)/(sqrt(1-baralpha_t))*epsilon_theta) + sqrt(beta)*z    where z=Gaus(0,1)
+
+    In DDIM update rules is determinitistic     x_{t_1}= sqrt(alpha_{t-1}) hat x_0 + sqrt(1-alpha_{t-1})*epsilon_theta   where x_0=sqrt(alpha_{t-1}/alpha_t)*(x_t-sqrt(1-alpha_t)*epsilon_theta)
+        
     """
-
-    def __init__( self, input_dim, hidden_dim=256, timesteps=1000, beta_start=1e-4, beta_end=2e-2,):
+    def __init__(self, input_dim, hidden_dim=256, timesteps=1000, beta_start=1e-4, beta_end=2e-2,mode="DDPM"):
         super().__init__()
 
         self.input_dim = input_dim
         self.timesteps = timesteps
+        self.mode      = mode
 
         # Noise predictor network
-        self.eps_model = DiffusionMLP( input_dim=input_dim, hidden_dim=hidden_dim,)
+        self.epsilon_model = DiffusionMLP(input_dim=input_dim, hidden_dim=hidden_dim,)
 
         # Linear beta schedule
         betas = torch.linspace(beta_start, beta_end, timesteps)
@@ -724,8 +826,8 @@ class model_diffusion(nn.Module):
         sqrt_alpha_bar_t = torch.sqrt(self.alpha_bar[t].unsqueeze(-1))
         sqrt_one_minus_alpha_bar_t = torch.sqrt(1-self.alpha_bar[t].unsqueeze(-1))
 
-        #x_t=\sqrt(\bar\alpha_t)x_0+\sqrt(1-\bar\alpha_t) noise
-        xt = ( sqrt_alpha_bar_t * x0 +sqrt_one_minus_alpha_bar_t * noise)
+        #q(x_t|x_0)=sqrt(baralpha_t)*x0+(1-baralpha_t)*epsilon for epsilon=Gaus(0,1)
+        xt = (sqrt_alpha_bar_t * x0 +sqrt_one_minus_alpha_bar_t * noise)
 
         return xt, noise
 
@@ -741,20 +843,20 @@ class model_diffusion(nn.Module):
         device = x.device
 
         # Random timestep per sample
-        t = torch.randint( 0, self.timesteps, (batch_size,), device=device,)
+        t = torch.randint(0, self.timesteps, (batch_size,), device=device,)
 
         # Add noise to the sample
         xt, noise = self.q_sample(x, t)
 
         # Predict cumultant noise
-        noise_pred = self.eps_model(xt, t)
+        noise_pred = self.epsilon_model(xt, t)
 
-        # Standard DDPM objective
+        # Standard DDPM objective |\epsilon-\epsilon_theta|
         loss = F.mse_loss(noise_pred, noise)
 
         return loss
 
-    def nll_loss(self, x):
+    def mse_loss(self, x):
         """
         Kept for API compatibility with your flow model.
         """
@@ -773,37 +875,186 @@ class model_diffusion(nn.Module):
         device = self.betas.device
 
         #Sample from final gaussian space x_T~N(0,I) 
-        x = torch.randn( batch_size, self.input_dim, device=device,)
+        x = torch.randn(batch_size, self.input_dim, device=device,)
 
-        #Loop over timesteps
+        #Should speed up DDPM which can use coarser steps then in the forward process
+
+        #Loop over timesteps, and update
         for t in reversed(range(self.timesteps)):
 
-            #Get the injetced noise beta/alpha
-            t_batch = torch.full( (batch_size,), t, device=device, dtype=torch.long,)
+            #Get the injected noise beta/alpha
+            t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long,)
             beta_t = self.betas[t]
             alpha_t = self.alphas[t]
             alpha_bar_t = self.alpha_bar[t]
 
             # Predict noise
-            eps_theta = self.eps_model(x, t_batch)
+            epsilon_theta = self.epsilon_model(x, t_batch)
 
-            # DDPM reverse step
-            coef1 = 1.0 / torch.sqrt(alpha_t)
-            coef2 = ((1 - alpha_t) / torch.sqrt(1 - alpha_bar_t))
+            if self.mode=="DDPM":
+                # DDPM reverse step
+                # x_{t-1}=1/\sqrt\alpha_t(x_t - (1-\alpha_t)/(sqrt(1-\bar\alpha_t))*\epsilon_theta) + \sqrt(\beta)*z where z=Gaus(0,1)
+                coef1 = 1.0 / torch.sqrt(alpha_t)
+                coef2 = ((1 - alpha_t) / torch.sqrt(1 - alpha_bar_t))
+                mean = coef1 * (x - coef2 * epsilon_theta)
 
-            mean = coef1 * (x - coef2 * eps_theta)
+                #if t>0 add the random noise to sample
+                if t > 0:
+                    noise = torch.randn_like(x)
+                    sigma = torch.sqrt(beta_t)
+                    x = mean + sigma * noise
+                #else just start the process
+                else:
+                    x = mean
 
-            #if t>0 add the random noise to sample
-            if t > 0:
-                noise = torch.randn_like(x)
-                sigma = torch.sqrt(beta_t)
-                x = mean + sigma * noise
-            #else just start the process
-            else:
-                x = mean
+            elif self.mode=="DDIM":
+                # DDIM reverse step
+                # x_{t_1}= sqrt(alpha_{t-1}) hatx_0 + sqrt(1-alpha_{t-1})*epsilon_theta   where hatx_0=(x_t-sqrt(1-alpha_t)*epsilon_theta)/sqrt(alpha_t)
+                x0_pred = (x - torch.sqrt(1 - alpha_t) * eps_theta) / torch.sqrt(alpha_t)
+
+                alpha_tm1 = self.alpha[t-1]
+                x = (torch.sqrt(alpha_tm1) * x0_pred + torch.sqrt(1 - alpha_tm1) * epsilon_theta)
 
         return x.view(out_dimensions)
 
+###############################
+# Score based Stochastic differential equation
+###############################
+
+class ScoreNet(nn.Module): #Same as DiffusionMLP above!
+    def __init__(self, input_dim, hidden_dim=256):
+        super().__init__()
+
+        self.net = nn.Sequential(nn.Linear(input_dim + 1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
+
+    def forward(self, x, t):
+
+        t = t.unsqueeze(-1)
+        h = torch.cat([x, t], dim=-1)
+
+        return self.net(h)
+
+class model_score_SDE(nn.Module):
+    '''
+    Learn the score-function via stochastic differential equation (variance preserving form)
+    Whole model is              dx=f(x,t)dt+g(t)dw      for Weiner process w
+    We denote  p_t(x) is the density of x(t)
+    Reverse process is then     dx=(f(x,t)-g(t)^2 nabla_x log(p_t(x)) )dt+g(t)dw   for reverse time and reverse dw
+
+    Train network to learn score via loss L= E_x,t( lambda(t)*|s(x(t),t) - nabla_x log(p_{0t}(x(t)|x(0)))|^2 ) for transition probability p_{0t}(x(t)|x(0))=Gauss which is very good approximation of p_t(x)
+
+    The variance-preserving (DDPM not score-based) appoarach models: x_t=sqrt(1-beta_t)*x_{t-1}+sqrt(beta_t)*epsilon
+    hence                       dx=0.5beta(t)x*dt+sqrt(beta(t))*dw
+    
+    The cumulative solutions follows:           x_t=alpha(t)*x_0+sigma(t)*epsilon
+    Where:  alpha(t)=exp(-0.5 int_0^t beta(s) ds    (by solving ODE ignoreing noise)
+            sigma(t)=sqrt(1-alpha(t))               (same as in discrete version where alpha(t) is like sqrt(bar alpha))
+    and so p_{0t}(x(t)|x(0))=Gaus(x_t|alpha_t*x0,sigma_t) and nabla_x log(p_{0t}) = -epsilon/sigma(t)
+    DDPM use lambda(t)=sigma_t^2 in loss which results in loss of L=|epsilon_theta-epsilon| since training gives s(x,t)=-epsilon_theta(x,t)/sigma(t)
+    '''
+
+    def __init__(self, input_dim, hidden_dim=256, beta_min=0.1, beta_max=20.0, mode="sde"):
+        super().__init__()
+
+        #Will use linear beta scheduler
+        self.beta_min = beta_min
+        self.beta_max = beta_max
+
+        self.score_model = ScoreNet(input_dim=input_dim, hidden_dim=hidden_dim,)
+
+        self.mode=mode
+        self.input_dim = input_dim
+
+    def marginal_prob(self, x0, t):
+
+        #Use linear schedule: beta(t)=beta_min+t*(beta_max - beta_min)
+        #alpha alpha(t)=exp(-0.5 int_0^t beta(s) ds
+        alpha = torch.exp(-0.25 * (self.beta_max - self.beta_min) * t**2 - 0.5 * self.beta_min * t)
+
+        #x_t=alpha(t)*x_0+sigma(t)*epsilon
+        mean    = alpha.unsqueeze(-1) * x0
+        sigma   = torch.sqrt(1.0 - alpha**2)
+        epsilon = torch.randn_like(x0)
+
+        #Return each component
+        return mean, sigma, epsilon
+
+    def forward(self, x0):
+
+        B = x0.shape[0]
+        device = x0.device
+
+        #Avoid t=0 in case sigma->0
+        eps=1e-5
+        t = eps + (1 - eps) * torch.rand(B, device=device)
+
+        #Derive x_t=alpha(t)*x_0+sigma(t)*epsilon
+        mean, sigma, epsilon = self.marginal_prob(x0, t)
+        xt = mean + sigma.unsqueeze(-1) * epsilon
+
+        #Get s(x,t)
+        score = self.score_model(xt, t)
+
+        '''
+        #Loss is sigma**2 |s(x,t)-eps/sigma|
+        target = -epsilon / sigma.unsqueeze(-1)
+        loss = (sigma[:, None]**2 * (score - target)**2).mean()
+        '''
+
+        #Loss is |epsilon_theta-eps|
+        target = -epsilon
+        pred = sigma[:, None] * score
+        loss = F.mse_loss(pred, target)
+
+        return loss
+
+    def mse_loss(self, x0):
+        return self.forward(x0)
+
+    @torch.no_grad()
+    def generate(self, out_dimensions, num_steps=1000,):
+        '''
+        Run Euler–Maruyama forward numerical integration
+        dx=(-0.5beta(t)-beta(t) nabla_x log(p_t(x)) )dt + sqrt(beta(t)) dw
+        '''
+
+        batch_size = out_dimensions[0]
+
+        device = next(self.parameters()).device
+        x = torch.randn(batch_size, self.input_dim, device=device,)
+
+        #Loop over timesteps
+        dt = -1.0 / num_steps
+        for i in range(num_steps):
+
+            #backwards time
+            t = torch.ones(batch_size, device=device) * (1 - i / num_steps)
+            beta_t = (self.beta_min + t * (self.beta_max - self.beta_min))
+
+            #Score = nabla_x log(p_t(x))  
+            score = self.score_model(x, t)
+
+            #If solving via stoachatsic equation
+            if self.mode=="sde":
+                #Drift-term = (-0.5beta(t)-beta(t) nabla_x log(p_t(x)) )
+                drift = (-0.5 * beta_t.unsqueeze(-1) * x - beta_t.unsqueeze(-1) * score)
+
+                #diffusion term=sqrt(beta(t))
+                diffusion = torch.sqrt(beta_t)
+
+                #numericallu intergate via Euler–Maruyama 
+                z = torch.randn_like(x)
+                x = (x + drift * dt + diffusion.unsqueeze(-1) * torch.sqrt(torch.abs(torch.tensor(dt))) * z)
+
+            #or solving determinisitically
+            elif self.mode=="ode":
+                #Drift-term = (-0.5beta(t)-0.5*beta(t) nabla_x log(p_t(x)) )
+                drift = (-0.5 * beta_t.unsqueeze(-1) * x - 0.5 * beta_t.unsqueeze(-1) * score)
+
+                #numerically intergate via Euler
+                x = (x + drift * dt )
+
+        return x.view(out_dimensions)
 
 ###############################
 def get_lin_scheduler(num_epochs, num_batches, lr_decay, optimizer):
@@ -1046,10 +1297,12 @@ def build_unbinned_model(input_dim, args_or_dict):
         return model_normalizing_flow(
             input_dim=input_dim[1]*input_dim[2],
             num_flows=10,
-            latent_dim=256,
+            latent_dim=128,
         )
     if _as_bool(get("diff", False)):
-        return model_diffusion( input_dim=input_dim[1]*input_dim[2], hidden_dim=256)
+        return model_diffusion(input_dim=input_dim[1]*input_dim[2], hidden_dim=256)
+    if _as_bool(get("sde", False)):
+        return model_score_SDE(input_dim=input_dim[1]*input_dim[2], hidden_dim=256)
     return model_autoregressive_transformer(
         input_dim=input_dim[2],
         embed_dim=_as_int(get("embed_dim", 256), 256),
@@ -1519,6 +1772,7 @@ def parse_input():
     #
     p.add_argument("--nf", action="store_true", default=False, help="Use NormFlows")
     p.add_argument("--diff", action="store_true", default=False, help="Use Masked autoregressive flow")
+    p.add_argument("--sde", action="store_true", default=False, help="Use Masked autoregressive flow")
 
     # auxiliary diagnostics
     p.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for auxiliary flow nets")
@@ -1624,8 +1878,6 @@ def set_seeds(seed):
 
 
 def make_lundplane(input_vec, pad_length=15):
-  import fastjet
-  import ljpHelpers
 
   #Assume input is dimensions [Nevents, Nconstituents, 4-vecs]
   jetDef10 = fastjet.JetDefinition(fastjet.antikt_algorithm, 1.0, fastjet.E_scheme)
@@ -1653,7 +1905,7 @@ def make_lundplane(input_vec, pad_length=15):
       if (lundPlane[kk].delta_R > 0 and lundPlane[kk].z > 0):
         dr_val = math.log(1.0 / lundPlane[kk].delta_R)
         kt_val = math.log(lundPlane[kk].kt)
-        lp_points.append([dr_val,kt_val])
+        lp_points.append([kt_val,dr_val])
 
     # Free C++ memory
     constituents.clear()
@@ -1688,12 +1940,6 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
     for jj in range(Nin):
       mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
       maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
-
-  #FIXME
-  mins[0]=-5
-  maxs[0]=7
-  mins[1]=-1
-  maxs[1]=10
 
   #make plot
   fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
@@ -1744,7 +1990,7 @@ def lund_plot(
       mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
       maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
 
-  #FIXME
+  #FIXME 1=DR 0=kt
   mins[0]=-5
   maxs[0]=7
   mins[1]=-1
@@ -1774,8 +2020,8 @@ def lund_plot(
 
         # Plot 2D histogram
         last_hist = ax.hist2d(
-            inputs[jj][:, 1],   # x = log(kt)
-            inputs[jj][:, 0],   # y = log(1/deltaR)
+            inputs[jj][:, 1],
+            inputs[jj][:, 0],
             range=[x_range, y_range],
             bins=hist2d_bins,
             cmap="Blues",
@@ -1798,8 +2044,8 @@ def lund_plot(
         ax.set_title(panel_label, pad=8, fontsize=10)
 
         # Axis labels
-        ax.set_xlabel(r"$\log(k_t)$")
-        ax.set_ylabel(r"$\log(1/\Delta R)$")
+        ax.set_xlabel(r"$\log(1/\Delta R)$")
+        ax.set_ylabel(r"$\log(k_t)$")
 
     for offset, (label, reason) in enumerate(unavailable_notes):
         ax = used_axs[Nin + offset]
@@ -2106,7 +2352,7 @@ def plot_combined_losses(run_infos, out_dir):
         fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"), bbox_inches="tight")
         plt.close(fig)
 
-def validate_unbinned_models( models, test_loader, input_shape, args, labels=None, make_projection=False, unavailable_model_reasons=None,):
+def validate_unbinned_models(models, test_loader, args, labels=None, make_projection=False, unavailable_model_reasons=None,):
   if args.plot_max_batches is not None and args.plot_max_batches <= 0:
     raise ValueError("--plot-max-batches must be a positive integer")
 
@@ -2128,7 +2374,6 @@ def validate_unbinned_models( models, test_loader, input_shape, args, labels=Non
       for imodel, model in enumerate(models):
         model.to(device)
         model.eval()
-        ''' #FIXME
         forced_reason = None
         if unavailable_model_reasons is not None and imodel < len(unavailable_model_reasons):
           forced_reason = unavailable_model_reasons[imodel]
@@ -2142,7 +2387,6 @@ def validate_unbinned_models( models, test_loader, input_shape, args, labels=Non
           print(f"Generated plot unavailable for model {imodel}: {reason}.", flush=True)
           active_models[imodel] = False
           unavailable_reasons[imodel] = reason
-        '''
 
       printed_example = False
       for batch, X in enumerate(test_loader):
@@ -2158,12 +2402,14 @@ def validate_unbinned_models( models, test_loader, input_shape, args, labels=Non
             continue
 
           try:
-            if args.nf:
-                generated_seq = model.generate(out_dimensions=X.shape)
-            elif args.diff:
-                generated_seq = model.generate(out_dimensions=X.shape)
-            else:
-                generated_seq = model.generate(start, steps=X.shape[1] - 1)
+              if args.nf:
+                  generated_seq = model.generate(out_dimensions=X.shape)
+              elif args.diff:
+                  generated_seq = model.generate(out_dimensions=X.shape)
+              elif args.sde:
+                  generated_seq = model.generate(out_dimensions=X.shape)
+              else:
+                  generated_seq = model.generate(start, steps=X.shape[1] - 1)
           except RuntimeError as err:
             reason = f"generation failed: {err}"
             print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)
@@ -2188,7 +2434,9 @@ def validate_unbinned_models( models, test_loader, input_shape, args, labels=Non
             print("Input example")
             print(X[0])
             print("Generate example")
+            starttime=time.time()
             print(generated_seq[0])
+            print("Took %.2e ms to generate"%((time.time()-starttime)*1000), flush=True)
             printed_example = True
 
           generated_chunks[imodel].append(generated_seq.cpu())
@@ -2263,10 +2511,10 @@ def validate_unbinned_models( models, test_loader, input_shape, args, labels=Non
       if args.input_format == "ktdr":
         lund_inputs = plot_inputs
       else:
-        lund_original = make_lundplane(original.numpy())
+        lund_original = make_lundplane(original)
         lund_inputs = [lund_original.reshape(-1, lund_original.shape[-1])]
         for generated in generated_list:
-          lund_generated = make_lundplane(generated.numpy())
+          lund_generated = make_lundplane(generated)
           lund_inputs.append(lund_generated.reshape(-1, lund_generated.shape[-1]))
 
       lund_plot(

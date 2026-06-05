@@ -10,12 +10,13 @@ def evaluate_loss(model,X,mask,args):
     X = X.view(X.shape[0], -1)
     loss=model.nll_loss(X).sum()
     return loss
-  elif args.cond_nf:
-    loss=model.nll_loss(X,mask).sum()
-    return loss
   elif args.diff:
     X = X.view(X.shape[0], -1)
-    loss=model.nll_loss(X).sum()
+    loss=model.mse_loss(X).sum()
+    return loss
+  elif args.sde:
+    X = X.view(X.shape[0], -1)
+    loss=model.mse_loss(X).sum()
     return loss
 
   inputs = X[:, :-1, :]   # all but last
@@ -32,7 +33,7 @@ def evaluate_loss(model,X,mask,args):
   if args.cnf:
     loss = model.nll(inputs, targets, mask=mask)
   elif args.mdn:
-    loss = loss_fn(pred, targets, mask=mask)
+    loss = model.nll_loss(pred, targets, mask)
     loss=loss.sum()
   else:
     if args.mixed_loss:
@@ -206,8 +207,6 @@ if __name__ == "__main__":
       args.mixed_loss = False
 
     #Set the loss
-    if args.mdn:
-      loss_fn=mdn_loss
     if not args.mdn and not args.cnf:
       loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
       if args.mixed_loss:
@@ -224,7 +223,9 @@ if __name__ == "__main__":
     elif args.diff:
       X_example = X_example.view(X_example.shape[0], -1)
       summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      #print("Output shape, [", output.shape,"]", flush=True)
+    elif args.sde:
+      X_example = X_example.view(X_example.shape[0], -1)
+      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
     elif not args.cnf:
       print("Input shape,",X_example.shape, flush=True)
       summary(model, input_data=[X_example[:,:-1,:]], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
@@ -347,7 +348,6 @@ if __name__ == "__main__":
       validate_unbinned_models(
         [model],
         test_loader,
-        X_example.shape,
         args,
         labels=["original", "generated"],
         make_projection=True,
@@ -357,7 +357,6 @@ if __name__ == "__main__":
       validate_unbinned_models(
         [model],
         test_loader,
-        X_example.shape,
         args,
         labels=["original", "generated"],
         make_projection=True,
