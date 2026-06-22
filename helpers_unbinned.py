@@ -27,6 +27,7 @@ torch.multiprocessing.set_sharing_strategy("file_system")
 from torchviz import make_dot
 
 import normflows as nf
+from torchdiffeq import odeint_adjoint as odeint
 
 import fastjet
 import ljpHelpers
@@ -138,7 +139,6 @@ class model_DNN(nn.Module):
       x = self.fc3(x)
       x = torch.reshape(x,[x.shape[0],self.dim1,self.dim2])
       return x
-
 
 class model_autoregressive_transformer(nn.Module):
     #Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
@@ -269,189 +269,243 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 # =========================
 # CNF (Continuous Normalizing Flow) components
 # =========================
-
-class CondVectorField(nn.Module):
+class VectorFieldNN(nn.Module):
   """
-  Conditional vector field: dx/dt = f(t, x, c)
-  x: [B, D]
+  Conditional vector field: dz/dt = f(z, t, c)
+  z: [B, D]
   c: [B, C] (context from transformer)
   """
-  def __init__(self, x_dim, c_dim, hidden=128):
+  def __init__(self, z_dim, c_dim, hidden_dim=128):
     super().__init__()
     self.net = nn.Sequential(
-      nn.Linear(x_dim + c_dim + 1, hidden),  # +1 for time embedding (t)
+      nn.Linear(z_dim + c_dim + 1, hidden_dim),  # +1 for time embedding (t)
       nn.SiLU(),
-      nn.Linear(hidden, hidden),
+      nn.Linear(hidden_dim, hidden_dim),
       nn.SiLU(),
-      nn.Linear(hidden, x_dim),
+      nn.Linear(hidden_dim, z_dim),
     )
 
-  def forward(self, t, x, c):
-    # t: scalar tensor or float, make it a column
-    if not torch.is_tensor(t):
-      t = torch.tensor(t, device=x.device, dtype=x.dtype)
-    tt = torch.ones(x.shape[0], 1, device=x.device, dtype=x.dtype) * t
-    xc = torch.cat([x, c, tt], dim=-1)
-    return self.net(xc)
+  def forward(self, z, t, c=None):
+    tt = t.expand(z.shape[0], 1) #should be on device
+    if c==None:
+        zct = torch.cat([z, tt], dim=-1)
+    else:
+        zct = torch.cat([z, c, tt], dim=-1)
+    return self.net(zct)
 
-
-def hutch_trace(f, x):
+def hutch_trace(f, z, eps):
   """
-  Hutchinson trace estimator for divergence: tr(df/dx)
+  Hutchinson trace estimator for divergence: tr(df/dt) approx E_p(epsilon){epsilon*df/ft*epilson} for gaussian vector noise epislone
   f: [B, D], x requires_grad=True
   returns: [B]
   """
-  eps = torch.randn_like(x)
   v = (f * eps).sum()
-  (grad,) = torch.autograd.grad(v, x, create_graph=True)
+  grad = torch.autograd.grad(
+        outputs=v,
+        inputs=z,
+        #grad_outputs=eps,
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
   return (grad * eps).sum(dim=-1)
 
-
-class ConditionalCNF(nn.Module):
+class CNFDynamics(nn.Module):
   """
-  A minimal CNF using Euler integration + Hutchinson trace estimator.
+  A minimal CNF using RK4 integration + Hutchinson trace estimator.
   This avoids external dependencies (torchdiffeq), and is enough to get a working CNF mode.
   """
-  def __init__(self, x_dim, c_dim, hidden=128, t0=0.0, t1=1.0, steps=8):
+  def __init__(self, x_dim, c_dim, hidden_dim=128, steps=100):
     super().__init__()
     self.x_dim = x_dim
     self.c_dim = c_dim
-    self.hidden = hidden
-    self.t0 = t0
-    self.t1 = t1
+    self.hidden_dim = hidden_dim
+
+    self.vf = VectorFieldNN(x_dim, c_dim, hidden_dim=hidden_dim)
+
     self.steps = steps
-    self.vf = CondVectorField(x_dim, c_dim, hidden=hidden)
+    self.register_buffer("time_grid", torch.linspace(0, 1, steps+1))
 
-  def _time_grid(self, device, dtype):
-    return torch.linspace(self.t0, self.t1, self.steps, device=device, dtype=dtype)
-
-  def log_prob(self, x1, c):
+  def forward(self, x):
     """
-    Compute log p(x1 | c) by integrating backward from x1 -> z0 (base)
-    x1: [B, D]
+    Compute log p(z | c) by integrating backward from x -> z (base)
+    Evolution:  z_0                 = int_t_1^t_0 f(z, t)*dt      with z(t_1) = x
+                log(p(x))-log(p(z)) = int_t_1^t_0 -tr( df/dt )*dt with log(p(x))-log(p(z(t_1)=0
+    x: [B, D]
     c:  [B, C]
     """
-    device, dtype = x1.device, x1.dtype
-    t = self._time_grid(device, dtype)
+    device, dtype = x.device, x.dtype
+    t = self.time_grid.to(device=device, dtype=dtype)
 
-    x = x1
-    logp_correction = torch.zeros(x.shape[0], device=device, dtype=dtype)
+    #Intital values: x=0 and prob difference is zero, re-use the eps for numerical speed-up
+    x = x.requires_grad_(True)
+    delta_logp = torch.zeros(x.shape[0], device=device, dtype=dtype)
+    eps=torch.randn_like(x)
 
-    # integrate backward: x_{k-1} = x_k - dt * f(t_k, x_k, c)
+    # integrate backward
+    dt=1/self.steps
     for k in range(len(t) - 1, 0, -1):
-      dt = t[k] - t[k - 1]
-      x = x.detach().requires_grad_(True)
-      f = self.vf(t[k], x, c)
-      div = hutch_trace(f, x)  # divergence estimate
-      x = x - dt * f
-      logp_correction = logp_correction + dt * div
+      k1 = self.vf(x, t[k])
+      k2 = self.vf(x + 0.5 * dt * k1, t[k] + 0.5 * dt)
+      k3 = self.vf(x + 0.5 * dt * k2, t[k] + 0.5 * dt)
+      k4 = self.vf(x + dt * k3, t[k] + dt)
+      x = x - dt * (k1 + 2*k2 + 2*k3 + k4)/6
+      #x = x - dt * f  
 
-    z0 = x
+      f = self.vf(x, t[k])
+      div = hutch_trace(f, x, eps)  # divergence estimate
+      delta_logp = delta_logp + dt * div  #log(p(x_{k_1}))= log(p(x_{k_1})) + tr(df/dx)*df
+    z = x
 
     # standard normal base log prob
-    log2pi = torch.log(torch.tensor(2.0 * math.pi, device=device, dtype=dtype))
-    logp0 = -0.5 * (z0 ** 2).sum(dim=-1) - 0.5 * self.x_dim * log2pi
+    logp0 = ( -0.5 * z**2 - 0.5 * torch.log( torch.tensor( 2.0 * torch.pi, device=z.device))).sum(dim=1)
 
-    return logp0 + logp_correction
+    #want to minimize the nll_loss: log(p(x)) ~ log(p(z_0)) - delta_log(p) #note our delta_logp si flipped sign since inverse int direction before
+    return logp0 - delta_logp
 
   @torch.no_grad()
-  def sample(self, c):
+  def generate(self, batch_size, c=None):
     """
-    Sample x1 ~ p(x|c) by sampling z0~N(0,I) and integrating forward.
+    Sample x ~ p(z|c) by sampling z~N(0,I) and integrating forward.
     c: [B, C]
-    returns x1: [B, D]
+    returns x [B, D]
     """
-    device, dtype = c.device, c.dtype
-    t = self._time_grid(device, dtype)
+    device = next(self.parameters()).device
+    #dtype=c.dtype
 
-    z = torch.randn(c.shape[0], self.x_dim, device=device, dtype=dtype)
+    t = self.time_grid.to(device=device)
+    z = torch.randn(batch_size, self.x_dim, device=device,)
 
     # integrate forward: x_{k+1} = x_k + dt * f(t_k, x_k, c)
-    x = z
+    dt=1/self.steps
     for k in range(0, len(t) - 1):
-      dt = t[k + 1] - t[k]
-      f = self.vf(t[k], x, c)
-      x = x + dt * f
+      k1 = self.vf(z, t[k])
+      k2 = self.vf(z + 0.5 * dt * k1, t[k] + 0.5 * dt)
+      k3 = self.vf(z + 0.5 * dt * k2, t[k] + 0.5 * dt)
+      k4 = self.vf(z + dt * k3, t[k] + dt)
+      z = z + dt * ( k1 + 2*k2 + 2*k3 + k4) / 6.0
+
+      #f = self.vf(z, t[k], c)
+      #z = z + dt * f
+    x=z
 
     return x
 
-class model_transformer_CNF(nn.Module):
+class model_CNF(nn.Module):
   """
   Transformer context encoder + CNF head for conditional density p(x_{t+1} | x_{<=t}).
   This produces a likelihood-based model (harder constraints require bounded transforms; CNF itself is on R^D).
   """
-  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128, cnf_hidden=128, cnf_steps=8):
+  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128, cnf_hidden=128, cnf_steps=25):
     super().__init__()
     self.input_dim = input_dim
     self.embed_dim = embed_dim
 
+    #FIXME
     # same embedding + transformer encoder as the autoregression model
-    self.embed = nn.Linear(input_dim, embed_dim)
-    encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=0.1, batch_first=True)
-    self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+    #self.embed = nn.Linear(input_dim, embed_dim)
+    #encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=0.1, batch_first=True)
+    #self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
 
     # project hidden -> context vector for CNF
-    self.ctx = nn.Linear(embed_dim, embed_dim)
+    #self.ctx = nn.Linear(embed_dim, embed_dim)
 
-    # CNF head models distribution of the next token x_{t+1} given context
-    self.cnf = ConditionalCNF(x_dim=input_dim, c_dim=embed_dim, hidden=cnf_hidden, steps=cnf_steps)
+    #remove steps
+    self.cnf = CNFDynamics(x_dim=input_dim, c_dim=0, hidden_dim=cnf_hidden, steps=cnf_steps)
 
-  def forward_context(self, x):
-    """
-    x: [B, L, D] (inputs up to time t)
-    returns c: [B, L, C] context vectors aligned with each token
-    """
-    seq_len = x.shape[1]
-    h = self.embed(x)
-
-    # causal mask (no look-ahead)
-    mask = torch.triu(torch.ones(seq_len, seq_len, device=h.device), diagonal=1).bool()
-    h = self.encoder(h, mask=mask)
-
-    return self.ctx(h)
-  
   def forward(self, x):
     # Safe forward for debugging / torchinfo; does NOT compute likelihood.
-    return self.forward_context(x)
+    t = torch.zeros( x.shape[0], 1, device=x.device, dtype=x.dtype)
+    return self.cnf.vf(x, t)
 
-
-  def nll(self, inputs, targets, mask=None):
-    """
-    Negative log likelihood for all target tokens.
-    inputs:  [B, L, D]  (x_0..x_{L-1})
-    targets: [B, L, D]  (x_1..x_{L})
-    mask:    [B, L] bool, True=valid token
-    returns scalar loss (sum over valid tokens)
-    """
-    c = self.forward_context(inputs)  # [B, L, C]
-    B, L, D = targets.shape
-
-    x = targets.reshape(B * L, D)
-    cc = c.reshape(B * L, c.shape[-1])
-
-    logp = self.cnf.log_prob(x, cc)   # [B*L]
-    nll = -logp
-
-    if mask is not None:
-      m = mask.reshape(B * L)
-      nll = nll[m]
-
-    return nll.sum()
+  def nll_loss(self, x):
+    return -self.cnf(x)
 
   @torch.no_grad()
-  def generate(self, x_init, steps):
-    """
-    Autoregressive sampling:
-    given initial token(s) x_init: [B, L0, D]
-    generate 'steps' new tokens by sampling CNF at each step.
-    """
-    seq = x_init.clone()
-    for _ in range(steps):
-      c = self.forward_context(seq)      # [B, L, C]
-      c_last = c[:, -1, :]               # [B, C]
-      x_next = self.cnf.sample(c_last)   # [B, D]
-      seq = torch.cat([seq, x_next.unsqueeze(1)], dim=1)
-    return seq
+  def generate(self, out_dimensions):
+
+    samples=self.cnf.generate(batch_size=out_dimensions[0])
+    samples = samples.view(out_dimensions)
+    return samples
+
+#==============================================================================================
+# Continuous flow matching
+class FlowMatching(nn.Module):
+    def __init__( self, x_dim, c_dim=0, hidden_dim=128, steps=50,):
+        super().__init__()
+
+        self.x_dim=x_dim
+        self.steps=steps
+
+        self.vf=VectorFieldNN( x_dim, c_dim, hidden_dim=hidden_dim)
+        self.register_buffer( "time_grid", torch.linspace(0,1,steps+1))
+
+    def loss(self, x1):
+        B=x1.shape[0]
+        device=x1.device
+
+        x0=torch.randn_like(x1)
+
+        t=torch.rand(B,1,device=device)
+
+        # probability path
+
+        xt=(1-t)*x0+t*x1
+
+        #sigma=1e-4
+        #eps=torch.randn_like(x1)
+        #xt=(1-(1-sigma)*t)*x0+t*x1+sigma*eps
+
+        # target velocity
+
+        ut=x1-x0
+
+        pred=self.vf(xt,t)
+
+        loss=((pred-ut)**2).sum(-1).mean()
+
+        return loss
+
+    @torch.no_grad()
+    def generate(self,batch_size):
+        device=next(self.parameters()).device
+
+        x=torch.randn( batch_size, self.x_dim, device=device)
+
+        t=self.time_grid.to(device)
+
+        dt=1/self.steps
+
+        for k in range(len(t)-1):
+            k1=self.vf(x,t[k])
+            k2=self.vf( x+0.5*dt*k1, t[k]+0.5*dt)
+            k3=self.vf( x+0.5*dt*k2, t[k]+0.5*dt)
+            k4=self.vf( x+dt*k3, t[k]+dt)
+
+            x=x+dt*(k1+2*k2+2*k3+k4)/6
+
+        return x
+
+class model_FM(nn.Module):
+    def __init__( self, input_dim, hidden_dim=128, steps=50):
+        super().__init__()
+
+        self.fm=FlowMatching( x_dim=input_dim, hidden_dim=hidden_dim, steps=steps)
+
+    def forward(self,x):
+        t=torch.zeros( x.shape[0], 1, device=x.device, dtype=x.dtype)
+
+        return self.fm.vf(x,t)
+
+    def nll_loss(self,x):
+        return self.fm.loss(x)
+
+    @torch.no_grad()
+    def generate(self,out_dimensions):
+
+        samples=self.fm.generate( batch_size=out_dimensions[0])
+
+        return samples.view(out_dimensions)
 
 #==============================================================================================
 # Custom vanillar NFlows, not working great
@@ -717,7 +771,6 @@ class model_normalizing_flow(nn.Module): #Using normflows package
 
 ################################
 # Diffusion model
-
 class DiffusionMLP(nn.Module):
     '''
     Simple MLP noise predictor for diffusion. Learning cumulative added noise epsilon(x_{t-1}, t)
@@ -1275,14 +1328,23 @@ def resolved_model_mode(args_or_dict):
 def build_unbinned_model(input_dim, args_or_dict):
     get = lambda key, default=None: _config_get(args_or_dict, key, default)
     if _as_bool(get("cnf", False)):
-        return model_transformer_CNF(
-            input_dim=input_dim[2],
+        return model_CNF(
+            input_dim=input_dim[1]*input_dim[2],
             embed_dim=_as_int(get("embed_dim", 256), 256),
             num_heads=_as_int(get("num_heads", 1), 1),
             num_layers=_as_int(get("num_layers", 2), 2),
             ff_dim=_as_int(get("ff_dim", 128), 128),
             cnf_hidden=_as_int(get("cnf_hidden", get("flow_hidden", 128)), 128),
-            cnf_steps=_as_int(get("cnf_steps", 8), 8),
+            #cnf_steps=_as_int(get("cnf_steps", 8), 8),
+        )
+    if _as_bool(get("fm", False)):
+        return model_FM(
+            input_dim=input_dim[1]*input_dim[2],
+            hidden_dim=_as_int(get("embed_dim", 256), 256),
+            #num_heads=_as_int(get("num_heads", 1), 1),
+            #num_layers=_as_int(get("num_layers", 2), 2),
+            #ff_dim=_as_int(get("ff_dim", 128), 128),
+            steps=_as_int(get("cnf_steps", 50), 50),
         )
     if _as_bool(get("mdn", False)):
         return model_autoregressive_transformer_MDN(
@@ -1296,7 +1358,7 @@ def build_unbinned_model(input_dim, args_or_dict):
     if _as_bool(get("nf", False)):
         return model_normalizing_flow(
             input_dim=input_dim[1]*input_dim[2],
-            num_flows=10,
+            num_flows=6,
             latent_dim=128,
         )
     if _as_bool(get("diff", False)):
@@ -1771,6 +1833,7 @@ def parse_input():
 
     #
     p.add_argument("--nf", action="store_true", default=False, help="Use NormFlows")
+    p.add_argument("--fm", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
     p.add_argument("--diff", action="store_true", default=False, help="Use Masked autoregressive flow")
     p.add_argument("--sde", action="store_true", default=False, help="Use Masked autoregressive flow")
 
@@ -2392,10 +2455,11 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       for batch, X in enumerate(test_loader):
         if args.plot_max_batches is not None and batch >= args.plot_max_batches:
           break
+        if batch>1000: break #FIXME
 
-        X = X.to(device)
+        #X = X.to(device)
         start = X[:, 0, :].unsqueeze(1)
-        original_chunks.append(X.cpu())
+        original_chunks.append(X)
 
         for imodel, model in enumerate(models):
           if not active_models[imodel]:
@@ -2407,6 +2471,10 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
               elif args.diff:
                   generated_seq = model.generate(out_dimensions=X.shape)
               elif args.sde:
+                  generated_seq = model.generate(out_dimensions=X.shape)
+              elif args.cnf:
+                  generated_seq = model.generate(out_dimensions=X.shape)
+              elif args.fm:
                   generated_seq = model.generate(out_dimensions=X.shape)
               else:
                   generated_seq = model.generate(start, steps=X.shape[1] - 1)
@@ -2439,7 +2507,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
             print("Took %.2e ms to generate"%((time.time()-starttime)*1000), flush=True)
             printed_example = True
 
-          generated_chunks[imodel].append(generated_seq.cpu())
+          generated_chunks[imodel].append(generated_seq)
 
       if len(original_chunks) == 0:
         raise ValueError("No validation batches were plotted")
@@ -2465,8 +2533,8 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
           if reason is not None
       ]
 
-      flat_original = original.flatten(0, 1).numpy()
-      flat_generated_list = [g.flatten(0, 1).numpy() for g in generated_list]
+      flat_original = original.flatten(0, 1).cpu().numpy()
+      flat_generated_list = [g.flatten(0, 1).cpu().numpy() for g in generated_list]
       plot_inputs = [flat_original] + flat_generated_list
 
       if make_projection:
@@ -2508,6 +2576,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
           unavailable_notes=unavailable_notes,
       )
 
+      #Make plot
       if args.input_format == "ktdr":
         lund_inputs = plot_inputs
       else:

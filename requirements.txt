@@ -19,3 +19,4 @@ root
 uproot 
 fastjet
 normflows
+torchdiffeq

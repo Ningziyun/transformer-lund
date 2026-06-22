@@ -18,6 +18,14 @@ def evaluate_loss(model,X,mask,args):
     X = X.view(X.shape[0], -1)
     loss=model.mse_loss(X).sum()
     return loss
+  elif args.cnf:
+    X = X.view(X.shape[0], -1)
+    loss = model.nll_loss(X).sum()
+    return loss
+  elif args.fm:
+    X = X.view(X.shape[0], -1)
+    loss = model.nll_loss(X).sum()
+    return loss
 
   inputs = X[:, :-1, :]   # all but last
   targets = X[:, 1:, :]   # all but first
@@ -31,7 +39,7 @@ def evaluate_loss(model,X,mask,args):
   
   # CNF mode: likelihood-based loss
   if args.cnf:
-    loss = model.nll(inputs, targets, mask=mask)
+    loss = model.nll_loss(inputs, targets, mask=mask)
   elif args.mdn:
     loss = model.nll_loss(pred, targets, mask)
     loss=loss.sum()
@@ -56,9 +64,6 @@ def train(model,train_loader,args):
   n_batches=0
   for batch, X in enumerate(train_loader):
       mask=None
-      if args.cond_nf:
-        mask=X[1]
-        X=X[0]
       X = X.to(device)
       optimizer.zero_grad()
 
@@ -91,6 +96,7 @@ def train(model,train_loader,args):
       if loss.item()<bestloss: bestloss=loss.item()
       epoch_loss += loss.item()
       n_batches += 1
+      #if batch>500: break #FIXME
 
   avg_loss = epoch_loss / max(n_batches, 1)
   print(f"train loss={avg_loss} best_batch_loss={bestloss}", flush=True)
@@ -105,9 +111,6 @@ def test(model, test_loader, args):
     epochloss = 0.0
     for batch, X in enumerate(test_loader):
       mask=None
-      if args.cond_nf:
-        mask=X[1]
-        X=X[0]
       X = X.to(device)
       loss = evaluate_loss(model, X, mask, args)
       if not torch.isfinite(loss):
@@ -128,9 +131,6 @@ def test(model, test_loader, args):
     epochloss = 0.0
     for batch, X in enumerate(test_loader):
       mask=None
-      if args.cond_nf:
-        mask=X[1]
-        X=X[0]
       X = X.to(device)
       loss = evaluate_loss(model, X, mask, args)
       if not torch.isfinite(loss):
@@ -193,10 +193,7 @@ if __name__ == "__main__":
           model = loaded
         print("Loaded model", flush=True)
     else:
-        if args.cond_nf:
-            model = build_unbinned_model(X_example[0].shape, args)
-        else:
-            model = build_unbinned_model(X_example.shape, args)
+        model = build_unbinned_model(X_example.shape, args)
 
     save_arguments(args)
     append_training_metadata(args)
@@ -226,15 +223,20 @@ if __name__ == "__main__":
     elif args.sde:
       X_example = X_example.view(X_example.shape[0], -1)
       summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-    elif not args.cnf:
+    elif args.cnf:
+      X_example = X_example.view(X_example.shape[0], -1)
+      print("Input shape,",X_example.shape, flush=True)
+      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(X_example).shape,flush=True)
+    elif args.fm:
+      X_example = X_example.view(X_example.shape[0], -1)
+      print("Input shape,",X_example.shape, flush=True)
+      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(X_example).shape,flush=True)
+    else:
       print("Input shape,",X_example.shape, flush=True)
       summary(model, input_data=[X_example[:,:-1,:]], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example[:,:-1,:]).shape, flush=True)
-    else:
-      print("Input shape,",X_example.shape, flush=True)
-      # Skip torchinfo for CNF to avoid autograd-mode issues.
-      n_params = sum(p.numel() for p in model.parameters())
-      print(f"Model params: {n_params}", flush=True)
     model.to(device)
 
     optimizer = make_optimizer(args, model)
@@ -361,3 +363,4 @@ if __name__ == "__main__":
         labels=["original", "generated"],
         make_projection=True,
       )
+    print("Done")
