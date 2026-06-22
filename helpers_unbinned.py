@@ -199,17 +199,21 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       #Get the usual network result, note we overloaded the original forward to give MDN values and not truly auto-regressive
       encoded=super().forward(x) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
 
-      # split into mixture components
+      # split into mixture components: here alpha=norm (logits will softmax later), mu=center, sigma2=variance
       encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.input_dim)) #[Nbatch,Nconst,Nmix,(1+2*Ninput)]
       alpha=encoded[:,:,:,0] #[batch,Nconst,Nmix]
       mu=encoded[:,:,:,1:self.input_dim+1] #[batch,Nconst,Nmix,Ninput]
-      sigma=encoded[:,:,:,self.input_dim+1:] #[batch,Nconst,Nmix,Ninput]
+      sigma2=encoded[:,:,:,self.input_dim+1:] #[batch,Nconst,Nmix,Ninput]
 
       # constraints, don't do in-line replacements of tensors as can mess with gradients
-      alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
-      sigma=sigma.clamp(min=0.001) #make positive
+      #alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
+      sigma2=sigma2.clamp(0.001, 10)
 
-      return torch.cat([alpha.unsqueeze(-1),mu,sigma],dim=-1)
+      assert torch.isfinite(alpha).all()
+      assert torch.isfinite(mu).all()
+      assert torch.isfinite(sigma2).all()
+
+      return torch.cat([alpha.unsqueeze(-1),mu,sigma2],dim=-1)
 
   def nll_loss(self, inputs, targets, mask=None):
     ninputs=targets.shape[-1]
@@ -224,12 +228,12 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
     # central term, sum over the input vector dimension: (sum_{j=1}^{N_input} (x-mu_j)^2/2sigma_j^2)
     Z_term = torch.sum(((targets - mu)**2 / (2*sig2)), dim=-1)  #[Nbatch,NConst,Nmix]
 
-    # Norm term: sum_{j=1}^{N_input} 0.5*log(det|Sigma|)+N_input/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
-    sig_term = 0.5*torch.sum(sig2+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
-    #sig_term = 0.5*torch.sum(sig2, dim=-1)
+    # Norm term: sum_{j=1}^{N_input} 0.5*log(det|covariance|)+N_input/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
+    sig_term = 0.5*torch.sum(torch.log(sig2)+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
 
-    #the mixture term: log(alpha_i)
-    alpha_term=torch.log(alpha)
+    #the mixture term: log(alpha_i), al
+    #alpha_term=torch.log(alpha)
+    alpha_term=F.log_softmax(alpha, dim=-1) #more stable to log_softmax
 
     #Total log prob of the datapoint, sum over mixture: log(p_{sample})=log(sum_{i=1}^{N_mix} alpha,i*exp{-sig_term,i}*exp{-Z_term,i})
     #Make simpler and more stabler by doing the log-sum-exp: log(p_sample)=log(sum_{i=1}^{N_mix} exp{alpha_term,i - Z_term,i -exp{sig_term,i})
@@ -251,7 +255,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
           pred = self.forward(seq) #get the alpha,mu,sigma values
 
           #Take the last nconst and get the components
-          alpha=pred[:,-1,:,0] # [Nbatch, Nmix]
+          alpha=F.softmax(pred[:,-1,:,0], dim=-1) # [Nbatch, Nmix]
           mu=pred[:,-1,:, 1:ninputs+1] #[Nbatch,Nmix,Ninput]
           sig2=pred[:,-1,:, ninputs+1:] #[Nbatch,Nmix,Ninput]
 
@@ -260,7 +264,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
           # Sample the whole MDN distribution by getting the mu and cov-matrix for this component and sample from it
           loc=mu[batch_idx,comp,:] #(Nbatch,Ninput)
-          covmatrix = torch.diag_embed(sig2[batch_idx,comp,:]**2) # (Nbatch, Ninput, Ninput)
+          covmatrix = torch.diag_embed(sig2[batch_idx,comp,:]) # (Nbatch, Ninput, Ninput)
           dist = MultivariateNormal(loc,covmatrix)
           next_pred=dist.sample().unsqueeze(dim=1)
           seq = torch.cat([seq, next_pred], dim=1) #append it
