@@ -10,6 +10,7 @@ import csv
 import re
 import textwrap
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 from tqdm import tqdm
 import argparse
@@ -94,7 +95,7 @@ class constit_dataset(torch.utils.data.Dataset):
       self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
 
   def __getitem__(self, index):
-    inputs=np.array([self.E[index],self.px[index],self.px[index],self.pz[index]])
+    inputs=np.array([self.E[index],self.px[index],self.py[index],self.pz[index]])
     if self.add_stop:
       inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
@@ -1560,6 +1561,8 @@ def build_run_caption(meta, fallback=None):
     lr = meta.get("lr", "?")
     epochs = meta.get("epochs", meta.get("total_epochs", None))
     scheduler = meta.get("scheduler", "none")
+    input_format = meta.get("input_format", meta.get("input-format", None))
+    n_mix = meta.get("n_mix", meta.get("n-mix", None))
     best_epoch_display = _display_epoch_from_meta(meta, "best_epoch")
     epoch_display = _display_epoch_from_meta(meta, "epoch")
 
@@ -1578,7 +1581,12 @@ def build_run_caption(meta, fallback=None):
     if best_epoch_display is not None and (artifact_label is None or not artifact_label.startswith("best")):
         first_line.append(f"best ep {best_epoch_display}")
 
-    second_line = [f"bs {batch_size}", f"lr {_format_scalar(lr)}"]
+    second_line = []
+    if input_format is not None:
+        second_line.append(str(input_format))
+    if n_mix is not None and _as_bool(meta.get("mdn", False)):
+        second_line.append(f"{n_mix} Gauss")
+    second_line.extend([f"bs {batch_size}", f"lr {_format_scalar(lr)}"])
     if epochs is not None:
         second_line.append(f"tot {epochs}")
 
@@ -1935,10 +1943,37 @@ def parse_input():
         default=False,
         help="Also save log-y 1D histograms",
     )
+    p.add_argument(
+        "--hist-ratio-diff",
+        "--hist-diff-ratio",
+        action="store_true",
+        default=False,
+        help="Also save generated-vs-original relative difference plots for multi-sample 1D/2D histograms",
+    )
+    p.add_argument(
+        "--hist-ratio-min-count",
+        type=int,
+        default=5,
+        help="Mask 2D relative-difference bins with fewer original entries than this",
+    )
+    p.add_argument(
+        "--hist-ratio-vmax",
+        type=float,
+        default=1.0,
+        help="Symmetric color limit for 2D fractional relative-difference plots",
+    )
     return p.parse_args()
 
 def save_arguments(args):
     tmp = args.log_dir
+    if getattr(args, "contin", False):
+        os.makedirs(tmp, exist_ok=True)
+        with open(os.path.join(tmp, "arguments.txt"), "w") as f:
+            arg_dict = vars(args)
+            for k, v in arg_dict.items():
+                f.write(f"{k:20s} {v}\n")
+        return args
+
     i = 0
     while os.path.isdir(tmp):
         i += 1
@@ -2196,6 +2231,163 @@ def resolve_hist2d_shape(nplots, hist2d_shape=None):
 def resolve_hist2d_layout(nplots, hist2d_layout=None):
   return resolve_hist2d_shape(nplots, hist2d_layout)
 
+def _default_hist1d_ranges(inputs, display_order, quantiles=(0.5, 99.5), margin_fraction=0.05):
+    ranges = []
+    reference = inputs[0]
+    for ii in range(reference.shape[1]):
+        feature_idx = display_order[ii] if ii < len(display_order) else ii
+        values = reference[:, feature_idx]
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            ranges.append([-1.0, 1.0])
+            continue
+
+        vmin, vmax = np.percentile(values, quantiles)
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+            vmin = np.min(values)
+            vmax = np.max(values)
+
+        margin = margin_fraction * (vmax - vmin)
+        if margin == 0:
+            margin = 1.0
+        ranges.append([vmin - margin, vmax + margin])
+    return ranges
+
+def _symmetric_limit(values, fallback=1.0):
+    finite = []
+    for value in values:
+        arr = np.asarray(value)
+        arr = arr[np.isfinite(arr)]
+        if arr.size > 0:
+            finite.append(np.abs(arr))
+    if not finite:
+        return fallback
+    merged = np.concatenate(finite)
+    if merged.size == 0:
+        return fallback
+    vmax = np.percentile(merged, 99.0)
+    vmax = max(vmax, np.max(merged) if vmax == 0 else vmax)
+    return vmax if vmax > 0 else fallback
+
+def plot_combined_1dhist_ratio_diff(
+    inputs,
+    labels=None,
+    out_dir="./Plots/",
+    hist1d_ranges=None,
+    hist1d_bins=30,
+    logy=False,
+    out_name=None,
+    unavailable_notes=None,
+    min_reference_count=5,
+    max_abs_diff=1.0,
+):
+    if len(inputs) <= 1:
+        return
+
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    if labels is None:
+        labels = [f"sample_{i}" for i in range(len(inputs))]
+    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
+    comparison_labels = diff_labels if len(diff_labels) > 0 else labels[1:]
+
+    Ndim = inputs[0].shape[1]
+    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
+
+    if hist1d_ranges is None:
+        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
+
+    fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
+    if Ndim == 1:
+        axs = [axs]
+
+    axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
+    linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
+
+    for ii in range(Ndim):
+        feature_idx = display_order[ii] if ii < len(display_order) else ii
+        reference_counts, bin_edges = np.histogram(
+            inputs[0][:, feature_idx],
+            bins=hist1d_bins,
+            range=hist1d_ranges[ii],
+            density=False,
+        )
+        reference_total = np.sum(reference_counts)
+        reference_density = reference_counts / reference_total if reference_total > 0 else reference_counts
+        populated_reference = reference_counts >= max(1, int(min_reference_count))
+        centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        ratio_values = []
+
+        for jj, arr in enumerate(inputs[1:], start=1):
+            comparison_counts, _ = np.histogram(
+                arr[:, feature_idx],
+                bins=hist1d_bins,
+                range=hist1d_ranges[ii],
+                density=False,
+            )
+            comparison_total = np.sum(comparison_counts)
+            comparison_density = comparison_counts / comparison_total if comparison_total > 0 else comparison_counts
+            ratio = np.full_like(reference_density, np.nan, dtype=float)
+            np.divide(
+                reference_density - comparison_density,
+                reference_density,
+                out=ratio,
+                where=populated_reference & (reference_density > 0.0),
+            )
+            ratio_values.append(ratio)
+            label_idx = jj - 1
+            axs[ii].step(
+                centers,
+                ratio,
+                where="mid",
+                linestyle=linestyles[label_idx % len(linestyles)],
+                label=comparison_labels[label_idx] if label_idx < len(comparison_labels) else f"sample_{jj}",
+            )
+
+        axs[ii].axhline(0.0, color="black", linewidth=0.8, alpha=0.55)
+        axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
+        axs[ii].set_xlabel("value")
+        axs[ii].set_ylabel("Fractional diff" + (" (symlog)" if logy else ""))
+
+        ymax = _symmetric_limit(ratio_values, fallback=1.0) * 1.15
+        if max_abs_diff is not None and max_abs_diff > 0:
+            ymax = min(ymax, float(max_abs_diff))
+        if logy:
+            axs[ii].set_yscale("symlog", linthresh=1.0)
+            axs[ii].set_ylim(-ymax, ymax)
+        else:
+            axs[ii].set_ylim(-ymax, ymax)
+
+    handles, legend_labels = axs[0].get_legend_handles_labels()
+    note_lines = _plot_note_from_common(common_items, unavailable_notes)
+    note_lines.append(
+        f"Masked original bins with < {max(1, int(min_reference_count))} entries; y clipped at +/- {max_abs_diff:g}"
+        if max_abs_diff is not None and max_abs_diff > 0
+        else f"Masked original bins with < {max(1, int(min_reference_count))} entries"
+    )
+    bottom_edge = 0.20 if note_lines else 0.08
+    fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
+    if len(handles) > 0:
+        for ax in axs:
+            ax.legend(handles, legend_labels, loc="best", fontsize=8, framealpha=0.90)
+    if note_lines:
+        fig.text(
+            0.02,
+            0.02,
+            _wrapped_note(note_lines, width=145),
+            ha="left",
+            va="bottom",
+            fontsize=8,
+        )
+
+    if out_name is None:
+        out_name = "hist1d_ratio_diff"
+
+    fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
+    fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
+    plt.close(fig)
+
 def plot_combined_1dhist(
     inputs,
     labels=None,
@@ -2211,8 +2403,8 @@ def plot_combined_1dhist(
     Plot overlaid 1D histograms for Lund features.
 
     Expected feature order:
-      inputs[:, 0] = log(1/deltaR)
-      inputs[:, 1] = log(kt)
+      inputs[:, 0] = log(kt)
+      inputs[:, 1] = log(1/deltaR)
 
     The top panel is log(kt), and the bottom panel is log(1/deltaR).
     This matches the plotting convention used in plot_ublund.py.
@@ -2228,31 +2420,10 @@ def plot_combined_1dhist(
 
     linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
     Ndim = inputs[0].shape[1]
-    display_order = [1, 0] if Ndim >= 2 else list(range(Ndim))
+    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
 
     if hist1d_ranges is None:
-        hist1d_ranges = []
-
-        for ii in range(Ndim):
-            feature_idx = display_order[ii] if ii < len(display_order) else ii
-
-            all_values = []
-            for arr in inputs:
-                values = arr[:, feature_idx]
-                values = values[np.isfinite(values)]
-                all_values.append(values)
-
-            all_values = np.concatenate(all_values)
-
-            vmin = np.min(all_values)
-            vmax = np.max(all_values)
-
-            # Add a small margin so the edge bins are not clipped
-            margin = 0.05 * (vmax - vmin)
-            if margin == 0:
-                margin = 1.0
-
-            hist1d_ranges.append([vmin - margin, vmax + margin])
+        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
 
     fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
     if Ndim == 1:
@@ -2261,8 +2432,8 @@ def plot_combined_1dhist(
     axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
 
     for ii in range(Ndim):
-        # For ktdr input, column 0 is log(1/deltaR), column 1 is log(kt).
-        # Swap display order so the top panel is log(kt).
+        # For ktdr plots, keep the top panel aligned with the Lund y-axis:
+        # log(kt) first, then log(1/deltaR).
         feature_idx = display_order[ii] if ii < len(display_order) else ii
 
         all_hist_counts = []
@@ -2349,16 +2520,250 @@ def plot_combined_1dhist(
     fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
     plt.close(fig)
 
+def plot_lund_ratio_diff(
+    inputs,
+    labels=["original","generated","predicted"],
+    outdir="./Plots/",
+    hist2d_xrange=None,
+    hist2d_yrange=None,
+    hist2d_bins=(20, 20),
+    hist2d_shape=None,
+    hist2d_layout=None,
+    unavailable_notes=None,
+    min_reference_count=5,
+    max_abs_diff=1.0,
+):
+  if len(inputs) <= 1:
+    return
+
+  Ndim = inputs[0].shape[1]
+  if Ndim < 2:
+    return
+
+  unavailable_notes = unavailable_notes or []
+  if not os.path.exists(outdir):
+    os.makedirs(outdir)
+
+  Ndiff = len(inputs) - 1
+  Nplots = Ndiff + len(unavailable_notes)
+  if Nplots == 0:
+    return
+
+  diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
+  comparison_labels = diff_labels if len(diff_labels) > 0 else labels[1:]
+
+  mins = np.zeros(Ndim)
+  maxs = np.zeros(Ndim)
+  for ii in range(Ndim):
+    for jj in range(len(inputs)):
+      mins[ii] = min(mins[ii], np.min(inputs[jj][:, ii]))
+      maxs[ii] = max(maxs[ii], np.max(inputs[jj][:, ii]))
+
+  mins[1] = -3
+  maxs[0] = 8
+  x_range = hist2d_xrange if hist2d_xrange is not None else [mins[1], maxs[1]]
+  y_range = hist2d_yrange if hist2d_yrange is not None else [mins[0], maxs[0]]
+
+  reference_counts, x_edges, y_edges = np.histogram2d(
+      inputs[0][:, 1],
+      inputs[0][:, 0],
+      range=[x_range, y_range],
+      bins=hist2d_bins,
+      density=False,
+  )
+  reference_total = np.sum(reference_counts)
+  reference_density = reference_counts / reference_total if reference_total > 0 else reference_counts
+  populated_reference = reference_counts >= max(1, int(min_reference_count))
+
+  ratio_maps = []
+  for arr in inputs[1:]:
+    comparison_counts, _, _ = np.histogram2d(
+        arr[:, 1],
+        arr[:, 0],
+        range=[x_range, y_range],
+        bins=hist2d_bins,
+        density=False,
+    )
+    comparison_total = np.sum(comparison_counts)
+    comparison_density = comparison_counts / comparison_total if comparison_total > 0 else comparison_counts
+    ratio_map = np.full_like(reference_density, np.nan, dtype=float)
+    np.divide(
+        reference_density - comparison_density,
+        reference_density,
+        out=ratio_map,
+        where=populated_reference & (reference_density > 0.0),
+    )
+    ratio_maps.append(ratio_map)
+
+  if hist2d_shape is None:
+    hist2d_shape = hist2d_layout
+  nrows, ncols = resolve_hist2d_shape(Nplots, hist2d_shape)
+  fig, axs = plt.subplots(
+      nrows,
+      ncols,
+      figsize=(5.0 * ncols + 1.0, 4.4 * nrows + 0.6),
+      squeeze=False,
+  )
+  flat_axs = axs.ravel()
+  used_axs = flat_axs[:Nplots]
+
+  vmax = _symmetric_limit(ratio_maps, fallback=1.0)
+  if max_abs_diff is not None and max_abs_diff > 0:
+    vmax = min(vmax, float(max_abs_diff))
+  norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+  cmap = plt.get_cmap("coolwarm").copy()
+  cmap.set_bad(color="#d9d9d9")
+  last_image = None
+
+  for jj, ratio_map in enumerate(ratio_maps):
+    ax = used_axs[jj]
+    last_image = ax.imshow(
+        ratio_map.T,
+        origin="lower",
+        extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
+        aspect="auto",
+        cmap=cmap,
+        norm=norm,
+    )
+    ax.set_title(comparison_labels[jj] if jj < len(comparison_labels) else f"sample_{jj + 1}", pad=8, fontsize=10)
+    ax.set_xlabel(r"$\log(1/\Delta R)$")
+    ax.set_ylabel(r"$\log(k_t)$")
+
+  for offset, (label, reason) in enumerate(unavailable_notes):
+    ax = used_axs[Ndiff + offset]
+    ax.set_title(label)
+    ax.text(
+        0.5,
+        0.5,
+        f"Plot unavailable\n{reason}",
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        fontsize=10,
+        wrap=True,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+  for ax in flat_axs[Nplots:]:
+    ax.set_visible(False)
+
+  if last_image is not None:
+    cbar = fig.colorbar(last_image, ax=used_axs.tolist(), fraction=0.022, pad=0.055, extend="both")
+    cbar.set_label(r"$(original - generated) / original$")
+
+  fig.suptitle("Lund Plane Fractional Difference", fontsize=14, y=0.985)
+  note_lines = _plot_note_from_common(common_items, unavailable_notes)
+  note_lines.append(
+      f"Masked original bins with < {max(1, int(min_reference_count))} entries; color clipped at +/- {vmax:.3g}"
+  )
+  bottom_margin = 0.13 if note_lines else 0.09
+  fig.subplots_adjust(left=0.08, right=0.88, bottom=bottom_margin, top=0.90, wspace=0.30, hspace=0.55)
+  if note_lines:
+    fig.text(
+        0.08,
+        0.025,
+        _wrapped_note(note_lines, width=150),
+        ha="left",
+        va="bottom",
+        fontsize=8,
+    )
+
+  name = "lund_ratio_diff"
+  fig.savefig(os.path.join(outdir, name + ".png"), bbox_inches="tight")
+  fig.savefig(os.path.join(outdir, name + ".pdf"), bbox_inches="tight")
+  plt.close(fig)
+
 def plot_combined_losses(run_infos, out_dir):
     diff_labels, common_items = _caption_comparison(
         ["original"] + [info.get("caption", info.get("checkpoint_path", f"run {i + 1}")) for i, info in enumerate(run_infos)],
         first_run_idx=1,
     )
+    os.makedirs(out_dir, exist_ok=True)
     metric_names = set()
     for info in run_infos:
         for metric_name, curve in info.get("loss_curves_csv", {}).items():
             if curve is not None and len(curve) > 0:
                 metric_names.add(metric_name)
+
+    if "self_loss" in metric_names and "test_loss" in metric_names:
+        fig, ax = plt.subplots(figsize=(7.6, 5.0))
+        used_any = False
+        prop_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+        markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+        split_styles = {
+            "Train": ("self_loss", "-"),
+            "Val": ("test_loss", "--"),
+        }
+        for irun, info in enumerate(run_infos):
+            label_base = diff_labels[irun] if irun < len(diff_labels) else f"run {irun + 1}"
+            color = prop_cycle[irun % len(prop_cycle)] if prop_cycle else None
+            for split_label, (metric_name, linestyle) in split_styles.items():
+                curve = info.get("loss_curves_csv", {}).get(metric_name, None)
+                if curve is None or len(curve) == 0:
+                    continue
+                y = np.asarray(curve, dtype=float)
+                x = np.arange(1, len(y) + 1)
+                finite = np.isfinite(y)
+                truncated = False
+                if np.any(~finite):
+                    first_bad = int(np.argmax(~finite))
+                    y = y[:first_bad]
+                    x = x[:first_bad]
+                    truncated = True
+                if len(y) == 0 or not np.all(np.isfinite(y)):
+                    continue
+
+                label = f"{label_base} {split_label}"
+                if truncated:
+                    label = f"{label}\nvalid through ep {len(y)}"
+                ax.plot(
+                    x,
+                    y,
+                    color=color,
+                    linestyle=linestyle,
+                    marker=markers[irun % len(markers)],
+                    markersize=4,
+                    markevery=max(len(x) // 12, 1),
+                    linewidth=2.0,
+                    alpha=0.9 if split_label == "Train" else 0.8,
+                    label=label,
+                )
+                used_any = True
+
+        if used_any:
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss")
+            ax.set_title("Train and Validation Loss vs Epoch")
+            ax.grid(True, alpha=0.35)
+            legend_kwargs = dict(fontsize=8, framealpha=0.92)
+            if len(run_infos) <= 4:
+                ax.legend(loc="best", **legend_kwargs)
+                bottom_edge = 0.14 if common_items else 0.06
+            else:
+                ax.legend(
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, -0.18),
+                    ncol=2,
+                    **legend_kwargs,
+                )
+                bottom_edge = 0.30 if common_items else 0.24
+            fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
+            note_lines = _plot_note_from_common(common_items)
+            if note_lines:
+                fig.text(
+                    0.02,
+                    0.02,
+                    _wrapped_note(note_lines, width=130),
+                    ha="left",
+                    va="bottom",
+                    fontsize=8,
+                )
+            fig.savefig(os.path.join(out_dir, "loss_combined__train_val.png"), bbox_inches="tight")
+            fig.savefig(os.path.join(out_dir, "loss_combined__train_val.pdf"), bbox_inches="tight")
+            fig.savefig(os.path.join(out_dir, "loss_combined__training_and_val_loss.png"), bbox_inches="tight")
+            fig.savefig(os.path.join(out_dir, "loss_combined__training_and_val_loss.pdf"), bbox_inches="tight")
+        plt.close(fig)
 
     for metric_name in sorted(metric_names):
         fig, ax = plt.subplots(figsize=(7.2, 4.8))
@@ -2595,6 +3000,20 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       )
 
       #Make plot
+      if args.hist_ratio_diff and len(plot_inputs) > 1:
+        plot_combined_1dhist_ratio_diff(
+            plot_inputs,
+            labels=active_labels,
+            out_dir=args.log_dir,
+            hist1d_ranges=hist1d_ranges,
+            hist1d_bins=args.hist1d_bins,
+            logy=False,
+            out_name="hist1d_ratio_diff",
+            unavailable_notes=unavailable_notes,
+            min_reference_count=args.hist_ratio_min_count,
+            max_abs_diff=args.hist_ratio_vmax,
+        )
+
       if args.input_format == "ktdr":
         lund_inputs = plot_inputs
       else:
@@ -2614,6 +3033,20 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
           hist2d_shape=args.hist2d_shape,
           unavailable_notes=unavailable_notes,
       )
+
+      if args.hist_ratio_diff and len(lund_inputs) > 1:
+        plot_lund_ratio_diff(
+            lund_inputs,
+            labels=active_labels,
+            outdir=args.log_dir,
+            hist2d_xrange=args.hist2d_xrange,
+            hist2d_yrange=args.hist2d_yrange,
+            hist2d_bins=args.hist2d_bins,
+            hist2d_shape=args.hist2d_shape,
+            unavailable_notes=unavailable_notes,
+            min_reference_count=args.hist_ratio_min_count,
+            max_abs_diff=args.hist_ratio_vmax,
+        )
 
 def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
 
@@ -2657,6 +3090,8 @@ def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
   ax.grid(True)
   fig.savefig(os.path.join(outdir,"loss_vs_epoch.png"))
   fig.savefig(os.path.join(outdir,"loss_vs_epoch.pdf"))
+  fig.savefig(os.path.join(outdir,"loss_train_val_vs_epoch.png"))
+  fig.savefig(os.path.join(outdir,"loss_train_val_vs_epoch.pdf"))
   plt.close(fig)
 
   save_loss_csv(
