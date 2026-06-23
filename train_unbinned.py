@@ -27,23 +27,26 @@ def evaluate_loss(model,X,mask,args):
     loss = model.nll_loss(X).sum()
     return loss
 
-  inputs = X[:, :-1, :]   # all but last
-  targets = X[:, 1:, :]   # all but first
-  pred = model(inputs)       # (batch, seq_len-1, feature_dim)
-
-  #if args.mixed_loss:
-  #  pred[:,:,-1]=sigmoid(pred[:,:,-1])
-
-  #mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
-  mask=None
-  
-  # CNF mode: likelihood-based loss
-  if args.cnf:
-    loss = model.nll_loss(inputs, targets, mask=mask)
-  elif args.mdn:
-    loss = model.nll_loss(pred, targets, mask)
-    loss=loss.sum()
   else:
+    inputs = F.pad(input=X[:, :-1, :], pad=(0,0,1,0), mode='constant', value=0) #X[:, :-1, :]   # all but last, with a 0 start token at front #pad=pad(left, right, top, bottom))
+    targets = X # the whole f-vector
+    pred = model(inputs)       # (batch, seq_len-1, feature_dim)
+
+    #mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
+    mask=None
+
+    if args.mdn:
+        loss = model.nll_loss(pred, targets, mask)
+    else:
+        loss = model.mse_loss(pred, targets)
+    loss=loss.sum()
+
+  '''
+  else:
+    inputs = X[:, :-1, :]   # all but last
+    targets = X[:, 1:, :]   # all but first
+    pred = model(inputs)       # (batch, seq_len-1, feature_dim)
+
     if args.mixed_loss:
       lambd=1
       #print(loss_fn(pred[:,:,:-1],targets[:,:,:-1]).shape,loss_fn2(pred[:,:,-1],targets[:,:,-1]).shape)
@@ -54,6 +57,7 @@ def evaluate_loss(model,X,mask,args):
       loss=loss.sum()
     else:
       loss=loss[mask].sum() 
+  '''
 
   return loss
 
@@ -199,18 +203,6 @@ if __name__ == "__main__":
     append_training_metadata(args)
     print(f"Logging to {args.log_dir}", flush=True)
 
-    if args.cnf:
-      args.mdn = False
-      args.mixed_loss = False
-
-    #Set the loss
-    if not args.mdn and not args.cnf:
-      loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
-      if args.mixed_loss:
-        #loss_fn2 = nn.CrossEntropyLoss() #expects logits
-        loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
-        sigmoid=nn.Sigmoid()
-
     #Plot the model summary
     if args.nf:
       X_example = X_example.view(X_example.shape[0], -1)
@@ -233,10 +225,14 @@ if __name__ == "__main__":
       print("Input shape,",X_example.shape, flush=True)
       summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape,flush=True)
-    else:
+    elif args.mdn:
       print("Input shape,",X_example.shape, flush=True)
-      summary(model, input_data=[X_example[:,:-1,:]], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(X_example[:,:-1,:]).shape, flush=True)
+      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(X_example).shape, flush=True)
+    else:   
+      print("Input shape,",X_example.shape, flush=True)
+      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(X_example).shape, flush=True)
     model.to(device)
 
     optimizer = make_optimizer(args, model)

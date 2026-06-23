@@ -175,14 +175,26 @@ class model_autoregressive_transformer(nn.Module):
       encoded = self.encoder(x, mask=mask)  
       return self.deembed(encoded)  # (batch, seq_len, feature_dim)
 
+  def mse_loss(self, pred, targets):
+      loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
+      '''
+      if args.mixed_loss:
+        #loss_fn2 = nn.CrossEntropyLoss() #expects logits
+        loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
+        sigmoid=nn.Sigmoid()
+      '''
+
+      return loss_fn(pred,targets)
+
   @torch.no_grad()
-  def generate(self, x_init, steps):
-      seq = x_init.clone() #Start with a seed x[0] where rest is padded out
+  def generate(self, out_dimensions):
+      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2])
+      steps=out_dimensions[1]
       for ii in range(steps): #loop over length
           pred = self.forward(seq) #get next element prediction, gives you N prediction for N inputs
           next_pred = pred[:, -1:, :]  # Just take the last prediction which is new
           seq = torch.cat([seq, next_pred], dim=1) #append it to the sequence
-      return seq
+      return seq[:,1:,:]
 
 class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   #exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
@@ -246,10 +258,11 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       return -log_prob.sum() #Sum over all the training sample
 
   @torch.no_grad()
-  def generate(self, x_init, steps):
-      seq = x_init.clone()
-      ninputs=x_init.shape[-1]
-      batch_idx = torch.arange(x_init.shape[0]) #For some smoother slicing later
+  def generate(self, out_dimensions):
+      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2])
+      steps=out_dimensions[1]
+      ninputs=out_dimensions[-1]
+      batch_idx=torch.arange(out_dimensions[0]) #For some smoother slicing later
 
       for ii in range(steps):
           pred = self.forward(seq) #get the alpha,mu,sigma values
@@ -268,7 +281,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
           dist = MultivariateNormal(loc,covmatrix)
           next_pred=dist.sample().unsqueeze(dim=1)
           seq = torch.cat([seq, next_pred], dim=1) #append it
-      return seq
+      return seq[:,1:,:]
 
 # =========================
 # CNF (Continuous Normalizing Flow) components
@@ -2462,7 +2475,6 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         if batch>1000: break #FIXME
 
         #X = X.to(device)
-        start = X[:, 0, :].unsqueeze(1)
         original_chunks.append(X)
 
         for imodel, model in enumerate(models):
@@ -2480,8 +2492,10 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
                   generated_seq = model.generate(out_dimensions=X.shape)
               elif args.fm:
                   generated_seq = model.generate(out_dimensions=X.shape)
+              elif args.mdn:
+                  generated_seq = model.generate(out_dimensions=X.shape)
               else:
-                  generated_seq = model.generate(start, steps=X.shape[1] - 1)
+                  generated_seq = model.generate(out_dimensions=X.shape)
           except RuntimeError as err:
             reason = f"generation failed: {err}"
             print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)
