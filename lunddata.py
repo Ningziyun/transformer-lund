@@ -137,8 +137,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PX[-constituents.shape[0]:,:] = constituents[:,:,1]
           dset_PY[-constituents.shape[0]:,:] = constituents[:,:,2]
           dset_PZ[-constituents.shape[0]:,:] = constituents[:,:,3]
-          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,0]
-          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,1]
+          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,1]
+          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,0]
           Ncount+=1
 
       if file_format=="jetclass":
@@ -217,8 +217,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PX[-constituents.shape[0]:,:] = constituents[:,:,1]
           dset_PY[-constituents.shape[0]:,:] = constituents[:,:,2]
           dset_PZ[-constituents.shape[0]:,:] = constituents[:,:,3]
-          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,0]
-          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,1]
+          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,1]
+          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,0]
           batch+=1
           Ncount+=stop_index-index
 
