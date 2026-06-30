@@ -15,6 +15,12 @@ def _display_epoch_from_meta(meta, key):
         return None
     return index + 1
 
+def _epoch_display_from_index(epoch):
+    epoch_idx = _as_int(epoch, None)
+    if epoch_idx is None or epoch_idx < 0:
+        return None
+    return epoch_idx + 1
+
 def _artifact_label_from_name(name):
     if name is None:
         return None
@@ -52,7 +58,7 @@ def load_unbinned_model_for_plot(model_path, input_dim, device="cpu"):
         ):
             if key in obj:
                 metadata[key] = obj[key]
-        metadata["resolved_model_mode"] = obj.get("model_mode", resolved_model_mode(ckpt_args))
+        metadata["model_architecture_type"] = obj.get("model_mode", model_architecture_type(ckpt_args))
         model = build_unbinned_model(input_dim, ckpt_args)
         model.load_state_dict(obj["model_state_dict"])
     else:
@@ -63,7 +69,7 @@ def load_unbinned_model_for_plot(model_path, input_dim, device="cpu"):
     return model, metadata
 
 def build_run_caption(meta, fallback=None):
-    model_mode = meta.get("resolved_model_mode", meta.get("model_mode", "model"))
+    model_mode = meta.get("model_architecture_type", meta.get("model_mode", "model"))
     batch_size = meta.get("batch_size", meta.get("batch-size", "?"))
     lr = meta.get("lr", "?")
     epochs = meta.get("epochs", meta.get("total_epochs", None))

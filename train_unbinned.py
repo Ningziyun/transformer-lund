@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
+from helpers import *
 from helpers_unbinned import *
 from helpers_plotting import *
-from helpers import *
 
 class NonFiniteLossError(RuntimeError):
   pass
@@ -180,17 +180,16 @@ if __name__ == "__main__":
     X_example=next(iter(train_loader))
 
     # construct model
-    resume_state = None
     #If continuing from existing model
     if args.contin:
         model,resume_state=load_checkpoint(X_example.shape,args)
     #make usual model
     else:
         model = build_unbinned_model(X_example.shape, args)
+        resume_state = None
 
     #Make output directory and make metadata file to save arguments
     save_arguments(args)
-    append_training_metadata(args)
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary

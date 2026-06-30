@@ -14,6 +14,9 @@ import torch
 
 import helpers
 
+# ---------------------------------------------------------------------
+# Support functions
+# ---------------------------------------------------------------------
 def _parse_caption_fields(label):
     text = str(label).replace("\n", " ")
     fields = {}
@@ -101,22 +104,9 @@ def _wrapped_note(note_lines, width=150):
         return ""
     return "\n".join(textwrap.wrap(" | ".join(note_lines), width=width, break_long_words=False))
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# ---------------------------------------------------------------------
+# Main plots
+# ---------------------------------------------------------------------
 def projection_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots/", unavailable_notes=None):
 
   if not os.path.exists(outdir):
@@ -1029,7 +1019,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         projection_plot(
             plot_inputs,
             labels=active_labels,
-            outdir=args.log_dir,
+            outdir=args.plot_dir,
             unavailable_notes=unavailable_notes,
         )
 
@@ -1045,7 +1035,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       plot_combined_1dhist(
           plot_inputs,
           labels=active_labels,
-          out_dir=args.log_dir,
+          out_dir=args.plot_dir,
           hist1d_ranges=hist1d_ranges,
           hist1d_bins=args.hist1d_bins,
           logy=False,
@@ -1056,7 +1046,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       plot_combined_1dhist(
           plot_inputs,
           labels=active_labels,
-          out_dir=args.log_dir,
+          out_dir=args.plot_dir,
           hist1d_ranges=hist1d_ranges,
           hist1d_bins=args.hist1d_bins,
           logy=True,
@@ -1069,7 +1059,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         plot_combined_1dhist_ratio_diff(
             plot_inputs,
             labels=active_labels,
-            out_dir=args.log_dir,
+            out_dir=args.plot_dir,
             hist1d_ranges=hist1d_ranges,
             hist1d_bins=args.hist1d_bins,
             logy=False,
@@ -1091,7 +1081,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       lund_plot(
           lund_inputs,
           labels=active_labels,
-          outdir=args.log_dir,
+          outdir=args.plot_dir,
           hist2d_xrange=args.hist2d_xrange,
           hist2d_yrange=args.hist2d_yrange,
           hist2d_bins=args.hist2d_bins,
@@ -1103,7 +1093,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         plot_lund_ratio_diff(
             lund_inputs,
             labels=active_labels,
-            outdir=args.log_dir,
+            outdir=args.plot_dir,
             hist2d_xrange=args.hist2d_xrange,
             hist2d_yrange=args.hist2d_yrange,
             hist2d_bins=args.hist2d_bins,

@@ -243,11 +243,6 @@ def make_optimizer(args, model):
 # ---------------------------------------------------------------------
 # Functions to help with loading in/out config data
 # ---------------------------------------------------------------------
-def _config_get(args_or_dict, key, default=None):
-    if isinstance(args_or_dict, dict):
-        return args_or_dict.get(key, default)
-    return getattr(args_or_dict, key, default)
-
 def _as_bool(value):
     if isinstance(value, bool):
         return value
@@ -285,68 +280,77 @@ def _as_float(value, default=None):
     except (TypeError, ValueError):
         return default
 
-def _epoch_display_from_index(epoch):
-    epoch_idx = _as_int(epoch, None)
-    if epoch_idx is None or epoch_idx < 0:
-        return None
-    return epoch_idx + 1
+def _config_get(args_or_dict, key, default=None):
+    if isinstance(args_or_dict, dict):
+        return args_or_dict.get(key, default)
+    return getattr(args_or_dict, key, default)
 
-def resolved_model_mode(args_or_dict):
-    if _as_bool(_config_get(args_or_dict, "cnf", False)):
-        return "CNF"
-    if _as_bool(_config_get(args_or_dict, "mdn", False)):
-        return "MDN"
-    return "Regression"
+def model_architecture_type(args_or_dict):
+    isMDN=_as_bool(_config_get(args_or_dict, "mdn", False))
+    isCNF=_as_bool(_config_get(args_or_dict, "cnf", False))
+    isNF=_as_bool(_config_get(args_or_dict, "nf", False))
+    isFM=_as_bool(_config_get(args_or_dict, "fm", False))
+    isDiff=_as_bool(_config_get(args_or_dict, "diff", False))
+    isSDE=_as_bool(_config_get(args_or_dict, "sde", False))
+
+    if sum([isMDN,isCNF,isNF,isFM,isDiff,isSDE]) >1:
+        raise ValueError("Too many architecture specified at once")
+
+    if isMDN: return "MDN"
+    elif isCNF: return "CNF"
+    elif isNF: return "NF"
+    elif isFM: return "FM"
+    elif isDiff: return "Diff"
+    elif isSDE: return "SDE"
+    else: return "Trans"
 
 # ---------------------------------------------------------------------
 # Load model
 # ---------------------------------------------------------------------
 def build_unbinned_model(input_dim, args_or_dict):
-    get = lambda key, default=None: _config_get(args_or_dict, key, default)
-    if _as_bool(get("cnf", False)):
-        return models_generative.model_CNF(
-            input_dim=input_dim[1]*input_dim[2],
-            embed_dim=_as_int(get("embed_dim", 256), 256),
-            num_heads=_as_int(get("num_heads", 1), 1),
-            num_layers=_as_int(get("num_layers", 2), 2),
-            ff_dim=_as_int(get("ff_dim", 128), 128),
-            cnf_hidden=_as_int(get("cnf_hidden", get("flow_hidden", 128)), 128),
-            #cnf_steps=_as_int(get("cnf_steps", 8), 8),
-        )
-    if _as_bool(get("fm", False)):
-        return models_generative.model_FM(
-            input_dim=input_dim[1]*input_dim[2],
-            hidden_dim=_as_int(get("embed_dim", 256), 256),
-            #num_heads=_as_int(get("num_heads", 1), 1),
-            #num_layers=_as_int(get("num_layers", 2), 2),
-            #ff_dim=_as_int(get("ff_dim", 128), 128),
-            steps=_as_int(get("cnf_steps", 50), 50),
-        )
-    if _as_bool(get("mdn", False)):
+    architecture=model_architecture_type(args_or_dict)
+    if architecture=="MDN":
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_dim[2],
-            n_mix=_as_int(get("n_mix", 25), 25),
-            embed_dim=_as_int(get("embed_dim", 256), 256),
-            num_heads=_as_int(get("num_heads", 1), 1),
-            num_layers=_as_int(get("num_layers", 2), 2),
-            ff_dim=_as_int(get("ff_dim", 128), 128),
+            n_mix=_as_int(_config_get(args_or_dict,"n_mix")),
+            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
         )
-    if _as_bool(get("nf", False)):
+    elif architecture=="CNF":
+        return models_generative.model_CNF(
+            input_dim=input_dim[1]*input_dim[2],
+            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            cnf_hidden=_as_int(_config_get(args_or_dict,"cnf_hidden")),
+            #, _config_get(args_or_dict,"flow_hidden", 128)), 128),
+            #cnf_steps=_as_int(_config_get(args_or_dict,"cnf_steps", 8), 8),
+        )
+    elif architecture=="FM":
+        return models_generative.model_FM(
+            input_dim=input_dim[1]*input_dim[2],
+            hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            steps=_as_int(_config_get(args_or_dict,"cnf_steps")),
+        )
+    elif architecture=="NF":
         return models_generative.model_normalizing_flow(
             input_dim=input_dim[1]*input_dim[2],
             num_flows=6,
             latent_dim=128,
         )
-    if _as_bool(get("diff", False)):
+    elif architecture=="Diff":
         return models_generative.model_diffusion(input_dim=input_dim[1]*input_dim[2], hidden_dim=256)
-    if _as_bool(get("sde", False)):
+    elif architecture=="SDE":
         return models_generative.model_score_SDE(input_dim=input_dim[1]*input_dim[2], hidden_dim=256)
     return models_generative.model_autoregressive_transformer(
         input_dim=input_dim[2],
-        embed_dim=_as_int(get("embed_dim", 256), 256),
-        num_heads=_as_int(get("num_heads", 1), 1),
-        num_layers=_as_int(get("num_layers", 2), 2),
-        ff_dim=_as_int(get("ff_dim", 128), 128),
+        embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+        num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+        num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+        ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
     )
 
 def save_model(model, log_dir, name):
@@ -354,6 +358,7 @@ def save_model(model, log_dir, name):
     return
 
 def load_model(model_path, map_location="cpu"):
+    #Note that torch load just unpickles a dictionary, which can be our checkpoint. The "model_state_dict" key holds the weights
     try:
         return torch.load(model_path, map_location=map_location, weights_only=False)
     except TypeError:
@@ -379,39 +384,37 @@ def save_checkpoint(
     best_loss=None,
     current_lr=None,
 ):
-    save_mode = _config_get(args, "save_mode", "checkpoint")
+
+    #From args figure out how much to save
+    save_mode = _config_get(args, "save_mode", "optimizer")
     if save_mode == "none":
         return None
-    if save_mode not in ("checkpoint", "model"):
-        raise ValueError("--save-mode must be one of: checkpoint, model, none")
+    if save_mode not in ("optimizer", "model"):
+        raise ValueError("--save-mode must be one of: optimizer, model, none")
 
+    #Get the path
     ckpt_dir = os.path.join(_config_get(args, "log_dir"), "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
     if ckpt_name is None:
         ckpt_name = f"epoch_{epoch:03d}.pt"
-
-    args_dict = dict(args) if isinstance(args, dict) else vars(args).copy()
-    best_epoch_display = _epoch_display_from_index(best_epoch)
     ckpt_path = os.path.join(ckpt_dir, ckpt_name)
 
+    #Save the model info
+    args_dict = dict(args) if isinstance(args, dict) else vars(args).copy()
     payload = {
-        "artifact_type": "checkpoint" if save_mode == "checkpoint" else "model_state",
         "save_mode": save_mode,
+        "architecture":model_architecture_type(args),
         "epoch": epoch,
-        "epoch_display": _epoch_display_from_index(epoch),
         "model_state_dict": model.state_dict(),
         "loss": loss,
         "best_epoch": best_epoch,
-        "best_epoch_display": best_epoch_display,
         "best_loss": best_loss,
         "args": args_dict,
-        "model_mode": resolved_model_mode(args),
-        "doCNF": _as_bool(_config_get(args, "cnf", False)),
-        "doMDN": _as_bool(_config_get(args, "mdn", False)) and not _as_bool(_config_get(args, "cnf", False)),
-        "doMixedLoss": _as_bool(_config_get(args, "mixed_loss", False)),
+        "model_mode": model_architecture_type(args),
     }
 
-    if save_mode == "checkpoint":
+    #Add in the extra optimizer and learning info
+    if save_mode == "optimizer":
         payload.update(
             {
                 "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
@@ -430,28 +433,39 @@ def save_checkpoint(
             }
         )
 
+    #Actually save it
     torch.save(payload, ckpt_path)
-    if is_best: torch.save(payload, "best.pt")
-    saved_what = "checkpoint" if save_mode == "checkpoint" else "model state"
-    print(f"Saved {saved_what} to {ckpt_path}", flush=True)
+    print(f"Saved checkpoint to {ckpt_path}", flush=True)
+    if is_best:  # if best save to it's own file
+        best_path=os.path.dirname(ckpt_path) +"/best.pt"
+        torch.save(payload, best_path)
+        print(f"Saved new best checkpoint to {best_path}", flush=True)
     return ckpt_path
 
-def load_checkpoint(shape,args):
+def load_checkpoint(shape, args):
     if len(args.model_path) == 0:
-      raise ValueError("--contin requires --model-path/--checkpoint")
+      raise ValueError("load_checkpoint requires --model-path/--checkpoint")
     load_path = args.model_path[0] if isinstance(args.model_path, list) else args.model_path
-    loaded = load_model(load_path)
-    if isinstance(loaded, dict) and "model_state_dict" in loaded:
-      resume_state = loaded
-      loaded_args = loaded.get("args", {})
-      for key in ( "cnf", "mdn", "mixed_loss", "embed_dim", "num_heads", "num_layers", "ff_dim", "n_mix", "cnf_hidden", "cnf_steps", "flow_hidden",):
-        if key in loaded_args:
-          setattr(args, key, loaded_args[key])
+    contents = load_model(load_path)
+
+    #if the checkpoint file
+    if isinstance(contents, dict) and "model_state_dict" in contents:
+
+      #Load all the arguments
+      contents_args = contents.get("args", {})
+      for key in vars(args):
+        if key in contents_args:
+          setattr(args, key, contents_args[key])
+
+      #Build the model and load the content
       model = build_unbinned_model(shape, args)
-      model.load_state_dict(loaded["model_state_dict"])
+      model.load_state_dict(contents["model_state_dict"])
+      return model, contents
+
+    #if the usual torch load
     else:
-      model = loaded
-    return model,resume_state
+      model = contents
+      return model, None
 
 # ---------------------------------------------------------------------
 # Save/load loss and learning rates
@@ -492,7 +506,7 @@ def save_loss_csv(epoch_losses=None, loss_curves=None, out_dir=""):
             writer.writerow(row)
     print(f"Saved loss CSV to {csv_path}", flush=True)
 
-def load_loss_history_csv(csv_path):
+def load_loss_csv(csv_path):
     if not os.path.exists(csv_path):
         return {}
     curves = {}
@@ -585,31 +599,11 @@ def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
 # ---------------------------------------------------------------------
 # Arguments and metadata saving
 # ---------------------------------------------------------------------
-def save_optimizer_states(optimizer, scheduler, scaler, log_dir): #not used
-    torch.save(
-        {
-            "opt_state_dict": optimizer.state_dict(),
-            "sched_state_dict": scheduler.state_dict(),
-            "scaler_state_dict": scaler.state_dict(),
-        },
-        os.path.join(log_dir, "opt_state_dict.pt"),
-    )
-    return
-
-def load_optimizer_states(optimizer, scheduler, scaler, log_dir):
-    state_dicts = torch.load(os.path.join(log_dir, "opt_state_dict.pt"))
-    optimizer.load_state_dict(state_dicts["opt_state_dict"])
-    scheduler.load_state_dict(state_dicts["sched_state_dict"])
-    scaler.load_state_dict(state_dicts["scaler_state_dict"])
-    return
-
 def append_training_metadata(args, best_epoch=None, best_loss=None):
     txt_path = os.path.join(args.log_dir, "arguments.txt")
     with open(txt_path, "a") as f:
         if best_epoch is None:
             f.write("\n")
-            f.write(f"{'resolved_model_mode':20s} {resolved_model_mode(args)}\n")
-            f.write(f"{'save_mode':20s} {args.save_mode}\n")
             f.write(f"{'optimizer':20s} {args.optimizer}\n")
             f.write(f"{'weight_decay':20s} {args.weight_decay}\n")
             f.write(f"{'grad_clip':20s} {args.grad_clip}\n")
@@ -623,118 +617,121 @@ def append_training_metadata(args, best_epoch=None, best_loss=None):
             f.write(f"{'cos_damping_amplitude':20s} {args.cos_damping_amplitude}\n")
             f.write(f"{'cos_damping_period_epochs':20s} {args.cos_damping_period_epochs}\n")
         else:
-            best_epoch_display = _epoch_display_from_index(best_epoch)
             f.write("\n")
-            f.write("# Best training result\n")
-            f.write(f"best_epoch: {best_epoch_display}\n")
-            f.write(f"best_epoch_display: {best_epoch_display}\n")
-            f.write(f"best_epoch_index: {best_epoch}\n")
+            f.write(f"best_epoch: {best_epoch}\n")
             f.write(f"best_loss: {best_loss}\n")
             if args.save_mode != "none":
                 f.write("best_checkpoint: checkpoints/best.pt\n")
 
 def save_arguments(args):
-    tmp = args.log_dir
+    #If continuing
     if getattr(args, "contin", False):
-        os.makedirs(tmp, exist_ok=True)
-        with open(os.path.join(tmp, "arguments.txt"), "w") as f:
+        os.makedirs(args.log_dir, exist_ok=True)
+        with open(os.path.join(args.log_dir, "arguments.txt"), "w") as f:
             arg_dict = vars(args)
             for k, v in arg_dict.items():
                 f.write(f"{k:20s} {v}\n")
-        return args
+        return
 
+    #enumerate up the output directory if it exists
+    log_dir = args.log_dir
     i = 0
-    while os.path.isdir(tmp):
+    while os.path.isdir(log_dir):
         i += 1
-        tmp = args.log_dir + f"_{i}"
+        log_dir = args.log_dir + f"_{i}"
+    args.log_dir = log_dir
 
-    args.log_dir = tmp
+    #Loop over arguments and save them
     os.makedirs(args.log_dir)
     with open(os.path.join(args.log_dir, "arguments.txt"), "w") as f:
+        f.write(f"{'architecture':20s} {model_architecture_type(args)}\n\n")
         arg_dict = vars(args)
         for k, v in arg_dict.items():
             f.write(f"{k:20s} {v}\n")
-    return args
+
+    #Also append the metadata
+    append_training_metadata(args)
+    return
 
 def parse_input():
     """Parse_Input args. Defaults match the current hard-coded values."""
-    p = argparse.ArgumentParser(description="Train transformer/MDN on Lund data")
+    parser = argparse.ArgumentParser(description="Train transformer/MDN on Lund data")
 
     # data / io
-    p.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5", help="Path to training .h5")
-    p.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_val.h5", help="Path to validation .h5 (unused yet)")
-    p.add_argument("--batch-size", type=int, default=256, help="Batch size")
-    p.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
-    p.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
-    p.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
-    p.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
+    parser.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5", help="Path to training .h5")
+    parser.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_val.h5", help="Path to validation .h5 (unused yet)")
+    parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
+    parser.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
+    parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
+    parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
+    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
 
     # training
-    p.add_argument("--epochs", type=int, default=10, help="Number of epochs")
-    p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    p.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw"], help="Optimizer")
-    p.add_argument("--weight-decay", type=float, default=0.0, help="Optimizer weight decay")
-    p.add_argument("--grad-clip", type=float, default=0.0, help="Gradient norm clipping. Set <=0 to disable")
-    p.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "plateau"], help="Learning rate scheduler")
-    p.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="Minimum LR for cosine/plateau schedulers")
-    p.add_argument("--plateau-factor", type=float, default=0.5, help="LR multiplier for --scheduler plateau")
-    p.add_argument("--plateau-patience", type=int, default=2, help="Plateau epochs before reducing LR")
-    p.add_argument("--cos-damping-start-epoch", type=int, default=0, help="Epoch where cosine damping starts")
-    p.add_argument("--cos-damping-end-epoch", type=int, default=None, help="Epoch where cosine damping ends")
-    p.add_argument("--cos-damping-final-lr", type=float, default=5e-5, help="Final LR for cosine damping")
-    p.add_argument("--cos-damping-amplitude", type=float, default=0.0, help="Cosine oscillation amplitude")
-    p.add_argument("--cos-damping-period-epochs", type=float, default=1.0, help="Cosine oscillation period in epochs")
-    p.add_argument("--patience", type=int, default=5, help="Early stopping patience")
-    p.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw"], help="Optimizer")
+    parser.add_argument("--weight-decay", type=float, default=0.0, help="Optimizer weight decay")
+    parser.add_argument("--grad-clip", type=float, default=0.0, help="Gradient norm clipping. Set <=0 to disable")
+    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "plateau"], help="Learning rate scheduler")
+    parser.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="Minimum LR for cosine/plateau schedulers")
+    parser.add_argument("--plateau-factor", type=float, default=0.5, help="LR multiplier for --scheduler plateau")
+    parser.add_argument("--plateau-patience", type=int, default=2, help="Plateau epochs before reducing LR")
+    parser.add_argument("--cos-damping-start-epoch", type=int, default=0, help="Epoch where cosine damping starts")
+    parser.add_argument("--cos-damping-end-epoch", type=int, default=None, help="Epoch where cosine damping ends")
+    parser.add_argument("--cos-damping-final-lr", type=float, default=5e-5, help="Final LR for cosine damping")
+    parser.add_argument("--cos-damping-amplitude", type=float, default=0.0, help="Cosine oscillation amplitude")
+    parser.add_argument("--cos-damping-period-epochs", type=float, default=1.0, help="Cosine oscillation period in epochs")
+    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
 
     # model switches
-    p.add_argument("--mdn", action="store_true", default=False, help="Use MDN head (default: True)")
-    p.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
-    p.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
-    p.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
+    parser.add_argument("--mdn", action="store_true", default=False, help="Use MDN head (default: True)")
+    parser.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
+    parser.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
+    parser.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
 
     # CNF switch (overrides mdn/regression)
-    p.add_argument("--cnf", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
-    p.add_argument("--cnf-hidden", type=int, default=128, help="CNF vector field hidden size")
-    p.add_argument("--cnf-steps", type=int, default=8, help="CNF Euler steps for integration")
+    parser.add_argument("--cnf", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
+    parser.add_argument("--cnf-hidden", type=int, default=128, help="CNF vector field hidden size")
+    parser.add_argument("--cnf-steps", type=int, default=8, help="CNF Euler steps for integration")
 
     # transformer hyperparams (keep defaults = your current test_model defaults)
-    p.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
-    p.add_argument("--num-heads", type=int, default=1, help="Transformer num heads")
-    p.add_argument("--num-layers", type=int, default=2, help="Transformer num layers")
-    p.add_argument("--ff-dim", type=int, default=128, help="Transformer feedforward dim")
+    parser.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
+    parser.add_argument("--num-heads", type=int, default=1, help="Transformer num heads")
+    parser.add_argument("--num-layers", type=int, default=2, help="Transformer num layers")
+    parser.add_argument("--ff-dim", type=int, default=128, help="Transformer feedforward dim")
 
     #
-    p.add_argument("--nf", action="store_true", default=False, help="Use NormFlows")
-    p.add_argument("--fm", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
-    p.add_argument("--diff", action="store_true", default=False, help="Use Masked autoregressive flow")
-    p.add_argument("--sde", action="store_true", default=False, help="Use Masked autoregressive flow")
+    parser.add_argument("--nf", action="store_true", default=False, help="Use NormFlows")
+    parser.add_argument("--fm", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
+    parser.add_argument("--diff", action="store_true", default=False, help="Use Masked autoregressive flow")
+    parser.add_argument("--sde", action="store_true", default=False, help="Use Masked autoregressive flow")
 
     # auxiliary diagnostics
-    p.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for auxiliary flow nets")
-    p.add_argument("--multi-loss-plot", action="store_true", default=False, help="Log multiple loss definitions without affecting main training")
+    parser.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for auxiliary flow nets")
+    parser.add_argument("--multi-loss-plot", action="store_true", default=False, help="Log multiple loss definitions without affecting main training")
 
     # misc
-    p.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
+    parser.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
 
     # logging / checkpointing
-    p.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
-    p.add_argument( "--plot-dir", "--plot-out-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
-    p.add_argument("--save-mode", type=str, default="checkpoint", choices=["checkpoint", "model", "none"], help="Saved training artifact: full checkpoint, model-state only, or none")
-    p.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
-    p.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
+    parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
+    parser.add_argument("--plot-dir", "--plot-out-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
+    parser.add_argument("--save-mode", type=str, default="optimizer", choices=["optimizer", "model", "none"], help="Saved training artifact: full info, model-state only, or none")
+    parser.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
+    parser.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
     
     # plotting options
-    p.add_argument( "--hist2d-xrange", type=float, nargs=2, default=None, help="2D Lund histogram x range: xmin xmax",)
-    p.add_argument( "--hist2d-yrange", type=float, nargs=2, default=None, help="2D Lund histogram y range: ymin ymax",)
-    p.add_argument( "--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)
-    p.add_argument( "--hist2d-shape", "--hist2d_shape", "--hist2d-layout", dest="hist2d_shape", type=int, nargs=2, default=None, metavar=("ROWS", "COLS"), help="Manual 2D Lund subplot shape. Default auto: 2 -> 1x2, 3 -> 1x3, 4 -> 2x2",)
-    p.add_argument( "--plot-max-batches", type=int, default=None, help="Only plot this many validation batches. Default: plot all batches",)
-    p.add_argument( "--hist1d-ranges", type=float, nargs="+", default=None, help="Flattened 1D ranges: kt_min kt_max dr_min dr_max",)
-    p.add_argument( "--hist1d-bins", type=int, default=30, help="Number of bins for 1D histograms",)
-    p.add_argument( "--hist1d-logy", action="store_true", default=True, help="Also save log-y 1D histograms",)
-    p.add_argument( "--hist-ratio-diff", "--hist-diff-ratio", action="store_true", default=True, help="Also save generated-vs-original relative difference plots for multi-sample 1D/2D histograms",)
-    p.add_argument( "--hist-ratio-min-count", type=int, default=5, help="Mask 2D relative-difference bins with fewer original entries than this",)
-    p.add_argument( "--hist-ratio-vmax", type=float, default=1.0, help="Symmetric color limit for 2D fractional relative-difference plots",)
+    parser.add_argument( "--hist2d-xrange", type=float, nargs=2, default=None, help="2D Lund histogram x range: xmin xmax",)
+    parser.add_argument( "--hist2d-yrange", type=float, nargs=2, default=None, help="2D Lund histogram y range: ymin ymax",)
+    parser.add_argument( "--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)
+    parser.add_argument( "--hist2d-shape", "--hist2d_shape", "--hist2d-layout", dest="hist2d_shape", type=int, nargs=2, default=None, metavar=("ROWS", "COLS"), help="Manual 2D Lund subplot shape. Default auto: 2 -> 1x2, 3 -> 1x3, 4 -> 2x2",)
+    parser.add_argument( "--plot-max-batches", type=int, default=None, help="Only plot this many validation batches. Default: plot all batches",)
+    parser.add_argument( "--hist1d-ranges", type=float, nargs="+", default=None, help="Flattened 1D ranges: kt_min kt_max dr_min dr_max",)
+    parser.add_argument( "--hist1d-bins", type=int, default=30, help="Number of bins for 1D histograms",)
+    parser.add_argument( "--hist1d-logy", action="store_true", default=True, help="Also save log-y 1D histograms",)
+    parser.add_argument( "--hist-ratio-diff", "--hist-diff-ratio", action="store_true", default=True, help="Also save generated-vs-original relative difference plots for multi-sample 1D/2D histograms",)
+    parser.add_argument( "--hist-ratio-min-count", type=int, default=5, help="Mask 2D relative-difference bins with fewer original entries than this",)
+    parser.add_argument( "--hist-ratio-vmax", type=float, default=1.0, help="Symmetric color limit for 2D fractional relative-difference plots",)
 
-    return p.parse_args()
+    return parser.parse_args()
