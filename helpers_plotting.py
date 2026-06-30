@@ -107,10 +107,10 @@ def _wrapped_note(note_lines, width=150):
 # ---------------------------------------------------------------------
 # Main plots
 # ---------------------------------------------------------------------
-def projection_plot(inputs,labels=["original","generated","predicted"],outdir="./Plots/", unavailable_notes=None):
+def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="./Plots/", name="projection", unavailable_notes=None):
 
-  if not os.path.exists(outdir):
-    os.makedirs(outdir)
+  if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
 
   linestyles=["-","--","-.",":"]
 
@@ -139,15 +139,15 @@ def projection_plot(inputs,labels=["original","generated","predicted"],outdir=".
     )
     fig.text(0.98, 0.5, note_text, ha="right", va="center", fontsize=8)
 
-  name="projection"
-  fig.savefig(os.path.join(outdir,name+".png"))
-  fig.savefig(os.path.join(outdir,name+".pdf"))
+  fig.savefig(os.path.join(out_dir,name+".png"))
+  fig.savefig(os.path.join(out_dir,name+".pdf"))
   plt.close(fig)
+  print(f"Plotting projections to {out_dir}/{name}.pdf")
 
 def lund_plot(
     inputs,
     labels=["original","generated","predicted"],
-    outdir="./Plots/",
+    out_dir="./Plots/",
     hist2d_xrange=None,
     hist2d_yrange=None,
     hist2d_bins=(20, 20),
@@ -164,8 +164,8 @@ def lund_plot(
   use_compared_titles = Nplots > 1
   diff_labels, common_items = _caption_comparison(labels, first_run_idx=1) if use_compared_titles else ([], [])
 
-  if not os.path.exists(outdir):
-    os.makedirs(outdir)
+  if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
   mins=np.zeros(Ndim)
   maxs=np.zeros(Ndim)
   for ii in range(Ndim):
@@ -272,9 +272,10 @@ def lund_plot(
 
     # Save
     name = "lund"
-    fig.savefig(os.path.join(outdir, name + ".png"), bbox_inches="tight")
-    fig.savefig(os.path.join(outdir, name + ".pdf"), bbox_inches="tight")
+    fig.savefig(os.path.join(out_dir, name + ".png"), bbox_inches="tight")
+    fig.savefig(os.path.join(out_dir, name + ".pdf"), bbox_inches="tight")
     plt.close(fig)
+    print(f"Plotting lund-plot to {out_dir}/{name}.pdf")
 
 def resolve_hist2d_shape(nplots, hist2d_shape=None):
   if hist2d_shape is not None:
@@ -295,9 +296,6 @@ def resolve_hist2d_shape(nplots, hist2d_shape=None):
   ncols = math.ceil(math.sqrt(nplots))
   nrows = math.ceil(nplots / ncols)
   return nrows, ncols
-
-def resolve_hist2d_layout(nplots, hist2d_layout=None):
-  return resolve_hist2d_shape(nplots, hist2d_layout)
 
 def _default_hist1d_ranges(inputs, display_order, quantiles=(0.5, 99.5), margin_fraction=0.05):
     ranges = []
@@ -455,6 +453,7 @@ def plot_combined_1dhist_ratio_diff(
     fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
     plt.close(fig)
+    print(f"Plotting projection diff to {out_dir}/{out_name}.pdf")
 
 def plot_combined_1dhist(
     inputs,
@@ -587,11 +586,12 @@ def plot_combined_1dhist(
     fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
     fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
     plt.close(fig)
+    print(f"Plotting hist to {out_dir}/{out_name}.pdf")
 
 def plot_lund_ratio_diff(
     inputs,
     labels=["original","generated","predicted"],
-    outdir="./Plots/",
+    out_dir="./Plots/",
     hist2d_xrange=None,
     hist2d_yrange=None,
     hist2d_bins=(20, 20),
@@ -609,8 +609,8 @@ def plot_lund_ratio_diff(
     return
 
   unavailable_notes = unavailable_notes or []
-  if not os.path.exists(outdir):
-    os.makedirs(outdir)
+  if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
 
   Ndiff = len(inputs) - 1
   Nplots = Ndiff + len(unavailable_notes)
@@ -738,173 +738,14 @@ def plot_lund_ratio_diff(
     )
 
   name = "lund_ratio_diff"
-  fig.savefig(os.path.join(outdir, name + ".png"), bbox_inches="tight")
-  fig.savefig(os.path.join(outdir, name + ".pdf"), bbox_inches="tight")
+  fig.savefig(os.path.join(out_dir, name + ".png"), bbox_inches="tight")
+  fig.savefig(os.path.join(out_dir, name + ".pdf"), bbox_inches="tight")
   plt.close(fig)
+  print(f"Plotting lund-plane diff to {out_dir}/{name}.pdf")
 
-def plot_combined_losses(run_infos, out_dir):
-    diff_labels, common_items = _caption_comparison(
-        ["original"] + [info.get("caption", info.get("checkpoint_path", f"run {i + 1}")) for i, info in enumerate(run_infos)],
-        first_run_idx=1,
-    )
-    os.makedirs(out_dir, exist_ok=True)
-    metric_names = set()
-    for info in run_infos:
-        for metric_name, curve in info.get("loss_curves_csv", {}).items():
-            if curve is not None and len(curve) > 0:
-                metric_names.add(metric_name)
-
-    if "self_loss" in metric_names and "test_loss" in metric_names:
-        fig, ax = plt.subplots(figsize=(7.6, 5.0))
-        used_any = False
-        prop_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
-        markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
-        split_styles = {
-            "Train": ("self_loss", "-"),
-            "Val": ("test_loss", "--"),
-        }
-        for irun, info in enumerate(run_infos):
-            label_base = diff_labels[irun] if irun < len(diff_labels) else f"run {irun + 1}"
-            color = prop_cycle[irun % len(prop_cycle)] if prop_cycle else None
-            for split_label, (metric_name, linestyle) in split_styles.items():
-                curve = info.get("loss_curves_csv", {}).get(metric_name, None)
-                if curve is None or len(curve) == 0:
-                    continue
-                y = np.asarray(curve, dtype=float)
-                x = np.arange(1, len(y) + 1)
-                finite = np.isfinite(y)
-                truncated = False
-                if np.any(~finite):
-                    first_bad = int(np.argmax(~finite))
-                    y = y[:first_bad]
-                    x = x[:first_bad]
-                    truncated = True
-                if len(y) == 0 or not np.all(np.isfinite(y)):
-                    continue
-
-                label = f"{label_base} {split_label}"
-                if truncated:
-                    label = f"{label}\nvalid through ep {len(y)}"
-                ax.plot(
-                    x,
-                    y,
-                    color=color,
-                    linestyle=linestyle,
-                    marker=markers[irun % len(markers)],
-                    markersize=4,
-                    markevery=max(len(x) // 12, 1),
-                    linewidth=2.0,
-                    alpha=0.9 if split_label == "Train" else 0.8,
-                    label=label,
-                )
-                used_any = True
-
-        if used_any:
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Loss")
-            ax.set_title("Train and Validation Loss vs Epoch")
-            ax.grid(True, alpha=0.35)
-            legend_kwargs = dict(fontsize=8, framealpha=0.92)
-            if len(run_infos) <= 4:
-                ax.legend(loc="best", **legend_kwargs)
-                bottom_edge = 0.14 if common_items else 0.06
-            else:
-                ax.legend(
-                    loc="upper center",
-                    bbox_to_anchor=(0.5, -0.18),
-                    ncol=2,
-                    **legend_kwargs,
-                )
-                bottom_edge = 0.30 if common_items else 0.24
-            fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
-            note_lines = _plot_note_from_common(common_items)
-            if note_lines:
-                fig.text(
-                    0.02,
-                    0.02,
-                    _wrapped_note(note_lines, width=130),
-                    ha="left",
-                    va="bottom",
-                    fontsize=8,
-                )
-            fig.savefig(os.path.join(out_dir, "loss_combined__train_val.png"), bbox_inches="tight")
-            fig.savefig(os.path.join(out_dir, "loss_combined__train_val.pdf"), bbox_inches="tight")
-            fig.savefig(os.path.join(out_dir, "loss_combined__training_and_val_loss.png"), bbox_inches="tight")
-            fig.savefig(os.path.join(out_dir, "loss_combined__training_and_val_loss.pdf"), bbox_inches="tight")
-        plt.close(fig)
-
-    for metric_name in sorted(metric_names):
-        fig, ax = plt.subplots(figsize=(7.2, 4.8))
-        used_any = False
-        prop_cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
-        markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
-        linestyles = ["-", "--", "-.", ":", (0, (5, 1)), (0, (3, 1, 1, 1))]
-        for irun, info in enumerate(run_infos):
-            curve = info.get("loss_curves_csv", {}).get(metric_name, None)
-            if curve is None or len(curve) == 0:
-                continue
-            y = np.asarray(curve, dtype=float)
-            x = np.arange(1, len(y) + 1)
-            finite = np.isfinite(y)
-            truncated = False
-            if np.any(~finite):
-                first_bad = int(np.argmax(~finite))
-                y = y[:first_bad]
-                x = x[:first_bad]
-                truncated = True
-            if len(y) > 0 and np.all(np.isfinite(y)):
-                label = diff_labels[irun] if irun < len(diff_labels) else f"run {irun + 1}"
-                if truncated:
-                    label = f"{label}\nvalid through ep {len(y)}"
-                ax.plot(
-                    x,
-                    y,
-                    color=prop_cycle[irun % len(prop_cycle)] if prop_cycle else None,
-                    linestyle=linestyles[irun % len(linestyles)],
-                    marker=markers[irun % len(markers)],
-                    markersize=4,
-                    markevery=max(len(x) // 12, 1),
-                    linewidth=2.0,
-                    alpha=0.9,
-                    label=label,
-                )
-                used_any = True
-
-        if not used_any:
-            plt.close(fig)
-            continue
-
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel("NLL" if "nll" in metric_name.lower() else "Loss")
-        ax.set_title(f"Loss vs Epoch ({metric_name})")
-        ax.grid(True, alpha=0.35)
-        legend_kwargs = dict(fontsize=8, framealpha=0.92)
-        if len(run_infos) <= 5:
-            ax.legend(loc="best", **legend_kwargs)
-            bottom_edge = 0.14 if common_items else 0.06
-        else:
-            ax.legend(
-                loc="upper center",
-                bbox_to_anchor=(0.5, -0.18),
-                ncol=2,
-                **legend_kwargs,
-            )
-            bottom_edge = 0.28 if common_items else 0.22
-        fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
-        note_lines = _plot_note_from_common(common_items)
-        if note_lines:
-            fig.text(
-                0.02,
-                0.02,
-                _wrapped_note(note_lines, width=130),
-                ha="left",
-                va="bottom",
-                fontsize=8,
-            )
-        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.png"), bbox_inches="tight")
-        fig.savefig(os.path.join(out_dir, f"loss_combined__{metric_name}.pdf"), bbox_inches="tight")
-        plt.close(fig)
-
+# ---------------------------------------------------------------------
+# Main validation function which runs all the plots
+# ---------------------------------------------------------------------
 def validate_unbinned_models(models, test_loader, args, labels=None, make_projection=False, unavailable_model_reasons=None,):
   if args.plot_max_batches is not None and args.plot_max_batches <= 0:
     raise ValueError("--plot-max-batches must be a positive integer")
@@ -924,6 +765,9 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
 
       device = "cpu"
 
+      # ---------------------------------------------------------------------
+      # Sanity checks
+      # ---------------------------------------------------------------------
       for imodel, model in enumerate(models):
         model.to(device)
         model.eval()
@@ -941,7 +785,12 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
           active_models[imodel] = False
           unavailable_reasons[imodel] = reason
 
+      # ---------------------------------------------------------------------
+      # Loop over epochs and generate
+      # ---------------------------------------------------------------------
       printed_example = False
+      starttime=time.time()
+      Nimages=0
       for batch, X in enumerate(test_loader):
         if args.plot_max_batches is not None and batch >= args.plot_max_batches:
           break
@@ -980,16 +829,19 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
             print("Input example")
             print(X[0])
             print("Generate example")
-            starttime=time.time()
+            starttime_single=time.time()
             print(generated_seq[0])
-            print("Took %.2e ms to generate"%((time.time()-starttime)*1000), flush=True)
+            print("Took %.2e ms to generate 1 image"%((time.time()-starttime_single)*1000), flush=True)
             printed_example = True
 
           generated_chunks[imodel].append(generated_seq)
 
+      print("Took %.2e min to generate %i images"%((time.time()-starttime)/60,len(test_loader.dataset)), flush=True) 
+
       if len(original_chunks) == 0:
         raise ValueError("No validation batches were plotted")
 
+      
       original = torch.cat(original_chunks)
       generated_list = [
           torch.cat(chunks)
@@ -1015,11 +867,15 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       flat_generated_list = [g.flatten(0, 1).cpu().numpy() for g in generated_list]
       plot_inputs = [flat_original] + flat_generated_list
 
+      # ---------------------------------------------------------------------
+      # Make the plots
+      # ---------------------------------------------------------------------
       if make_projection:
         projection_plot(
             plot_inputs,
             labels=active_labels,
-            outdir=args.plot_dir,
+            out_dir=args.plot_dir,
+            name="projection",
             unavailable_notes=unavailable_notes,
         )
 
@@ -1072,16 +928,28 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       if args.input_format == "ktdr":
         lund_inputs = plot_inputs
       else:
+        starttime=time.time()
         lund_original = helpers.make_lundplane(original)
         lund_inputs = [lund_original.reshape(-1, lund_original.shape[-1])]
+        print("Took %.2e min to make the lund-plane"%((time.time()-starttime)/60,len(test_loader.dataset)), flush=True)
         for generated in generated_list:
           lund_generated = helpers.make_lundplane(generated)
           lund_inputs.append(lund_generated.reshape(-1, lund_generated.shape[-1]))
 
+
+        if make_projection:
+            projection_plot(
+                lund_inputs,
+                labels=active_labels,
+                out_dir=args.plot_dir,
+                name="projection_lund",
+                unavailable_notes=unavailable_notes,
+            )
+
       lund_plot(
           lund_inputs,
           labels=active_labels,
-          outdir=args.plot_dir,
+          out_dir=args.plot_dir,
           hist2d_xrange=args.hist2d_xrange,
           hist2d_yrange=args.hist2d_yrange,
           hist2d_bins=args.hist2d_bins,
@@ -1093,7 +961,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         plot_lund_ratio_diff(
             lund_inputs,
             labels=active_labels,
-            outdir=args.plot_dir,
+            out_dir=args.plot_dir,
             hist2d_xrange=args.hist2d_xrange,
             hist2d_yrange=args.hist2d_yrange,
             hist2d_bins=args.hist2d_bins,

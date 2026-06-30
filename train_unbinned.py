@@ -182,11 +182,11 @@ if __name__ == "__main__":
     # construct model
     #If continuing from existing model
     if args.contin:
-        model,resume_state=load_checkpoint(X_example.shape,args)
+        model,checkpoint_info=load_checkpoint(X_example.shape,args)
     #make usual model
     else:
         model = build_unbinned_model(X_example.shape, args)
-        resume_state = None
+        checkpoint_info = None
 
     #Make output directory and make metadata file to save arguments
     save_arguments(args)
@@ -217,12 +217,12 @@ if __name__ == "__main__":
     optimizer = make_optimizer(args, model)
     scheduler = make_scheduler(args, optimizer)
     start_epoch = 0
-    if resume_state is not None:
-      if resume_state.get("optimizer_state_dict", None) is not None:
-        optimizer.load_state_dict(resume_state["optimizer_state_dict"])
-      if scheduler is not None and resume_state.get("scheduler_state_dict", None) is not None:
-        scheduler.load_state_dict(resume_state["scheduler_state_dict"])
-      start_epoch = int(resume_state.get("epoch", -1)) + 1
+    if checkpoint_info is not None:
+      if checkpoint_info.get("optimizer_state_dict", None) is not None:
+        optimizer.load_state_dict(checkpoint_info["optimizer_state_dict"])
+      if scheduler is not None and checkpoint_info.get("scheduler_state_dict", None) is not None:
+        scheduler.load_state_dict(checkpoint_info["scheduler_state_dict"])
+      start_epoch = int(checkpoint_info.get("epoch", -1)) + 1
       print(f"Resuming after ep {start_epoch}", flush=True)
 
     #Store loss and etc for per-epoch loop
@@ -235,17 +235,17 @@ if __name__ == "__main__":
     lr_history=[]
     loss_curves={}
     stopped_nonfinite = False
-    if resume_state is not None:
-      best_loss = resume_state.get("best_loss", best_loss)
+    if checkpoint_info is not None:
+      best_loss = checkpoint_info.get("best_loss", best_loss)
       if best_loss is None:
         best_loss = float("inf")
       else:
         best_loss = float(best_loss)
-      best_epoch = resume_state.get("best_epoch", best_epoch)
-      loss_test = list(resume_state.get("test_losses", []))
-      loss_train = list(resume_state.get("train_losses", []))
-      lr_history = list(resume_state.get("lr_history", []))
-      loss_curves = dict(resume_state.get("loss_curves", {}))
+      best_epoch = checkpoint_info.get("best_epoch", best_epoch)
+      loss_test = list(checkpoint_info.get("test_losses", []))
+      loss_train = list(checkpoint_info.get("train_losses", []))
+      lr_history = list(checkpoint_info.get("lr_history", []))
+      loss_curves = dict(checkpoint_info.get("loss_curves", {}))
     epochs=args.epochs 
 
     # ---------------------------------------------------------------------
@@ -309,7 +309,7 @@ if __name__ == "__main__":
     append_training_metadata(args, best_epoch=best_epoch, best_loss=best_loss)
 
     #Make loss plots and scheduler plots
-    loss_plot(loss_train,loss_test,outdir=args.log_dir,loss_curves=loss_curves)
+    loss_plot(loss_train,loss_test,out_dir=args.log_dir,loss_curves=loss_curves)
     save_lr_csv(lr_history, out_dir=args.log_dir)
     save_lr_plot(lr_history, out_dir=args.log_dir)
 

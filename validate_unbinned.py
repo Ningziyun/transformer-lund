@@ -19,9 +19,7 @@ if __name__ == "__main__":
     X_example=next(iter(train_loader))
 
     #load model
-    model,resume_state=load_checkpoint(X_example.shape,args)
-
-    print(resume_state)
+    model,checkpoint_info=load_checkpoint(X_example.shape,args,ignore_args=["plot_dir"])
 
     #Make validation plots
     validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"], make_projection=True,)

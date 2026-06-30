@@ -401,21 +401,20 @@ def save_checkpoint(
 
     #Save the model info
     args_dict = dict(args) if isinstance(args, dict) else vars(args).copy()
-    payload = {
+    checkpoint_info = {
         "save_mode": save_mode,
         "architecture":model_architecture_type(args),
         "epoch": epoch,
-        "model_state_dict": model.state_dict(),
         "loss": loss,
         "best_epoch": best_epoch,
         "best_loss": best_loss,
         "args": args_dict,
-        "model_mode": model_architecture_type(args),
+        "model_state_dict": model.state_dict(),
     }
 
     #Add in the extra optimizer and learning info
     if save_mode == "optimizer":
-        payload.update(
+        checkpoint_info.update(
             {
                 "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
                 "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
@@ -434,37 +433,38 @@ def save_checkpoint(
         )
 
     #Actually save it
-    torch.save(payload, ckpt_path)
+    torch.save(checkpoint_info, ckpt_path)
     print(f"Saved checkpoint to {ckpt_path}", flush=True)
     if is_best:  # if best save to it's own file
         best_path=os.path.dirname(ckpt_path) +"/best.pt"
-        torch.save(payload, best_path)
+        torch.save(checkpoint_info, best_path)
         print(f"Saved new best checkpoint to {best_path}", flush=True)
     return ckpt_path
 
-def load_checkpoint(shape, args):
+def load_checkpoint(shape, args, ignore_args=[]):
     if len(args.model_path) == 0:
       raise ValueError("load_checkpoint requires --model-path/--checkpoint")
     load_path = args.model_path[0] if isinstance(args.model_path, list) else args.model_path
-    contents = load_model(load_path)
+    checkpoint_info = load_model(load_path)
 
     #if the checkpoint file
-    if isinstance(contents, dict) and "model_state_dict" in contents:
+    if isinstance(checkpoint_info, dict) and "model_state_dict" in checkpoint_info:
 
       #Load all the arguments
-      contents_args = contents.get("args", {})
+      checkpoint_info_args = checkpoint_info.get("args", {})
       for key in vars(args):
-        if key in contents_args:
-          setattr(args, key, contents_args[key])
+        if key in checkpoint_info_args:
+          if key in ignore_args: continue
+          setattr(args, key, checkpoint_info_args[key])
 
       #Build the model and load the content
       model = build_unbinned_model(shape, args)
-      model.load_state_dict(contents["model_state_dict"])
-      return model, contents
+      model.load_state_dict(checkpoint_info["model_state_dict"])
+      return model, checkpoint_info
 
     #if the usual torch load
     else:
-      model = contents
+      model = checkpoint_info
       return model, None
 
 # ---------------------------------------------------------------------
@@ -545,11 +545,12 @@ def save_lr_plot(lr_history, out_dir=""):
     fig.savefig(os.path.join(out_dir, "lr_vs_epoch.png"))
     fig.savefig(os.path.join(out_dir, "lr_vs_epoch.pdf"))
     plt.close(fig)
+    print(f"Plotting learning rate to {out_dir}/lr_vs_epoch.pdf")
 
-def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
+def loss_plot(loss_train,loss_test,out_dir="./Plots/", loss_curves=None):
 
-  if not os.path.exists(outdir):
-    os.makedirs(outdir)
+  if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
 
   train_arr = np.asarray(loss_train, dtype=float)
   test_arr = np.asarray(loss_test, dtype=float)
@@ -588,13 +589,12 @@ def loss_plot(loss_train,loss_test,outdir="./Plots/", loss_curves=None):
       ax.set_ylabel("Delta*Loss+1")
   ax.set_yscale("log")
   ax.grid(True)
-  fig.savefig(os.path.join(outdir,"loss_vs_epoch.png"))
-  fig.savefig(os.path.join(outdir,"loss_vs_epoch.pdf"))
-  fig.savefig(os.path.join(outdir,"loss_train_val_vs_epoch.png"))
-  fig.savefig(os.path.join(outdir,"loss_train_val_vs_epoch.pdf"))
+  fig.savefig(os.path.join(out_dir,"loss_vs_epoch.png"))
+  fig.savefig(os.path.join(out_dir,"loss_vs_epoch.pdf"))
   plt.close(fig)
 
-  save_loss_csv( epoch_losses=loss_train, loss_curves={"test_loss": loss_test, **(loss_curves or {})}, out_dir=outdir,)
+  print(f"Plotting loss to {out_dir}/loss_vs_epoch.pdf")
+  save_loss_csv( epoch_losses=loss_train, loss_curves={"test_loss": loss_test, **(loss_curves or {})}, out_dir=out_dir,)
 
 # ---------------------------------------------------------------------
 # Arguments and metadata saving
@@ -716,7 +716,7 @@ def parse_input():
 
     # logging / checkpointing
     parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
-    parser.add_argument("--plot-dir", "--plot-out-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
+    parser.add_argument("--plot-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
     parser.add_argument("--save-mode", type=str, default="optimizer", choices=["optimizer", "model", "none"], help="Saved training artifact: full info, model-state only, or none")
     parser.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
     parser.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
@@ -734,4 +734,9 @@ def parse_input():
     parser.add_argument( "--hist-ratio-min-count", type=int, default=5, help="Mask 2D relative-difference bins with fewer original entries than this",)
     parser.add_argument( "--hist-ratio-vmax", type=float, default=1.0, help="Symmetric color limit for 2D fractional relative-difference plots",)
 
-    return parser.parse_args()
+    #Some manipulations
+    args=parser.parse_args()
+    if args.plot_dir is None:
+        args.plot_dir = args.log_dir
+
+    return args
