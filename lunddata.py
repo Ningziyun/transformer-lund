@@ -9,7 +9,7 @@ import numpy as np
 import random
 import h5py
 
-from helpers_unbinned import *
+from helpers import make_lundplane
 
 def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", train_test_split=0.8, seed=0, file_format="topbenchmark"):
 

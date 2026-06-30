@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 from helpers_unbinned import *
+from helpers_plotting import *
+from helpers import *
 
 class NonFiniteLossError(RuntimeError):
   pass
@@ -162,12 +164,9 @@ def test(model, test_loader, args):
 # main
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
-
-
     # ---------------------------------------------------------------------
-    # Preamble laoding everythin
+    # Preamble 
     # ---------------------------------------------------------------------
-
     #Load arguments
     args = parse_input()
     set_seeds(args.seed)
@@ -184,20 +183,7 @@ if __name__ == "__main__":
     resume_state = None
     #If continuing from existing model
     if args.contin:
-        if len(args.model_path) == 0:
-          raise ValueError("--contin requires --model-path/--checkpoint")
-        load_path = args.model_path[0] if isinstance(args.model_path, list) else args.model_path
-        loaded = load_model(load_path)
-        if isinstance(loaded, dict) and "model_state_dict" in loaded:
-          resume_state = loaded
-          loaded_args = loaded.get("args", {})
-          for key in ( "cnf", "mdn", "mixed_loss", "embed_dim", "num_heads", "num_layers", "ff_dim", "n_mix", "cnf_hidden", "cnf_steps", "flow_hidden",):
-            if key in loaded_args:
-              setattr(args, key, loaded_args[key])
-          model = build_unbinned_model(X_example.shape, args)
-          model.load_state_dict(loaded["model_state_dict"])
-        else:
-          model = loaded
+        model,resume_state=load_checkpoint(X_example.shape,args)
     #make usual model
     else:
         model = build_unbinned_model(X_example.shape, args)
@@ -227,7 +213,6 @@ if __name__ == "__main__":
       summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape, flush=True)
     model.to(device)
-
 
     #Set the scheduler
     optimizer = make_optimizer(args, model)
