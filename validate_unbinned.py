@@ -19,8 +19,7 @@ if __name__ == "__main__":
 
     # load and preprocess data
     print(f"Loading training set", flush=True)
-    train_loader,test_loader=get_loaders(args.input_format,train_file=args.train_file,val_file=args.val_file,
-    batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
+    train_loader,test_loader=get_loaders(args)
     X_example=next(iter(train_loader))
 
     #load model

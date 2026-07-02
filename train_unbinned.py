@@ -115,7 +115,7 @@ def train(model,train_loader,args):
       if loss_per_sample.item()<bestloss: bestloss=loss_per_sample.item()
       epoch_loss += loss.item() #Sum across epoch
       n_samples+=X.shape[0]
-      #if batch>500: break #FIXME
+      if batch>500: break #FIXME
 
   #Get the average loss across whole epoch (not same as average of per-batch averages)
   avg_loss = epoch_loss / n_samples
@@ -184,8 +184,7 @@ if __name__ == "__main__":
 
     # load and preprocess data
     print(f"Loading training set", flush=True)
-    train_loader,test_loader=get_loaders(args.input_format,train_file=args.train_file,val_file=args.val_file,
-    batch_size=args.batch_size, num_workers=args.num_workers,shuffle=args.shuffle)
+    train_loader,test_loader=get_loaders(args)
     X_example=next(iter(train_loader))
 
     # construct model

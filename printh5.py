@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 
 def make_hist(valueslist,name):
   fig, ax = plt.subplots()
-
   
   minval=np.min([np.min(vals) for vals in valueslist])
   maxval=np.max([np.max(vals) for vals in valueslist])
@@ -31,6 +30,9 @@ def recursivePrint(f,depth=0):
     if isinstance(val, h5py.Dataset):
         print(f"{space} Dataset: {key}")
         print(f"{space}\t type={val.dtype}, shape={val.shape}")
+        data = val[()]
+        filledval = data[data != -1]
+        print(f"{space}\t mean={np.mean(filledval):.3f}, std={np.std(filledval):.3f}")
         #print(f"{space}\t {val[:]}")
     elif isinstance(val, h5py.Group):
       print(f"{space} Group: {key}")
@@ -43,7 +45,8 @@ def recursiveDraw(f,N=1000):
 
   for key,val in f.items():
     if isinstance(val, h5py.Dataset):
-      print(f"{key}\t {val[:100]}")
+      print(f"Drawing {N} entries of key {key}")
+      print(f"{val[:100]}")
       values=val[:N].flatten()
       make_hist([values],"Plots/plot_"+key+".pdf")
     elif isinstance(val, h5py.Group):

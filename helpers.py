@@ -9,7 +9,7 @@ import ljpHelpers
 # ---------------------------------------------------------------------
 # Make the lundplane
 # ---------------------------------------------------------------------
-def make_lundplane(input_vec, pad_length=15):
+def make_lundplane(input_vec, pad_length=20):
 
   #Assume input is dimensions [Nevents, Nconstituents, 4-vecs]
   jetDef10 = fastjet.JetDefinition(fastjet.antikt_algorithm, 1.0, fastjet.E_scheme)
@@ -67,3 +67,29 @@ def model_has_nonfinite_parameters(model):
         if torch.is_tensor(tensor) and not torch.isfinite(tensor).all():
             return True
     return False
+
+# ---------------------------------------------------------------------
+# Pre-processing
+# ---------------------------------------------------------------------
+def preprocess_mean_std(input_format):
+    if input_format=="ktdr":
+        dr_mean,dr_std=2.786, 1.517
+        kt_mean,kt_std=-0.015, 1.534
+        return [[kt_mean,kt_std],[dr_mean,dr_std]]
+
+    elif input_format=="4vec":
+        e_mean,e_std=26.006, 60.301
+        px_mean,px_std=-0.002, 30.131
+        py_mean,py_std=0.011, 30.174
+        pz_mean,pz_std=-0.001, 49.941
+        return [[e_mean,e_std],[px_mean,px_std],[py_mean,py_std],[pz_mean,pz_std]]
+    return []
+
+def undo_preprocess(X,input_format):
+    mean_std=preprocess_mean_std(input_format)
+
+    X_new=torch.zeros(X.shape)
+    for ii in range(X_new.shape[-1]):
+        X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+    return X_new
+

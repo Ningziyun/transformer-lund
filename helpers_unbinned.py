@@ -29,10 +29,10 @@ class ktdr_dataset(torch.utils.data.Dataset):
     self.add_mask=add_mask
 
     f = h5py.File(file_path,'r')
-    drs=f["lundplane"]["dr"]
     kts=f["lundplane"]["kt"]
-    self.DR=drs[:,:NConstituents]
+    drs=f["lundplane"]["dr"]
     self.kt=kts[:,:NConstituents]
+    self.DR=drs[:,:NConstituents]
 
     #Check if next is -1 and padd last const to True
     if add_stop:
@@ -42,13 +42,12 @@ class ktdr_dataset(torch.utils.data.Dataset):
       self.mask=self.DR != -1
 
     if standardize:
-      dr_mean,dr_std=1.782,1.084
-      kt_mean,kt_std=1.397,1.117
-      self.DR=(self.DR-dr_mean)/dr_std
-      self.kt=(self.kt-kt_mean)/kt_std
+      mean_std=helpers.preprocess_mean_std("ktdr")
+      self.kt=(self.kt-mean_std[0][0])/mean_std[0][1]
+      self.DR=(self.DR-mean_std[1][0])/mean_std[1][1]
 
   def __getitem__(self, index):
-    inputs=np.array([self.DR[index],self.kt[index]])
+    inputs=np.array([self.kt[index],self.DR[index]])
     if self.add_stop:
       inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
@@ -62,7 +61,7 @@ class ktdr_dataset(torch.utils.data.Dataset):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_stop=False):
+  def __init__(self, file_path, NConstituents=20, add_stop=False, standardize=False):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
@@ -72,18 +71,25 @@ class constit_dataset(torch.utils.data.Dataset):
     pxs=f["constituents"]["PX"]
     pys=f["constituents"]["PY"]
     pzs=f["constituents"]["PZ"]
-    self.E=es[:,:NConstituents]
+    self.e=es[:,:NConstituents]
     self.px=pxs[:,:NConstituents]
     self.py=pys[:,:NConstituents]
     self.pz=pzs[:,:NConstituents]
 
+    if standardize:
+        mean_std=helpers.preprocess_mean_std("4vec")
+        self.e=(self.e-mean_std[0][0])/mean_std[0][1]
+        self.px=(self.px-mean_std[1][0])/mean_std[1][1]
+        self.py=(self.py-mean_std[2][0])/mean_std[2][1]
+        self.pz=(self.pz-mean_std[3][0])/mean_std[3][1]
+
     #Check if next is -1 and padd last const to True
     if add_stop:
-      self.stop=self.E[:,1:] == 0
+      self.stop=self.e[:,1:] == 0
       self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
 
   def __getitem__(self, index):
-    inputs=np.array([self.E[index],self.px[index],self.py[index],self.pz[index]])
+    inputs=np.array([self.e[index],self.px[index],self.py[index],self.pz[index]])
     if self.add_stop:
       inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
@@ -91,21 +97,21 @@ class constit_dataset(torch.utils.data.Dataset):
     return self.data
 
   def __len__(self):
-    return len(self.E)
+    return len(self.e)
 
-def get_loaders(input_format="ktdr",train_file=None,val_file=None,batch_size=256, num_workers=1, shuffle=True):
+def get_loaders(args):
 
-  if input_format=="ktdr":
-    train_dataset = ktdr_dataset(train_file)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
-    test_dataset = ktdr_dataset(val_file)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
+  if args.input_format=="ktdr":
+    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
+    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
-  elif input_format=="4vec":
-    train_dataset = constit_dataset(train_file)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
-    test_dataset = constit_dataset(val_file)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle,)
+  elif args.input_format=="4vec":
+    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
+    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
   return train_loader,test_loader
 
 # ---------------------------------------------------------------------
@@ -648,6 +654,7 @@ def save_arguments(args):
     while os.path.isdir(log_dir):
         i += 1
         log_dir = args.log_dir + f"_{i}"
+    if args.plot_dir==args.log_dir: args.plot_dir=log_dir
     args.log_dir = log_dir
 
     #Loop over arguments and save them
@@ -674,6 +681,8 @@ def parse_input():
     parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     parser.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
+    parser.add_argument("--standardize", action="store_true", default=False, help="Standardize the ouput (default: False)")
+    parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
 
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")

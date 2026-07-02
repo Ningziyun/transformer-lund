@@ -173,11 +173,11 @@ def lund_plot(
       mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
       maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
 
-  #FIXME 1=DR 0=kt
-  mins[0]=-5
-  maxs[0]=7
+  #FIXME 0=kt 1=DR
   mins[1]=-1
   maxs[1]=10
+  mins[0]=-5
+  maxs[0]=7
 
   #Make plot
   if Ndim>=2:
@@ -797,7 +797,10 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         if batch>1000: break #FIXME
 
         #X = X.to(device)
-        original_chunks.append(X)
+        if args.standardize:
+            original_chunks.append(helpers.undo_preprocess(X,args.input_format))
+        else:
+            original_chunks.append(X)
 
         for imodel, model in enumerate(models):
           if not active_models[imodel]:
@@ -805,6 +808,8 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
 
           try:
               generated_seq = model.generate(out_dimensions=X.shape)
+              if args.standardize:
+                generated_seq = helpers.undo_preprocess(generated_seq,args.input_format)
           except RuntimeError as err:
             reason = f"generation failed: {err}"
             print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)
@@ -827,7 +832,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
 
           if not printed_example:
             print("Input example")
-            print(X[0])
+            print(original_chunks[0][0])
             print("Generate example")
             starttime_single=time.time()
             print(generated_seq[0])
@@ -835,12 +840,11 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
             printed_example = True
 
           generated_chunks[imodel].append(generated_seq)
-
-      print("Took %.2f min to generate %i images"%((time.time()-starttime)/60,len(test_loader.dataset)), flush=True) 
+        Nimages+=X.shape[0]
+      print("Took %.2f min to generate %i images"%((time.time()-starttime)/60,Nimages), flush=True) 
 
       if len(original_chunks) == 0:
         raise ValueError("No validation batches were plotted")
-
       
       original = torch.cat(original_chunks)
       generated_list = [
@@ -929,13 +933,12 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         lund_inputs = plot_inputs
       else:
         starttime=time.time()
-        lund_original = helpers.make_lundplane(original)
-        lund_inputs = [lund_original.reshape(-1, lund_original.shape[-1])]
+        lund_original = helpers.make_lundplane(original) #return numpy array
+        lund_inputs = [lund_original.reshape(-1,2)]
         print("Took %.2f min to make the lund-plane"%((time.time()-starttime)/60), flush=True)
         for generated in generated_list:
-          lund_generated = helpers.make_lundplane(generated)
-          lund_inputs.append(lund_generated.reshape(-1, lund_generated.shape[-1]))
-
+          lund_generated = helpers.make_lundplane(generated) #FIXME missing chuncks maybe?
+          lund_inputs.append(lund_generated.reshape(-1,2))
 
         if make_projection:
             projection_plot(
