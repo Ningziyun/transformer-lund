@@ -386,10 +386,10 @@ def save_checkpoint(
 ):
 
     #From args figure out how much to save
-    save_mode = _config_get(args, "save_mode", "optimizer")
+    save_mode = _config_get(args, "save_mode", "full")
     if save_mode == "none":
         return None
-    if save_mode not in ("optimizer", "model"):
+    if save_mode not in ("full", "model"):
         raise ValueError("--save-mode must be one of: optimizer, model, none")
 
     #Get the path
@@ -413,7 +413,7 @@ def save_checkpoint(
     }
 
     #Add in the extra optimizer and learning info
-    if save_mode == "optimizer":
+    if save_mode == "full":
         checkpoint_info.update(
             {
                 "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
@@ -441,31 +441,35 @@ def save_checkpoint(
         print(f"Saved new best checkpoint to {best_path}", flush=True)
     return ckpt_path
 
-def load_checkpoint(shape, args, ignore_args=[]):
+def load_checkpoint(args):
     if len(args.model_path) == 0:
-      raise ValueError("load_checkpoint requires --model-path/--checkpoint")
+      raise ValueError("load_checkpoint requires --model-path")
     load_path = args.model_path[0] if isinstance(args.model_path, list) else args.model_path
     checkpoint_info = load_model(load_path)
 
-    #if the checkpoint file
-    if isinstance(checkpoint_info, dict) and "model_state_dict" in checkpoint_info:
+    return checkpoint_info
 
-      #Load all the arguments
-      checkpoint_info_args = checkpoint_info.get("args", {})
-      for key in vars(args):
-        if key in checkpoint_info_args:
-          if key in ignore_args: continue
-          setattr(args, key, checkpoint_info_args[key])
+def load_checkpoint_args(args, ignore_args=[], checkpoint_model=None):
+    if checkpoint_model==None:
+        checkpoint_info = load_checkpoint(args)
 
-      #Build the model and load the content
-      model = build_unbinned_model(shape, args)
-      model.load_state_dict(checkpoint_info["model_state_dict"])
-      return model, checkpoint_info
+    #Load all the arguments
+    checkpoint_info_args = checkpoint_info.get("args", {})
+    for key in vars(args):
+      if key in checkpoint_info_args:
+        if key in ignore_args: continue
+        setattr(args, key, checkpoint_info_args[key])
 
-    #if the usual torch load
-    else:
-      model = checkpoint_info
-      return model, None
+    return checkpoint_info
+
+def load_checkpoint_model(shape, args, checkpoint_model=None):
+    if checkpoint_model==None:
+        checkpoint_info = load_checkpoint(args)
+
+    model = build_unbinned_model(shape, args)
+    model.load_state_dict(checkpoint_info["model_state_dict"])
+
+    return model
 
 # ---------------------------------------------------------------------
 # Save/load loss and learning rates
@@ -569,12 +573,17 @@ def loss_plot(loss_train,loss_test,out_dir="./Plots/", loss_curves=None):
   epochs=range(1, n_epochs + 1)
 
   #Move to delta-loss if negative values
-  min_train=np.min(loss_train)
-  min_test=np.min(loss_test)
+  min_train=np.min(train_arr)
+  min_test=np.min(test_arr)
   if min_train<0 or min_test<0:
-      min_total=np.min(min_train,min_test)
-      loss_train+=min_total+1
-      loss_test+=min_total+1
+      print(train_arr)
+      print(test_arr)
+      print(min_train,min_test)
+      min_total=min(min_train,min_test)-1
+      train_arr-=min_total
+      test_arr-=min_total
+      print(train_arr)
+      print(test_arr)
 
   fig,ax = plt.subplots(figsize=(6.0, 4.0))
   if n_epochs > 0:
@@ -717,7 +726,7 @@ def parse_input():
     # logging / checkpointing
     parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
     parser.add_argument("--plot-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
-    parser.add_argument("--save-mode", type=str, default="optimizer", choices=["optimizer", "model", "none"], help="Saved training artifact: full info, model-state only, or none")
+    parser.add_argument("--save-mode", type=str, default="full", choices=["full", "model", "none"], help="Saved training artifact: full info, model-state only, or none")
     parser.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
     parser.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
     

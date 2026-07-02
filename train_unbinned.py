@@ -74,7 +74,7 @@ def train(model,train_loader,args):
   #Store some values
   bestloss=1e6
   epoch_loss=0.0
-  n_batches=0
+  n_samples=0
 
   #Loop batches
   for batch, X in enumerate(train_loader):
@@ -114,11 +114,11 @@ def train(model,train_loader,args):
         print(f"batch: {batch} loss:{loss_per_sample.item()}", flush=True)
       if loss_per_sample.item()<bestloss: bestloss=loss_per_sample.item()
       epoch_loss += loss.item() #Sum across epoch
-      n_batches += 1
+      n_samples+=X.shape[0]
       #if batch>500: break #FIXME
 
   #Get the average loss across whole epoch (not same as average of per-batch averages)
-  avg_loss = epoch_loss / max(n_batches, 1)
+  avg_loss = epoch_loss / n_samples
   print(f"train loss={avg_loss} best_batch_loss={bestloss}", flush=True)
   loss_train.append(avg_loss)
   return avg_loss
@@ -127,7 +127,8 @@ def test(model, test_loader, args):
   model.eval()  # disable dropout for evaluation
 
   #Store some values
-  num_samples = len(test_loader.dataset)
+  #num_samples = len(test_loader.dataset)
+  num_samples=0
   epochloss = 0.0
 
   # CNF needs gradients; others don't.
@@ -150,9 +151,11 @@ def test(model, test_loader, args):
         raise NonFiniteLossError( f"Non-finite test loss at batch {batch}: {loss.item()}")
 
       #Print loss and save some for later
-      epochloss += loss.item() #sum the loss across the batch, rolling sum across all batches
       if batch % 100 == 0:
-        print(f"test batch: {batch}", flush=True)
+        loss_per_sample = loss / X.shape[0]
+        print(f"test batch: {batch} loss:{loss_per_sample}", flush=True)
+      epochloss += loss.item() #sum the loss across the batch, rolling sum across all batches
+      num_samples+=X.shape[0]
 
     #Get the average loss across whole batch
     epochloss /= num_samples #Divide total numper of events
@@ -173,6 +176,12 @@ if __name__ == "__main__":
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}", flush=True)
 
+    #If continuning
+    if args.contin:
+        checkpoint_info=load_checkpoint_args(args)
+    else:
+        checkpoint_info = None
+
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args.input_format,train_file=args.train_file,val_file=args.val_file,
@@ -180,13 +189,10 @@ if __name__ == "__main__":
     X_example=next(iter(train_loader))
 
     # construct model
-    #If continuing from existing model
     if args.contin:
-        model,checkpoint_info=load_checkpoint(X_example.shape,args)
-    #make usual model
+        model=load_checkpoint_model(X_example.shape,args)
     else:
         model = build_unbinned_model(X_example.shape, args)
-        checkpoint_info = None
 
     #Make output directory and make metadata file to save arguments
     save_arguments(args)

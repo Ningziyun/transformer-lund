@@ -836,7 +836,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
 
           generated_chunks[imodel].append(generated_seq)
 
-      print("Took %.2e min to generate %i images"%((time.time()-starttime)/60,len(test_loader.dataset)), flush=True) 
+      print("Took %.2f min to generate %i images"%((time.time()-starttime)/60,len(test_loader.dataset)), flush=True) 
 
       if len(original_chunks) == 0:
         raise ValueError("No validation batches were plotted")
@@ -931,7 +931,7 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
         starttime=time.time()
         lund_original = helpers.make_lundplane(original)
         lund_inputs = [lund_original.reshape(-1, lund_original.shape[-1])]
-        print("Took %.2e min to make the lund-plane"%((time.time()-starttime)/60,len(test_loader.dataset)), flush=True)
+        print("Took %.2f min to make the lund-plane"%((time.time()-starttime)/60), flush=True)
         for generated in generated_list:
           lund_generated = helpers.make_lundplane(generated)
           lund_inputs.append(lund_generated.reshape(-1, lund_generated.shape[-1]))

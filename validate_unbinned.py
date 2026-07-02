@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import sys
 
 from helpers import *
 from helpers_unbinned import *
@@ -8,6 +9,10 @@ if __name__ == "__main__":
 
     #Load arguments
     args = parse_input()
+    ignore_list=[]
+    for argv in sys.argv[1:]:
+        if "--" in argv: ignore_list.append(argv.replace("--","").replace("-","_"))
+    load_checkpoint_args(args,ignore_args=ignore_list)
     set_seeds(args.seed)
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}", flush=True)
@@ -19,7 +24,8 @@ if __name__ == "__main__":
     X_example=next(iter(train_loader))
 
     #load model
-    model,checkpoint_info=load_checkpoint(X_example.shape,args,ignore_args=["plot_dir"])
+    print(f"Loading model", flush=True)
+    model=load_checkpoint_model(X_example.shape,args)
 
     #Make validation plots
     validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"], make_projection=True,)
