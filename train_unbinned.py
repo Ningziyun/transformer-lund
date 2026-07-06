@@ -12,28 +12,34 @@ class NonFiniteLossError(RuntimeError):
 # ---------------------------------------------------------------------
 def evaluate_loss(model,X,mask,args):
 
+  if args.input_format=="4vec" and args.flatten:
+    w=flatten_weight(X)
+  else:
+    w=torch.ones(X.shape[0:-1])
+
+  #For all flow-based models
+  if args.nf or args.diff or args.sde or args.cnf or args.fm:
+    w2= w.repeat_interleave(X.shape[-1], dim=-1)
+    X = X.view(X.shape[0], -1)
+
   #All the specifics of the loss function for each model
   if args.nf:
-    X = X.view(X.shape[0], -1)
-    loss=model.nll_loss(X).sum()
-    return loss
+    loss=(model.nll_loss(X)*w2).sum()
+    return loss,w2.sum()
   elif args.diff:
-    X = X.view(X.shape[0], -1)
-    loss=model.mse_loss(X).sum()
-    return loss
+    loss=(model.mse_loss(X)*w2).sum()
+    return loss,w2.sum()
   elif args.sde:
-    X = X.view(X.shape[0], -1)
-    loss=model.mse_loss(X).sum()
-    return loss
+    loss=(model.mse_loss(X)*w2).sum()
+    return loss,w2.sum()
   elif args.cnf:
-    X = X.view(X.shape[0], -1)
-    loss = model.nll_loss(X).sum()
-    return loss
+    loss = (model.nll_loss(X)*w2).sum()
+    return loss,w2.sum()
   elif args.fm:
-    X = X.view(X.shape[0], -1)
-    loss = model.mse_loss(X).sum()
-    return loss
+    loss = (model.mse_loss(X)*w2).sum()
+    return loss,w2.sum()
 
+  #Auto-regressive models
   else:
     inputs = F.pad(input=X[:, :-1, :], pad=(0,0,1,0), mode='constant', value=0) #X[:, :-1, :]   # all but last, with a 0 start token at front #pad=pad(left, right, top, bottom))
     targets = X # the whole f-vector
@@ -43,17 +49,12 @@ def evaluate_loss(model,X,mask,args):
     mask=None
 
     if args.mdn:
-        loss = model.nll_loss(pred, targets, mask)
+        loss = (model.nll_loss(pred, targets, mask)*w).sum()
     else:
-        loss = model.mse_loss(pred, targets)
-    loss=loss.sum()
+        loss = (model.mse_loss(pred, targets)*w).sum()
+    return loss, w.sum()
 
-  '''
-  else:
-    inputs = X[:, :-1, :]   # all but last
-    targets = X[:, 1:, :]   # all but first
-    pred = model(inputs)       # (batch, seq_len-1, feature_dim)
-
+    '''
     if args.mixed_loss:
       lambd=1
       #print(loss_fn(pred[:,:,:-1],targets[:,:,:-1]).shape,loss_fn2(pred[:,:,-1],targets[:,:,-1]).shape)
@@ -64,9 +65,7 @@ def evaluate_loss(model,X,mask,args):
       loss=loss.sum()
     else:
       loss=loss[mask].sum() 
-  '''
-
-  return loss
+    '''
 
 def train(model,train_loader,args):
   model.train() #Set to training mode to caluclate gradients
@@ -84,8 +83,8 @@ def train(model,train_loader,args):
 
       #calculate loss across the batch (summed and also seperate averaged value)
       optimizer.zero_grad()
-      loss=evaluate_loss(model, X, mask, args)
-      loss_per_sample = loss / X.shape[0] #average the loss across batch
+      loss,sum_w =evaluate_loss(model, X, mask, args)
+      loss_per_sample = loss / sum_w #average the loss across batch
 
       #safety check
       if not torch.isfinite(loss_per_sample):
@@ -114,8 +113,8 @@ def train(model,train_loader,args):
         print(f"batch: {batch} loss:{loss_per_sample.item()}", flush=True)
       if loss_per_sample.item()<bestloss: bestloss=loss_per_sample.item()
       epoch_loss += loss.item() #Sum across epoch
-      n_samples+=X.shape[0]
-      if batch>500: break #FIXME
+      n_samples += sum_w
+      #if batch>1000: break #FIXME
 
   #Get the average loss across whole epoch (not same as average of per-batch averages)
   avg_loss = epoch_loss / n_samples
@@ -144,7 +143,7 @@ def test(model, test_loader, args):
       X = X.to(device)
 
       #calculate loss across the batch (summed, not averaged)
-      loss = evaluate_loss(model, X, mask, args)
+      loss,sum_w = evaluate_loss(model, X, mask, args)
 
       #safety check
       if not torch.isfinite(loss):
@@ -155,7 +154,7 @@ def test(model, test_loader, args):
         loss_per_sample = loss / X.shape[0]
         print(f"test batch: {batch} loss:{loss_per_sample}", flush=True)
       epochloss += loss.item() #sum the loss across the batch, rolling sum across all batches
-      num_samples+=X.shape[0]
+      num_samples+=sum_w
 
     #Get the average loss across whole batch
     epochloss /= num_samples #Divide total numper of events

@@ -6,19 +6,23 @@ import sys,os
 import numpy as np
 import matplotlib.pyplot as plt
 
-def make_hist(valueslist,name):
+def make_hist(valueslist,name,Nbins=20):
   fig, ax = plt.subplots()
   
   minval=np.min([np.min(vals) for vals in valueslist])
   maxval=np.max([np.max(vals) for vals in valueslist])
   #print(np.histogram_bin_edges(valueslist[0]))
-  bins=np.linspace(minval,maxval,20)
+  bins=np.linspace(minval,maxval,Nbins)
 
+  return_contents=[]
   for values in valueslist:
-    ax.hist(values,bins=bins,histtype="step")
+    contents,bins,_=ax.hist(values,bins=bins,histtype="step")
+    return_contents.append(contents)
   #plt.show()
   fig.savefig(name)
   plt.close(fig)
+
+  return return_contents, bins
 
 def recursivePrint(f,depth=0):
   space="\t"*depth
@@ -52,6 +56,26 @@ def recursiveDraw(f,N=1000):
     elif isinstance(val, h5py.Group):
       recursiveDraw(val,N)
 
+def findValByKey(f,key):
+    for key2,val in f.items():
+        if isinstance(val, h5py.Dataset):
+            if key2==key: 
+                return val
+        elif isinstance(val, h5py.Group):
+            return findValByKey(val,key)
+    return None
+
+def deriveFlattening(f,key):
+    values=findValByKey(f,key)
+    values=values[:].flatten()
+    #values=values[values!=-1]
+    content,bins=make_hist([values],"Plots/plot_"+key+".pdf",50)
+
+    weights=1/content[0]
+    weights[np.isinf(weights)] = 0
+    print("weights",weights)
+    print("bin_edges=",bins)
+
 if __name__ == "__main__":
   if len(sys.argv)<2:
     print("No input files")
@@ -61,7 +85,8 @@ if __name__ == "__main__":
   f = h5py.File(infile, 'r')
 
   recursivePrint(f)
-  recursiveDraw(f,100)
+  #recursiveDraw(f,100)
+  deriveFlattening(f,"E")
 
   #Draw seperating via labels, hardcoded right now
   '''

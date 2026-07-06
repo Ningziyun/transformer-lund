@@ -72,6 +72,7 @@ def model_has_nonfinite_parameters(model):
 # Pre-processing
 # ---------------------------------------------------------------------
 def preprocess_mean_std(input_format):
+    #Predefined feature for standardizing
     if input_format=="ktdr":
         dr_mean,dr_std=2.786, 1.517
         kt_mean,kt_std=-0.015, 1.534
@@ -86,6 +87,7 @@ def preprocess_mean_std(input_format):
     return []
 
 def undo_preprocess(X,input_format):
+    #Revert the standardization
     mean_std=preprocess_mean_std(input_format)
 
     X_new=torch.zeros(X.shape)
@@ -93,3 +95,25 @@ def undo_preprocess(X,input_format):
         X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
     return X_new
 
+
+def flatten_weight(X):
+    #Predfined value reweight
+    weights = torch.tensor([
+        1.27576728e-08,5.90976731e-07,1.63552892e-06,3.32993680e-06,5.90960666e-06,9.69828631e-06,1.52290448e-05,2.31878681e-05,3.44328903e-05,5.08854061e-05,7.21865300e-05,1.02375102e-04,1.42328494e-04,1.96386489e-04,2.76166805e-04,3.56506239e-04,4.95540139e-04,6.30119723e-04,8.00000000e-04,1.06951872e-03,1.46842878e-03,1.72117040e-03,2.38095238e-03,3.33333333e-03,3.90625000e-03,5.34759358e-03,7.24637681e-03,9.90099010e-03,1.33333333e-02,1.75438596e-02,1.58730159e-02,3.12500000e-02,4.54545455e-02,5.26315789e-02,4.76190476e-02,1.11111111e-01,3.33333333e-01,1.66666667e-01,2.00000000e-01,3.33333333e-01,5.00000000e-01,2.50000000e-01,0.00000000e+00,1.00000000e+00,1.00000000e+00,1.00000000e+00,0.00000000e+00,0.00000000e+00,1.00000000e+00
+        ], dtype=X.dtype, device=X.device)
+    bin_edges = torch.tensor([
+        -1.00000000e+00,5.62644844e+01,1.13528969e+02,1.70793457e+02,2.28057938e+02,2.85322418e+02,3.42586914e+02,3.99851379e+02,4.57115875e+02,5.14380371e+02,5.71644836e+02,6.28909302e+02,6.86173828e+02,7.43438293e+02,8.00702759e+02,8.57967285e+02,9.15231750e+02,9.72496216e+02,1.02976074e+03,1.08702515e+03,1.14428967e+03,1.20155420e+03,1.25881860e+03,1.31608313e+03,1.37334766e+03,1.43061206e+03,1.48787659e+03,1.54514111e+03,1.60240552e+03,1.65967004e+03,1.71693457e+03,1.77419897e+03,1.83146350e+03,1.88872803e+03,1.94599243e+03,2.00325696e+03,2.06052148e+03,2.11778589e+03,2.17505029e+03,2.23231494e+03,2.28957935e+03,2.34684375e+03,2.40410840e+03,2.46137280e+03,2.51863721e+03,2.57590186e+03
+        ], dtype=X.dtype, device=X.device)
+
+    values = X[..., 0] #E for [Nbatch, Nconstituent]
+
+    # Find which bin each value belongs to
+    idx = torch.bucketize(values, bin_edges) - 1
+
+    # Clamp values outside the range
+    idx = idx.clamp(0, len(weights) - 1)
+
+    # Lookup weights
+    w = weights[idx]
+
+    return w

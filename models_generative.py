@@ -155,7 +155,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
     if mask is not None:
-      return -log_prob[mask].sum()  # mean over valid tokens only
+      return -log_prob[mask].sum()  # sum over valid tokens only
     else:
       return -log_prob.sum() #Sum over all the training sample
 
@@ -382,7 +382,8 @@ class FlowMatching(nn.Module):
 
         pred=self.vf(xt,t)
 
-        loss=((pred-ut)**2).sum(-1).mean()
+        #loss=((pred-ut)**2)
+        loss = F.mse_loss(pred,ut,reduction='none')
 
         return loss
 
@@ -824,7 +825,7 @@ class model_diffusion(nn.Module):
         noise_pred = self.epsilon_model(xt, t)
 
         # Standard DDPM objective |\epsilon-\epsilon_theta|
-        loss = F.mse_loss(noise_pred, noise)
+        loss = F.mse_loss(noise_pred, noise,reduction='none')
 
         return loss
 
@@ -975,7 +976,7 @@ class model_score_SDE(nn.Module):
         #Loss is |epsilon_theta-eps|
         target = -epsilon
         pred = sigma[:, None] * score
-        loss = F.mse_loss(pred, target)
+        loss = F.mse_loss(pred, target,reduction="none")
 
         return loss
 
