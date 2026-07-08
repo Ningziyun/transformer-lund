@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import argparse
 
 import torch
-from torchinfo import summary
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
@@ -614,31 +613,14 @@ def loss_plot(loss_train,loss_test,out_dir="./Plots/", loss_curves=None):
 # ---------------------------------------------------------------------
 # Arguments and metadata saving
 # ---------------------------------------------------------------------
-def append_training_metadata(args, best_epoch=None, best_loss=None):
+def append_result_metadata(args, results):
     txt_path = os.path.join(args.log_dir, "arguments.txt")
     with open(txt_path, "a") as f:
-        if best_epoch is None:
-            f.write("\n")
-            f.write(f"{'optimizer':20s} {args.optimizer}\n")
-            f.write(f"{'weight_decay':20s} {args.weight_decay}\n")
-            f.write(f"{'grad_clip':20s} {args.grad_clip}\n")
-            f.write(f"{'scheduler':20s} {args.scheduler}\n")
-            f.write(f"{'scheduler_min_lr':20s} {args.scheduler_min_lr}\n")
-            f.write(f"{'plateau_factor':20s} {args.plateau_factor}\n")
-            f.write(f"{'plateau_patience':20s} {args.plateau_patience}\n")
-            f.write(f"{'cos_damping_start_epoch':20s} {args.cos_damping_start_epoch}\n")
-            f.write(f"{'cos_damping_end_epoch':20s} {args.cos_damping_end_epoch if args.cos_damping_end_epoch is not None else args.epochs}\n")
-            f.write(f"{'cos_damping_final_lr':20s} {args.cos_damping_final_lr}\n")
-            f.write(f"{'cos_damping_amplitude':20s} {args.cos_damping_amplitude}\n")
-            f.write(f"{'cos_damping_period_epochs':20s} {args.cos_damping_period_epochs}\n")
-        else:
-            f.write("\n")
-            f.write(f"best_epoch: {best_epoch}\n")
-            f.write(f"best_loss: {best_loss}\n")
-            if args.save_mode != "none":
-                f.write("best_checkpoint: checkpoints/best.pt\n")
+        f.write("\n")
+        for k, v in results.items():
+            f.write(f"{k:20s} {v}\n")
 
-def save_arguments(args):
+def save_argument_metadata(args):
     #If continuing
     if getattr(args, "contin", False):
         os.makedirs(args.log_dir, exist_ok=True)
@@ -665,8 +647,6 @@ def save_arguments(args):
         for k, v in arg_dict.items():
             f.write(f"{k:20s} {v}\n")
 
-    #Also append the metadata
-    append_training_metadata(args)
     return
 
 def parse_input():
@@ -741,15 +721,13 @@ def parse_input():
     parser.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
     
     # plotting options
-    parser.add_argument( "--hist2d-xrange", type=float, nargs=2, default=None, help="2D Lund histogram x range: xmin xmax",)
-    parser.add_argument( "--hist2d-yrange", type=float, nargs=2, default=None, help="2D Lund histogram y range: ymin ymax",)
+    parser.add_argument( "--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
+    parser.add_argument( "--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
     parser.add_argument( "--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)
     parser.add_argument( "--hist2d-shape", "--hist2d_shape", "--hist2d-layout", dest="hist2d_shape", type=int, nargs=2, default=None, metavar=("ROWS", "COLS"), help="Manual 2D Lund subplot shape. Default auto: 2 -> 1x2, 3 -> 1x3, 4 -> 2x2",)
     parser.add_argument( "--plot-max-batches", type=int, default=None, help="Only plot this many validation batches. Default: plot all batches",)
     parser.add_argument( "--hist1d-ranges", type=float, nargs="+", default=None, help="Flattened 1D ranges: kt_min kt_max dr_min dr_max",)
     parser.add_argument( "--hist1d-bins", type=int, default=30, help="Number of bins for 1D histograms",)
-    parser.add_argument( "--hist1d-logy", action="store_true", default=True, help="Also save log-y 1D histograms",)
-    parser.add_argument( "--hist-ratio-diff", "--hist-diff-ratio", action="store_true", default=True, help="Also save generated-vs-original relative difference plots for multi-sample 1D/2D histograms",)
     parser.add_argument( "--hist-ratio-min-count", type=int, default=5, help="Mask 2D relative-difference bins with fewer original entries than this",)
     parser.add_argument( "--hist-ratio-vmax", type=float, default=1.0, help="Symmetric color limit for 2D fractional relative-difference plots",)
 

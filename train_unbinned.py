@@ -4,6 +4,8 @@ from helpers import *
 from helpers_unbinned import *
 from helpers_plotting import *
 
+from torchinfo import summary
+
 class NonFiniteLossError(RuntimeError):
   pass
 
@@ -13,9 +15,9 @@ class NonFiniteLossError(RuntimeError):
 def evaluate_loss(model,X,mask,args):
 
   if args.input_format=="4vec" and args.flatten:
-    w=flatten_weight(X)
+    w=flatten_weight(X,device=device)
   else:
-    w=torch.ones(X.shape[0:-1])
+    w=torch.ones(X.shape[0:-1],device=device)
 
   #For all flow-based models
   if args.nf or args.diff or args.sde or args.cnf or args.fm:
@@ -71,7 +73,7 @@ def train(model,train_loader,args):
   model.train() #Set to training mode to caluclate gradients
 
   #Store some values
-  bestloss=1e6
+  best_loss=1e6
   epoch_loss=0.0
   n_samples=0
 
@@ -111,28 +113,24 @@ def train(model,train_loader,args):
       #Print loss and save some for later
       if batch % 100 == 0:
         print(f"batch: {batch} loss:{loss_per_sample.item()}", flush=True)
-      if loss_per_sample.item()<bestloss: bestloss=loss_per_sample.item()
+      if loss_per_sample.item()<best_loss: best_loss=loss_per_sample.item()
       epoch_loss += loss.item() #Sum across epoch
       n_samples += sum_w
       #if batch>1000: break #FIXME
 
   #Get the average loss across whole epoch (not same as average of per-batch averages)
-  avg_loss = epoch_loss / n_samples
-  print(f"train loss={avg_loss} best_batch_loss={bestloss}", flush=True)
-  loss_train.append(avg_loss)
-  return avg_loss
+  epoch_loss /= n_samples
+  print(f"train loss={epoch_loss} best_batch_loss={best_loss}", flush=True)
+  return epoch_loss
 
 def test(model, test_loader, args):
   model.eval()  # disable dropout for evaluation
 
   #Store some values
-  #num_samples = len(test_loader.dataset)
   num_samples=0
-  epochloss = 0.0
+  epoch_loss = 0.0
 
   # CNF needs gradients; others don't.
-  #grad_context = nullcontext() if args.cnf else torch.no_grad()
-
   with torch.set_grad_enabled(args.cnf): # CNF needs autograd w.r.t. x to estimate divergence; do NOT use torch.no_grad() here.
 
     #Loop batches
@@ -153,14 +151,13 @@ def test(model, test_loader, args):
       if batch % 100 == 0:
         loss_per_sample = loss / X.shape[0]
         print(f"test batch: {batch} loss:{loss_per_sample}", flush=True)
-      epochloss += loss.item() #sum the loss across the batch, rolling sum across all batches
+      epoch_loss += loss.item() #sum the loss across the batch, rolling sum across all batches
       num_samples+=sum_w
 
     #Get the average loss across whole batch
-    epochloss /= num_samples #Divide total numper of events
-    print(f"test loss ={epochloss}", flush=True)
-    loss_test.append(epochloss)
-    return epochloss
+    epoch_loss /= num_samples #Divide total numper of events
+    print(f"test loss={epoch_loss}", flush=True)
+    return epoch_loss
 
 # ---------------------------------------------------------------------
 # main
@@ -188,32 +185,32 @@ if __name__ == "__main__":
 
     # construct model
     if args.contin:
-        model=load_checkpoint_model(X_example.shape,args)
+        model = load_checkpoint_model(X_example.shape,args)
     else:
         model = build_unbinned_model(X_example.shape, args)
 
     #Make output directory and make metadata file to save arguments
-    save_arguments(args)
+    save_argument_metadata(args)
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
     if args.nf:
       X_example = X_example.view(X_example.shape[0], -1)
       print("Input shape,",X_example.shape, flush=True)
-      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example)[0].shape, model(X_example)[1].shape, flush=True)
     elif args.diff or args.sde or args.cnf or args.fm:
       X_example = X_example.view(X_example.shape[0], -1)
       print("Input shape,",X_example.shape, flush=True)
-      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape,flush=True)
     elif args.mdn:
       print("Input shape,",X_example.shape, flush=True)
-      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape, flush=True)
     else:   
       print("Input shape,",X_example.shape, flush=True)
-      summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape, flush=True)
     model.to(device)
 
@@ -234,8 +231,8 @@ if __name__ == "__main__":
     best_epoch=-1
     patience_counter=0
     patience = args.patience
-    loss_test=[]
-    loss_train=[]
+    test_losses=[]
+    train_losses=[]
     lr_history=[]
     loss_curves={}
     stopped_nonfinite = False
@@ -246,8 +243,8 @@ if __name__ == "__main__":
       else:
         best_loss = float(best_loss)
       best_epoch = checkpoint_info.get("best_epoch", best_epoch)
-      loss_test = list(checkpoint_info.get("test_losses", []))
-      loss_train = list(checkpoint_info.get("train_losses", []))
+      test_losses = list(checkpoint_info.get("test_losses", []))
+      train_losses = list(checkpoint_info.get("train_losses", []))
       lr_history = list(checkpoint_info.get("lr_history", []))
       loss_curves = dict(checkpoint_info.get("loss_curves", {}))
     epochs=args.epochs 
@@ -262,13 +259,22 @@ if __name__ == "__main__":
 
       #Run the training loop and check for errors
       try:
+        starttime=time.time()
         train_loss = train(model,train_loader,args)
+        train_losses.append(train_loss.item())
+        train_time=(time.time()-starttime)/60
+
+        starttime=time.time()
         test_loss = test(model,test_loader,args)
+        test_losses.append(test_loss.item())
+        test_time=(time.time()-starttime)/60
+
       except NonFiniteLossError as err:
         print(f"Stopping due to non-finite value: {err}", flush=True)
         stopped_nonfinite = True
         break
-      print("Took %.2f minutes to run"%((time.time()-starttime)/60), flush=True)
+      print("Took %.2f(%.2f) minutes to run training(testing)"%(train_time,test_time), flush=True)
+
       current_lr = optimizer.param_groups[0]["lr"]
       lr_history.append(current_lr)
 
@@ -281,6 +287,8 @@ if __name__ == "__main__":
         patience_counter=0
       else:
         patience_counter+=1
+
+      #Step the scheduler
       step_scheduler(scheduler, args, metric=best_metric)
 
       #Checkpoint info
@@ -292,8 +300,8 @@ if __name__ == "__main__":
         loss=best_metric,
         args=args,
         is_best=improved,
-        train_losses=loss_train,
-        test_losses=loss_test,
+        train_losses=train_losses,
+        test_losses=test_losses,
         loss_curves=loss_curves,
         lr_history=lr_history,
         best_epoch=best_epoch,
@@ -309,18 +317,34 @@ if __name__ == "__main__":
     # ---------------------------------------------------------------------
     # Save info
     # ---------------------------------------------------------------------
-    #update metadata with some result info
-    append_training_metadata(args, best_epoch=best_epoch, best_loss=best_loss)
-
     #Make loss plots and scheduler plots
-    loss_plot(loss_train,loss_test,out_dir=args.log_dir,loss_curves=loss_curves)
+    loss_plot(train_losses,test_losses,out_dir=args.log_dir,loss_curves=loss_curves)
     save_lr_csv(lr_history, out_dir=args.log_dir)
     save_lr_plot(lr_history, out_dir=args.log_dir)
+
+    #Store some results in a dictionary
+    results={}
+    results["model_paramaters"]=modelstats.total_params
+    results["best_epoch"]=best_epoch
+    results["best_loss"]=best_loss
+    results["checkpoint"]="checkpoints/best.pt"
+    results["train_time"]=train_time
+    results["test_time"]=test_time
+    results["train_N"]=len(train_loader.dataset)
+    results["test_N"]=len(test_loader.dataset)
+    results["train_losses"]=train_losses
+    results["test_losses"]=test_losses
+    results["lr_history"]=lr_history
 
     #Make validation plots
     if stopped_nonfinite:
       print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
-      validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"], make_projection=True, unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
+      validate_unbinned_models( [model], test_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
     else:
-      validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"], make_projection=True,)
+      validate_unbinned_models( [model], test_loader, args, results=results, labels=["original", "generated"])
+    print("Done")
+
+    #update metadata with some result ddinfo
+    append_result_metadata(args,results)
+
     print("Done")

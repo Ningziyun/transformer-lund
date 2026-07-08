@@ -104,180 +104,7 @@ def _wrapped_note(note_lines, width=150):
         return ""
     return "\n".join(textwrap.wrap(" | ".join(note_lines), width=width, break_long_words=False))
 
-# ---------------------------------------------------------------------
-# Main plots
-# ---------------------------------------------------------------------
-def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="./Plots/", name="projection", unavailable_notes=None):
-
-  if not os.path.exists(out_dir):
-    os.makedirs(out_dir)
-
-  linestyles=["-","--","-.",":"]
-
-  #Get ranges
-  Ndim=inputs[0].shape[1]
-  Nin=len(inputs)
-  mins=np.zeros(Ndim)
-  maxs=np.zeros(Ndim)
-  for ii in range(Ndim):
-    for jj in range(Nin):
-      mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
-      maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
-
-  #make plot
-  fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
-  if Ndim==1: axs=[axs]
-  for ii in range(Ndim):
-    for jj in range(Nin):
-      axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
-    if ii==0: axs[0].legend()
-    axs[ii].set_yscale("log")
-
-  if unavailable_notes:
-    note_text = "Unavailable:\n" + "\n".join(
-      f"{label}: {reason}" for label, reason in unavailable_notes
-    )
-    fig.text(0.98, 0.5, note_text, ha="right", va="center", fontsize=8)
-
-  fig.savefig(os.path.join(out_dir,name+".png"))
-  fig.savefig(os.path.join(out_dir,name+".pdf"))
-  plt.close(fig)
-  print(f"Plotting projections to {out_dir}/{name}.pdf")
-
-def lund_plot(
-    inputs,
-    labels=["original","generated","predicted"],
-    out_dir="./Plots/",
-    hist2d_xrange=None,
-    hist2d_yrange=None,
-    hist2d_bins=(20, 20),
-    hist2d_shape=None,
-    hist2d_layout=None,
-    unavailable_notes=None,
-):
-
-  #Get ranges
-  Ndim=inputs[0].shape[1]
-  Nin=len(inputs)
-  unavailable_notes = unavailable_notes or []
-  Nplots = Nin + len(unavailable_notes)
-  use_compared_titles = Nplots > 1
-  diff_labels, common_items = _caption_comparison(labels, first_run_idx=1) if use_compared_titles else ([], [])
-
-  if not os.path.exists(out_dir):
-    os.makedirs(out_dir)
-  mins=np.zeros(Ndim)
-  maxs=np.zeros(Ndim)
-  for ii in range(Ndim):
-    for jj in range(Nin):
-      mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
-      maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
-
-  #FIXME 0=kt 1=DR
-  mins[1]=-1
-  maxs[1]=10
-  mins[0]=-5
-  maxs[0]=7
-
-  #Make plot
-  if Ndim>=2:
-    # Create subplots for each input (original, generated, etc.)
-    if hist2d_shape is None:
-      hist2d_shape = hist2d_layout
-    nrows, ncols = resolve_hist2d_shape(Nplots, hist2d_shape)
-    fig, axs = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(5.0 * ncols + 1.0, 4.4 * nrows + 0.6),
-        squeeze=False,
-    )
-    flat_axs = axs.ravel()
-    used_axs = flat_axs[:Nplots]
-
-    last_hist = None
-    for jj in range(Nin):
-        ax = used_axs[jj]
-        # Determine plotting range
-        x_range = hist2d_xrange if hist2d_xrange is not None else [mins[1], maxs[1]]
-        y_range = hist2d_yrange if hist2d_yrange is not None else [mins[0], maxs[0]]
-
-        # Plot 2D histogram
-        last_hist = ax.hist2d(
-            inputs[jj][:, 1],
-            inputs[jj][:, 0],
-            range=[x_range, y_range],
-            bins=hist2d_bins,
-            cmap="Blues",
-            norm="log"
-        )
-
-        # --------------------------
-        # Add titles and labels
-        # --------------------------
-
-        if use_compared_titles:
-            if jj == 0:
-                panel_label = "original"
-            elif jj - 1 < len(diff_labels):
-                panel_label = diff_labels[jj - 1]
-            else:
-                panel_label = f"run {jj}"
-        else:
-            panel_label = str(labels[jj]) if jj < len(labels) else f"sample_{jj}"
-        ax.set_title(panel_label, pad=8, fontsize=10)
-
-        # Axis labels
-        ax.set_xlabel(r"$\log(1/\Delta R)$")
-        ax.set_ylabel(r"$\log(k_t)$")
-
-    for offset, (label, reason) in enumerate(unavailable_notes):
-        ax = used_axs[Nin + offset]
-        ax.set_title(label)
-        ax.text(
-            0.5,
-            0.5,
-            f"Plot unavailable\n{reason}",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-            fontsize=10,
-            wrap=True,
-        )
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    for ax in flat_axs[Nplots:]:
-      ax.set_visible(False)
-
-    # --------------------------
-    # Add colorbar (shared)
-    # --------------------------
-    if last_hist is not None:
-      cbar = fig.colorbar(last_hist[3], ax=used_axs.tolist(), fraction=0.022, pad=0.055)
-      cbar.set_label("Density (log scale)")
-
-    fig.suptitle("Lund Plane Distribution", fontsize=14, y=0.985)
-    caption_lines = _plot_note_from_common(common_items, unavailable_notes)
-    bottom_margin = 0.13 if caption_lines else 0.09
-    fig.subplots_adjust(left=0.08, right=0.88, bottom=bottom_margin, top=0.90, wspace=0.30, hspace=0.55)
-    if caption_lines:
-      fig.text(
-        0.08,
-        0.025,
-        _wrapped_note(caption_lines, width=150),
-        ha="left",
-        va="bottom",
-        fontsize=8,
-      )
-
-    # Save
-    name = "lund"
-    fig.savefig(os.path.join(out_dir, name + ".png"), bbox_inches="tight")
-    fig.savefig(os.path.join(out_dir, name + ".pdf"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"Plotting lund-plot to {out_dir}/{name}.pdf")
-
-def resolve_hist2d_shape(nplots, hist2d_shape=None):
+def _resolve_hist2d_shape(nplots, hist2d_shape=None):
   if hist2d_shape is not None:
     nrows, ncols = hist2d_shape
     if nrows < 1 or ncols < 1:
@@ -334,6 +161,46 @@ def _symmetric_limit(values, fallback=1.0):
     vmax = np.percentile(merged, 99.0)
     vmax = max(vmax, np.max(merged) if vmax == 0 else vmax)
     return vmax if vmax > 0 else fallback
+
+# ---------------------------------------------------------------------
+# Main plots
+# ---------------------------------------------------------------------
+def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="./Plots/", name="projection", unavailable_notes=None):
+
+    #Make ouput directory if needed
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    linestyles=["-","--","-.",":"]
+
+    #Get ranges
+    Ndim=inputs[0].shape[1]
+    Nin=len(inputs)
+    mins=np.zeros(Ndim)
+    maxs=np.zeros(Ndim)
+    for ii in range(Ndim):
+        for jj in range(Nin):
+            mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
+            maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
+
+    #make plot
+    fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
+    if Ndim==1: axs=[axs]
+    for ii in range(Ndim):
+        for jj in range(Nin):
+            axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
+        if ii==0: axs[0].legend()
+        axs[ii].set_yscale("log")
+
+    #Add some notes if needed
+    if unavailable_notes:
+        note_text = "Unavailable:\n" + "\n".join(f"{label}: {reason}" for label, reason in unavailable_notes)
+        fig.text(0.98, 0.5, note_text, ha="right", va="center", fontsize=8)
+
+    fig.savefig(os.path.join(out_dir,name+".png"))
+    fig.savefig(os.path.join(out_dir,name+".pdf"))
+    plt.close(fig)
+    print(f"Plotting projections to {out_dir}/{name}.pdf")
 
 def plot_combined_1dhist_ratio_diff(
     inputs,
@@ -588,8 +455,108 @@ def plot_combined_1dhist(
     plt.close(fig)
     print(f"Plotting hist to {out_dir}/{out_name}.pdf")
 
-def plot_lund_ratio_diff(
+def lund_plot(
     inputs,
+    Njet=None,
+    labels=["original","generated","predicted"],
+    out_dir="./Plots/",
+    hist2d_xrange=None,
+    hist2d_yrange=None,
+    hist2d_bins=(20, 20),
+    hist2d_shape=None,
+    hist2d_layout=None,
+    unavailable_notes=None,
+):
+    #Sanity check input size
+    Nin=len(inputs)
+    Ndim=inputs[0].shape[1]
+    if Ndim!=2:
+        raise ValueError("Gave more then 2D inputs to lund-plot")
+
+    #Get some plotting stuff
+    unavailable_notes = unavailable_notes or []
+    Nplots = Nin + len(unavailable_notes)
+    use_compared_titles = Nplots > 1
+    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1) if use_compared_titles else ([], [])
+
+    #Make ouput directory if needed
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    #Get ranges
+    mins=np.zeros(Ndim)
+    maxs=np.zeros(Ndim)
+    for ii in range(Ndim):
+        for jj in range(Nin):
+            mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
+            maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
+    x_range = hist2d_xrange if hist2d_xrange is not None else [mins[1], maxs[1]]
+    y_range = hist2d_yrange if hist2d_yrange is not None else [mins[0], maxs[0]]
+
+    # Create subplots for each input (original, generated, etc.)
+    if hist2d_shape is None:
+        hist2d_shape = hist2d_layout
+    nrows, ncols = _resolve_hist2d_shape(Nplots, hist2d_shape)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(5.0 * ncols + 1.0, 4.4 * nrows + 0.6), squeeze=False,)
+    flat_axs = axs.ravel()
+    used_axs = flat_axs[:Nplots]
+
+    #make plot
+    last_hist = None
+    for jj in range(Nin):
+        ax = used_axs[jj]
+
+        # Plot 2D histogram
+        last_hist = ax.hist2d(inputs[jj][:, 1], inputs[jj][:, 0], range=[x_range, y_range], bins=hist2d_bins, cmap="Blues", norm="log", weights=np.full((len(inputs[jj][:, 0])), 1/Njet))
+
+        # Add titles and labels
+        if use_compared_titles:
+            if jj == 0:
+                panel_label = "original"
+            elif jj - 1 < len(diff_labels):
+                panel_label = diff_labels[jj - 1]
+            else:
+                panel_label = f"run {jj}"
+        else:
+            panel_label = str(labels[jj]) if jj < len(labels) else f"sample_{jj}"
+        ax.set_title(panel_label, pad=8, fontsize=10)
+
+        # Axis labels
+        ax.set_xlabel(r"$\log(1/\Delta R)$")
+        ax.set_ylabel(r"$\log(k_t)$")
+
+    #If instead of plot filling in with a text saying not available
+    for offset, (label, reason) in enumerate(unavailable_notes):
+        ax = used_axs[Nin + offset]
+        ax.set_title(label)
+        ax.text(0.5, 0.5, f"Plot unavailable\n{reason}", ha="center", va="center", transform=ax.transAxes, fontsize=10, wrap=True,)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_visible(False)
+
+    # Add colorbar to last hist
+    if last_hist is not None:
+      cbar = fig.colorbar(last_hist[3], ax=used_axs.tolist(), fraction=0.022, pad=0.055)
+      cbar.set_label("N/N(jets)")
+
+    #Add label
+    fig.suptitle("Lund Plane Distribution", fontsize=14, y=0.985)
+    caption_lines = _plot_note_from_common(common_items, unavailable_notes)
+    bottom_margin = 0.13 if caption_lines else 0.09
+    fig.subplots_adjust(left=0.08, right=0.88, bottom=bottom_margin, top=0.90, wspace=0.30, hspace=0.55)
+    if caption_lines: fig.text(0.08, 0.025, _wrapped_note(caption_lines, width=150), ha="left", va="bottom", fontsize=8,)
+
+    # Save
+    name = "lund"
+    fig.savefig(os.path.join(out_dir, name + ".png"), bbox_inches="tight")
+    fig.savefig(os.path.join(out_dir, name + ".pdf"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"Plotting lund-plot to {out_dir}/{name}.pdf")
+
+def lund_plot_ratio(
+    inputs,
+    results=None,
+    Njet=None,
     labels=["original","generated","predicted"],
     out_dir="./Plots/",
     hist2d_xrange=None,
@@ -601,152 +568,111 @@ def plot_lund_ratio_diff(
     min_reference_count=5,
     max_abs_diff=1.0,
 ):
-  if len(inputs) <= 1:
-    return
 
-  Ndim = inputs[0].shape[1]
-  if Ndim < 2:
-    return
+    #Sanity check input size
+    Nin=len(inputs)
+    Ndim=inputs[0].shape[1]
+    if Ndim!=2:
+        raise ValueError("Gave more then 2D inputs to lund-plot")
+    if Nin<=1:
+        raise ValueError("Gave only 1 hists to lund-plot")
 
-  unavailable_notes = unavailable_notes or []
-  if not os.path.exists(out_dir):
-    os.makedirs(out_dir)
+    #Get some plotting stuff
+    unavailable_notes = unavailable_notes or []
+    Nplots = Nin-1 + len(unavailable_notes)
+    use_compared_titles = Nplots > 1
+    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1) if use_compared_titles else ([], [])
+    comparison_labels = diff_labels if len(diff_labels) > 0 else labels[1:]
 
-  Ndiff = len(inputs) - 1
-  Nplots = Ndiff + len(unavailable_notes)
-  if Nplots == 0:
-    return
+    #Make ouput directory if needed
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
 
-  diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
-  comparison_labels = diff_labels if len(diff_labels) > 0 else labels[1:]
+    #Get ranges
+    mins=np.zeros(Ndim)
+    maxs=np.zeros(Ndim)
+    for ii in range(Ndim):
+        for jj in range(Nin):
+            mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
+            maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
+    x_range = hist2d_xrange if hist2d_xrange is not None else [mins[1], maxs[1]]
+    y_range = hist2d_yrange if hist2d_yrange is not None else [mins[0], maxs[0]]
 
-  mins = np.zeros(Ndim)
-  maxs = np.zeros(Ndim)
-  for ii in range(Ndim):
-    for jj in range(len(inputs)):
-      mins[ii] = min(mins[ii], np.min(inputs[jj][:, ii]))
-      maxs[ii] = max(maxs[ii], np.max(inputs[jj][:, ii]))
+    # Create subplots for each input (original, generated, etc.)
+    if hist2d_shape is None:
+        hist2d_shape = hist2d_layout
+    nrows, ncols = _resolve_hist2d_shape(Nplots, hist2d_shape)
+    fig, axs = plt.subplots(nrows, ncols, figsize=(5.0 * ncols + 1.0, 4.4 * nrows + 0.6), squeeze=False,)
+    flat_axs = axs.ravel()
+    used_axs = flat_axs[:Nplots]
 
-  mins[1] = -3
-  maxs[0] = 8
-  x_range = hist2d_xrange if hist2d_xrange is not None else [mins[1], maxs[1]]
-  y_range = hist2d_yrange if hist2d_yrange is not None else [mins[0], maxs[0]]
+    #make reference hist
+    reference_counts, x_edges, y_edges = np.histogram2d(inputs[0][:, 1], inputs[0][:, 0], range=[x_range, y_range], bins=hist2d_bins)
+    populated_reference = reference_counts >= max(1, int(min_reference_count))
 
-  reference_counts, x_edges, y_edges = np.histogram2d(
-      inputs[0][:, 1],
-      inputs[0][:, 0],
-      range=[x_range, y_range],
-      bins=hist2d_bins,
-      density=False,
-  )
-  reference_total = np.sum(reference_counts)
-  reference_density = reference_counts / reference_total if reference_total > 0 else reference_counts
-  populated_reference = reference_counts >= max(1, int(min_reference_count))
+    #Now make the ratio hist
+    ratio_maps = []
+    for arr in inputs[1:]:
+        comparison_counts, _, _ = np.histogram2d(arr[:, 1], arr[:, 0], range=[x_range, y_range], bins=hist2d_bins)
+        ratio_map = np.full_like(comparison_counts, np.nan, dtype=float)
+        np.divide(reference_counts - comparison_counts, reference_counts, out=ratio_map, where=populated_reference & (reference_counts > 0.0),)
+        ratio_maps.append(ratio_map)
 
-  ratio_maps = []
-  for arr in inputs[1:]:
-    comparison_counts, _, _ = np.histogram2d(
-        arr[:, 1],
-        arr[:, 0],
-        range=[x_range, y_range],
-        bins=hist2d_bins,
-        density=False,
-    )
-    comparison_total = np.sum(comparison_counts)
-    comparison_density = comparison_counts / comparison_total if comparison_total > 0 else comparison_counts
-    ratio_map = np.full_like(reference_density, np.nan, dtype=float)
-    np.divide(
-        reference_density - comparison_density,
-        reference_density,
-        out=ratio_map,
-        where=populated_reference & (reference_density > 0.0),
-    )
-    ratio_maps.append(ratio_map)
+    #Add some maxes to the changes
+    vmax = _symmetric_limit(ratio_maps, fallback=1.0)
+    if max_abs_diff is not None and max_abs_diff > 0:
+        vmax = min(vmax, float(max_abs_diff))
+    norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+    cmap = plt.get_cmap("coolwarm").copy()
+    cmap.set_bad(color="#d9d9d9")
 
-  if hist2d_shape is None:
-    hist2d_shape = hist2d_layout
-  nrows, ncols = resolve_hist2d_shape(Nplots, hist2d_shape)
-  fig, axs = plt.subplots(
-      nrows,
-      ncols,
-      figsize=(5.0 * ncols + 1.0, 4.4 * nrows + 0.6),
-      squeeze=False,
-  )
-  flat_axs = axs.ravel()
-  used_axs = flat_axs[:Nplots]
+    #make plot
+    last_image = None
+    for jj, ratio_map in enumerate(ratio_maps):
+        ax = used_axs[jj]
+        last_image = ax.imshow(ratio_map.T, origin="lower", extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]], aspect="auto", cmap=cmap, norm=norm,)
+        ax.set_title(comparison_labels[jj] if jj < len(comparison_labels) else f"sample_{jj + 1}", pad=8, fontsize=10)
+        ax.set_xlabel(r"$\log(1/\Delta R)$")
+        ax.set_ylabel(r"$\log(k_t)$")
 
-  vmax = _symmetric_limit(ratio_maps, fallback=1.0)
-  if max_abs_diff is not None and max_abs_diff > 0:
-    vmax = min(vmax, float(max_abs_diff))
-  norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
-  cmap = plt.get_cmap("coolwarm").copy()
-  cmap.set_bad(color="#d9d9d9")
-  last_image = None
+    #If instead of plot filling in with a text saying not available
+    for offset, (label, reason) in enumerate(unavailable_notes):
+        ax = used_axs[Nin-1 + offset]
+        ax.set_title(label)
+        ax.text(0.5, 0.5, f"Plot unavailable\n{reason}", ha="center", va="center", transform=ax.transAxes, fontsize=10, wrap=True,)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_visible(False)
 
-  for jj, ratio_map in enumerate(ratio_maps):
-    ax = used_axs[jj]
-    last_image = ax.imshow(
-        ratio_map.T,
-        origin="lower",
-        extent=[x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]],
-        aspect="auto",
-        cmap=cmap,
-        norm=norm,
-    )
-    ax.set_title(comparison_labels[jj] if jj < len(comparison_labels) else f"sample_{jj + 1}", pad=8, fontsize=10)
-    ax.set_xlabel(r"$\log(1/\Delta R)$")
-    ax.set_ylabel(r"$\log(k_t)$")
+    # Add colorbar to last hist
+    if last_image is not None:
+        cbar = fig.colorbar(last_image, ax=used_axs.tolist(), fraction=0.022, pad=0.055, extend="both")
+        cbar.set_label(r"$(original - generated) / original$")
 
-  for offset, (label, reason) in enumerate(unavailable_notes):
-    ax = used_axs[Ndiff + offset]
-    ax.set_title(label)
-    ax.text(
-        0.5,
-        0.5,
-        f"Plot unavailable\n{reason}",
-        ha="center",
-        va="center",
-        transform=ax.transAxes,
-        fontsize=10,
-        wrap=True,
-    )
-    ax.set_xticks([])
-    ax.set_yticks([])
+    #Add label
+    fig.suptitle("Lund Plane Fractional Difference", fontsize=14, y=0.985)
+    note_lines = _plot_note_from_common(common_items, unavailable_notes)
+    note_lines.append(f"Masked original bins with < {max(1, int(min_reference_count))} entries; color clipped at +/- {vmax:.3g}")
+    bottom_margin = 0.13 if note_lines else 0.09
+    fig.subplots_adjust(left=0.08, right=0.88, bottom=bottom_margin, top=0.90, wspace=0.30, hspace=0.55)
+    if note_lines:
+        fig.text(0.08, 0.025, _wrapped_note(note_lines, width=150), ha="left", va="bottom", fontsize=8,)
 
-  for ax in flat_axs[Nplots:]:
-    ax.set_visible(False)
+    #Save some metrics
+    if results: results["chi2"]=np.divide((comparison_counts-reference_counts)**2, reference_counts, out=None, where= reference_counts>0).sum()/reference_counts.size
+    if results: results["mean_diff"]=(ratio_map[~np.isnan(ratio_map)]**2).mean()
 
-  if last_image is not None:
-    cbar = fig.colorbar(last_image, ax=used_axs.tolist(), fraction=0.022, pad=0.055, extend="both")
-    cbar.set_label(r"$(original - generated) / original$")
-
-  fig.suptitle("Lund Plane Fractional Difference", fontsize=14, y=0.985)
-  note_lines = _plot_note_from_common(common_items, unavailable_notes)
-  note_lines.append(
-      f"Masked original bins with < {max(1, int(min_reference_count))} entries; color clipped at +/- {vmax:.3g}"
-  )
-  bottom_margin = 0.13 if note_lines else 0.09
-  fig.subplots_adjust(left=0.08, right=0.88, bottom=bottom_margin, top=0.90, wspace=0.30, hspace=0.55)
-  if note_lines:
-    fig.text(
-        0.08,
-        0.025,
-        _wrapped_note(note_lines, width=150),
-        ha="left",
-        va="bottom",
-        fontsize=8,
-    )
-
-  name = "lund_ratio_diff"
-  fig.savefig(os.path.join(out_dir, name + ".png"), bbox_inches="tight")
-  fig.savefig(os.path.join(out_dir, name + ".pdf"), bbox_inches="tight")
-  plt.close(fig)
-  print(f"Plotting lund-plane diff to {out_dir}/{name}.pdf")
+    #save
+    name = "lund_ratio_diff"
+    fig.savefig(os.path.join(out_dir, name + ".png"), bbox_inches="tight")
+    fig.savefig(os.path.join(out_dir, name + ".pdf"), bbox_inches="tight")
+    plt.close(fig)
+    print(f"Plotting lund-plane diff to {out_dir}/{name}.pdf")
 
 # ---------------------------------------------------------------------
 # Main validation function which runs all the plots
 # ---------------------------------------------------------------------
-def validate_unbinned_models(models, test_loader, args, labels=None, make_projection=False, unavailable_model_reasons=None,):
+def validate_unbinned_models(models, test_loader, args, results=None, labels=None, unavailable_model_reasons=None,):
   if args.plot_max_batches is not None and args.plot_max_batches <= 0:
     raise ValueError("--plot-max-batches must be a positive integer")
 
@@ -836,12 +762,18 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
             print("Generate example")
             starttime_single=time.time()
             print(generated_seq[0])
-            print("Took %.2e ms to generate 1 image"%((time.time()-starttime_single)*1000), flush=True)
+            single_image_time=(time.time()-starttime_single)*1000
+            print("Took %.2e ms to generate 1 image"%(single_image_time), flush=True)
             printed_example = True
+            if results: results["single_image_time"]=single_image_time
 
           generated_chunks[imodel].append(generated_seq)
         Nimages+=X.shape[0]
-      print("Took %.2f min to generate %i images"%((time.time()-starttime)/60,Nimages), flush=True) 
+
+      full_image_time=(time.time()-starttime)/60
+      print("Took %.2f min to generate %i images"%(full_image_time,Nimages), flush=True) 
+      if results: results["full_image_time"]=full_image_time
+      if results: results["validate_N"]=Nimages
 
       if len(original_chunks) == 0:
         raise ValueError("No validation batches were plotted")
@@ -867,6 +799,11 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
           if reason is not None
       ]
 
+      #Save some dim info
+      Njet=original.shape[0]
+      Nconst=original.shape[1]
+
+      #Make flat lists for plots, now is of dimension [N plot, Njet*Nconst , N features]
       flat_original = original.flatten(0, 1).cpu().numpy()
       flat_generated_list = [g.flatten(0, 1).cpu().numpy() for g in generated_list]
       plot_inputs = [flat_original] + flat_generated_list
@@ -874,23 +811,20 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       # ---------------------------------------------------------------------
       # Make the plots
       # ---------------------------------------------------------------------
-      if make_projection:
-        projection_plot(
-            plot_inputs,
-            labels=active_labels,
-            out_dir=args.plot_dir,
-            name="projection",
-            unavailable_notes=unavailable_notes,
-        )
+      projection_plot(
+          plot_inputs,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+          name="projection",
+          unavailable_notes=unavailable_notes,
+      )
 
+      '''
       hist1d_ranges = None
       if args.hist1d_ranges is not None:
         if len(args.hist1d_ranges) != 4:
           raise ValueError("--hist1d-ranges should be: kt_min kt_max dr_min dr_max")
-        hist1d_ranges = [
-          [args.hist1d_ranges[0], args.hist1d_ranges[1]],
-          [args.hist1d_ranges[2], args.hist1d_ranges[3]],
-        ]
+        hist1d_ranges = [ [args.hist1d_ranges[0], args.hist1d_ranges[1]], [args.hist1d_ranges[2], args.hist1d_ranges[3]], ]
 
       plot_combined_1dhist(
           plot_inputs,
@@ -915,20 +849,21 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
       )
 
       #Make plot
-      if args.hist_ratio_diff and len(plot_inputs) > 1:
-        plot_combined_1dhist_ratio_diff(
-            plot_inputs,
-            labels=active_labels,
-            out_dir=args.plot_dir,
-            hist1d_ranges=hist1d_ranges,
-            hist1d_bins=args.hist1d_bins,
-            logy=False,
-            out_name="hist1d_ratio_diff",
-            unavailable_notes=unavailable_notes,
-            min_reference_count=args.hist_ratio_min_count,
-            max_abs_diff=args.hist_ratio_vmax,
-        )
+      plot_combined_1dhist_ratio_diff(
+          plot_inputs,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+          hist1d_ranges=hist1d_ranges,
+          hist1d_bins=args.hist1d_bins,
+          logy=False,
+          out_name="hist1d_ratio_diff",
+          unavailable_notes=unavailable_notes,
+          min_reference_count=args.hist_ratio_min_count,
+          max_abs_diff=args.hist_ratio_vmax,
+      )
+      '''
 
+      #If 4-vec input recalculate the lund-plane
       if args.input_format == "ktdr":
         lund_inputs = plot_inputs
       else:
@@ -940,17 +875,18 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
           lund_generated = helpers.make_lundplane(generated) #FIXME missing chuncks maybe?
           lund_inputs.append(lund_generated.reshape(-1,2))
 
-        if make_projection:
-            projection_plot(
-                lund_inputs,
-                labels=active_labels,
-                out_dir=args.plot_dir,
-                name="projection_lund",
-                unavailable_notes=unavailable_notes,
-            )
+          #remake the projection plot
+          projection_plot(
+              lund_inputs,
+              labels=active_labels,
+              out_dir=args.plot_dir,
+              name="projection_lund",
+              unavailable_notes=unavailable_notes,
+          )
 
       lund_plot(
           lund_inputs,
+          Njet=Njet,
           labels=active_labels,
           out_dir=args.plot_dir,
           hist2d_xrange=args.hist2d_xrange,
@@ -960,16 +896,17 @@ def validate_unbinned_models(models, test_loader, args, labels=None, make_projec
           unavailable_notes=unavailable_notes,
       )
 
-      if args.hist_ratio_diff and len(lund_inputs) > 1:
-        plot_lund_ratio_diff(
-            lund_inputs,
-            labels=active_labels,
-            out_dir=args.plot_dir,
-            hist2d_xrange=args.hist2d_xrange,
-            hist2d_yrange=args.hist2d_yrange,
-            hist2d_bins=args.hist2d_bins,
-            hist2d_shape=args.hist2d_shape,
-            unavailable_notes=unavailable_notes,
-            min_reference_count=args.hist_ratio_min_count,
-            max_abs_diff=args.hist_ratio_vmax,
-        )
+      lund_plot_ratio(
+          lund_inputs,
+          results=results,
+          Njet=Njet,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+          hist2d_xrange=args.hist2d_xrange,
+          hist2d_yrange=args.hist2d_yrange,
+          hist2d_bins=args.hist2d_bins,
+          hist2d_shape=args.hist2d_shape,
+          unavailable_notes=unavailable_notes,
+          min_reference_count=args.hist_ratio_min_count,
+          max_abs_diff=args.hist_ratio_vmax,
+      )

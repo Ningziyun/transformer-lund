@@ -27,5 +27,5 @@ if __name__ == "__main__":
     model=load_checkpoint_model(X_example.shape,args)
 
     #Make validation plots
-    validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"], make_projection=True,)
+    validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"])
     print("Done")
