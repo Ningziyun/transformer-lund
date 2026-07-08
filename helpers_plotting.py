@@ -659,8 +659,8 @@ def lund_plot_ratio(
         fig.text(0.08, 0.025, _wrapped_note(note_lines, width=150), ha="left", va="bottom", fontsize=8,)
 
     #Save some metrics
-    if results: results["chi2"]=np.divide((comparison_counts-reference_counts)**2, reference_counts, out=None, where= reference_counts>0).sum()/reference_counts.size
-    if results: results["mean_diff"]=(ratio_map[~np.isnan(ratio_map)]**2).mean()
+    if results: results["lund_chi2_dof"]=np.divide((comparison_counts-reference_counts)**2, reference_counts, out=None, where= reference_counts>0).sum()/reference_counts.size
+    if results: results["lund_mean_diff"]=(ratio_map[~np.isnan(ratio_map)]**2).mean()
 
     #save
     name = "lund_ratio_diff"
@@ -668,6 +668,62 @@ def lund_plot_ratio(
     fig.savefig(os.path.join(out_dir, name + ".pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"Plotting lund-plane diff to {out_dir}/{name}.pdf")
+
+
+def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicted"], out_dir="./Plots/",):
+    '''
+    EEC(R) = 1/pt(jet) sum pt_i pt_j delta(R - R_ij)
+    '''
+    linestyles=["-","--","-.",":"]
+
+    fig, ax = plt.subplots(1,figsize=(8.0,8.0))
+
+    EEC=[]
+    for ii,jets in enumerate(plot_inputs):
+        # slice 4-vectors   dim=[Njet, Nconst]
+        E  = jets[..., 0]
+        px = jets[..., 1]
+        py = jets[..., 2]
+        pz = jets[..., 3]
+
+        pt = np.sqrt(px**2 + py**2)
+        p = np.sqrt(px**2 + py**2 + pz**2)
+        jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Nket]
+
+        # Protect against division by zero
+        eps = 1e-12
+        eta = 0.5 * np.log((p + pz + eps)/(p - pz + eps)) # Protect against division by zero
+        phi = np.arctan2(py, px)
+
+        #Get DR     dim=[Njet, Nconst, Nconst]
+        deta = eta[:, :, None] - eta[:, None, :]
+        dphi = phi[:, :, None] - phi[:, None, :]
+        dphi = np.arctan2(np.sin(dphi), np.cos(dphi)) # Wrap into (-pi, pi]
+        DR = np.sqrt(deta**2 + dphi**2) 
+
+        #get the energy-weight part pt*pt/jet   dim=# [Njet, Nconst, Nconst]
+        e_weights = ( pt[:, :, None] * pt[:, None, :] / jet_pt[:, None, None]**2)
+
+        #Mask the upper-triangle and plot   dim=[Njet, Npairs]
+        mask = np.triu(np.ones((jets.shape[1], jets.shape[1]), dtype=bool))
+        hist, edges, _ = ax.hist( DR[:,mask].ravel(), bins=100, range=(0,1.0), weights=e_weights[:,mask].ravel(),histtype="step",density=False,linestyle=linestyles[ii],label=labels[ii])
+        EEC.append(hist)
+
+
+    if results: results["EEC_chi2_dof"]=np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC)
+
+    ax.set_xlabel("R")
+    ax.set_ylabel("EEC(R)")
+    ax.set_yscale("log")
+    ax.legend()
+
+    name = "EEC"
+    fig.savefig(os.path.join(out_dir,name+".png"))
+    fig.savefig(os.path.join(out_dir,name+".pdf"))
+    plt.close(fig)
+    print(f"Plotting EEC to {out_dir}/{name}.pdf")
+
+    return
 
 # ---------------------------------------------------------------------
 # Main validation function which runs all the plots
@@ -806,18 +862,28 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       #Make flat lists for plots, now is of dimension [N plot, Njet*Nconst , N features]
       flat_original = original.flatten(0, 1).cpu().numpy()
       flat_generated_list = [g.flatten(0, 1).cpu().numpy() for g in generated_list]
-      plot_inputs = [flat_original] + flat_generated_list
+      flat_plot_inputs = [flat_original] + flat_generated_list
+
+      plot_inputs = [original.cpu().numpy()]+[g.cpu().numpy() for g in generated_list]
 
       # ---------------------------------------------------------------------
       # Make the plots
       # ---------------------------------------------------------------------
       projection_plot(
-          plot_inputs,
+          flat_plot_inputs,
           labels=active_labels,
           out_dir=args.plot_dir,
           name="projection",
           unavailable_notes=unavailable_notes,
       )
+
+      if args.input_format=="4vec":
+          EEC_plot(
+            plot_inputs,
+            results,
+            labels=active_labels,
+            out_dir=args.plot_dir,
+                  )
 
       '''
       hist1d_ranges = None
@@ -827,7 +893,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         hist1d_ranges = [ [args.hist1d_ranges[0], args.hist1d_ranges[1]], [args.hist1d_ranges[2], args.hist1d_ranges[3]], ]
 
       plot_combined_1dhist(
-          plot_inputs,
+          flat_plot_inputs,
           labels=active_labels,
           out_dir=args.plot_dir,
           hist1d_ranges=hist1d_ranges,
@@ -838,7 +904,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       )
 
       plot_combined_1dhist(
-          plot_inputs,
+          flat_plot_inputs,
           labels=active_labels,
           out_dir=args.plot_dir,
           hist1d_ranges=hist1d_ranges,
@@ -850,7 +916,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
       #Make plot
       plot_combined_1dhist_ratio_diff(
-          plot_inputs,
+          flat_plot_inputs,
           labels=active_labels,
           out_dir=args.plot_dir,
           hist1d_ranges=hist1d_ranges,
@@ -865,7 +931,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
       #If 4-vec input recalculate the lund-plane
       if args.input_format == "ktdr":
-        lund_inputs = plot_inputs
+        lund_inputs = flat_plot_inputs
       else:
         starttime=time.time()
         lund_original = helpers.make_lundplane(original) #return numpy array

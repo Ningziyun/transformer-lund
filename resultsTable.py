@@ -15,6 +15,10 @@ def import_results(filename):
             unpack=line.split()
             variable=unpack[0]
             value=" ".join(unpack[1:])
+            if value.isdigit(): #leave ints the same
+                value=value
+            elif value.replace('.','',1).isdigit(): #check if float in fancy way, doens't do negatives?
+                value=f"%.2f"%(float(value))
             results[variable]=value
 
     return results
@@ -46,7 +50,10 @@ if __name__ == "__main__":
     for result in results:
         string=""
         for metric in args.metrics:
-            string+=f" | %15s"%result[metric]
+            if not metric in result:
+                string+=f" | %15s"%"-"
+            else:
+                string+=f" | %15s"%result[metric]
         string+=" |"
         print(string)
 
