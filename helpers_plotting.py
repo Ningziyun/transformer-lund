@@ -661,6 +661,8 @@ def lund_plot_ratio(
     #Save some metrics
     if results: results["lund_chi2_dof"]=np.divide((comparison_counts-reference_counts)**2, reference_counts, out=None, where= reference_counts>0).sum()/reference_counts.size
     if results: results["lund_mean_diff"]=(ratio_map[~np.isnan(ratio_map)]**2).mean()
+    print("lund_chi2_dof",np.divide((comparison_counts-reference_counts)**2, reference_counts, out=None, where= reference_counts>0).sum()/reference_counts.size)
+    print("lund_mean_diff",(ratio_map[~np.isnan(ratio_map)]**2).mean())
 
     #save
     name = "lund_ratio_diff"
@@ -709,8 +711,8 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
         hist, edges, _ = ax.hist( DR[:,mask].ravel(), bins=100, range=(0,1.0), weights=e_weights[:,mask].ravel(),histtype="step",density=False,linestyle=linestyles[ii],label=labels[ii])
         EEC.append(hist)
 
-
     if results: results["EEC_chi2_dof"]=np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC)
+    print("EEC_chi2_dof:",np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC))
 
     ax.set_xlabel("R")
     ax.set_ylabel("EEC(R)")
@@ -732,6 +734,8 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
   if args.plot_max_batches is not None and args.plot_max_batches <= 0:
     raise ValueError("--plot-max-batches must be a positive integer")
 
+  device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
+
   if labels is None:
     labels = ["original"]
     if len(models) == 1:
@@ -739,13 +743,11 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
     else:
       labels.extend([f"generated_{ii}" for ii in range(len(models))])
 
-  with torch.no_grad():
+  with torch.inference_mode():
       original_chunks = []
       generated_chunks = [[] for _ in models]
       active_models = [True for _ in models]
       unavailable_reasons = [None for _ in models]
-
-      device = "cpu"
 
       # ---------------------------------------------------------------------
       # Sanity checks
@@ -753,6 +755,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       for imodel, model in enumerate(models):
         model.to(device)
         model.eval()
+
         forced_reason = None
         if unavailable_model_reasons is not None and imodel < len(unavailable_model_reasons):
           forced_reason = unavailable_model_reasons[imodel]
@@ -774,15 +777,17 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       starttime=time.time()
       Nimages=0
       for batch, X in enumerate(test_loader):
+        Nimages+=X.shape[0]
         if args.plot_max_batches is not None and batch >= args.plot_max_batches:
-          break
-        if batch>1000: break #FIXME
+            break
+        if Nimages>args.validation_size: 
+            break
+        X = X.to(device)
 
-        #X = X.to(device)
         if args.standardize:
-            original_chunks.append(helpers.undo_preprocess(X,args.input_format))
+            original_chunks.append((helpers.undo_preprocess(X,args.input_format)).detach().cpu())
         else:
-            original_chunks.append(X)
+            original_chunks.append(X.detach().cpu())
 
         for imodel, model in enumerate(models):
           if not active_models[imodel]:
@@ -800,7 +805,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             unavailable_reasons[imodel] = reason
             continue
 
-          if not torch.isfinite(generated_seq).all():
+          if not torch.isfinite(generated_seq).all(): #can be a memory hog?
             reason = "generated sequence contains nan/inf"
             print(f"Generated plot unavailable for model {imodel}: {reason}.", flush=True)
             active_models[imodel] = False
@@ -811,6 +816,10 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
           if args.mixed_loss:
             generated_seq[:, :, -1] = torch.sigmoid(generated_seq[:, :, -1])
             generated_seq[:, 0, -1] = X[:, 0, -1]
+
+          # Immediately move to CPU before storing
+          generated_seq = generated_seq.detach().cpu()
+          generated_chunks[imodel].append(generated_seq)
 
           if not printed_example:
             print("Input example")
@@ -823,8 +832,9 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             printed_example = True
             if results: results["single_image_time"]=single_image_time
 
-          generated_chunks[imodel].append(generated_seq)
-        Nimages+=X.shape[0]
+          #save some memory quicker between CUDA/pytorch
+          del generated_seq
+          del X
 
       full_image_time=(time.time()-starttime)/60
       print("Took %.2f min to generate %i images"%(full_image_time,Nimages), flush=True) 
@@ -860,11 +870,12 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       Nconst=original.shape[1]
 
       #Make flat lists for plots, now is of dimension [N plot, Njet*Nconst , N features]
-      flat_original = original.flatten(0, 1).cpu().numpy()
-      flat_generated_list = [g.flatten(0, 1).cpu().numpy() for g in generated_list]
-      flat_plot_inputs = [flat_original] + flat_generated_list
+      original_np = original.numpy() #numpy shares memory but can delete original if want
+      generated_np = [g.numpy() for g in generated_list]
+      plot_inputs = [original_np] + generated_np
 
-      plot_inputs = [original.cpu().numpy()]+[g.cpu().numpy() for g in generated_list]
+      flat_plot_inputs = [ original_np.reshape(-1, original_np.shape[-1]) ] #reshape is a view
+      flat_plot_inputs.extend( g.reshape(-1, g.shape[-1]) for g in generated_np)
 
       # ---------------------------------------------------------------------
       # Make the plots
@@ -933,11 +944,16 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       if args.input_format == "ktdr":
         lund_inputs = flat_plot_inputs
       else:
+        #Free up some memory
+        del plot_inputs
+        del flat_plot_inputs
+
+        #remkae lund-plance
         starttime=time.time()
-        lund_original = helpers.make_lundplane(original) #return numpy array
+        lund_original = helpers.make_lundplane(original_np) #return numpy array
         lund_inputs = [lund_original.reshape(-1,2)]
-        print("Took %.2f min to make the lund-plane"%((time.time()-starttime)/60), flush=True)
-        for generated in generated_list:
+        print("Took %.2f min to make the lund-plane for %i jets"%((time.time()-starttime)/60,original_np.shape[0]), flush=True)
+        for generated in generated_np:
           lund_generated = helpers.make_lundplane(generated) #FIXME missing chuncks maybe?
           lund_inputs.append(lund_generated.reshape(-1,2))
 

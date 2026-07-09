@@ -116,7 +116,7 @@ def train(model,train_loader,args):
       if loss_per_sample.item()<best_loss: best_loss=loss_per_sample.item()
       epoch_loss += loss.item() #Sum across epoch
       n_samples += sum_w
-      #if batch>1000: break #FIXME
+      if args.test and batch>1000: break
 
   #Get the average loss across whole epoch (not same as average of per-batch averages)
   epoch_loss /= n_samples
@@ -342,7 +342,6 @@ if __name__ == "__main__":
       validate_unbinned_models( [model], test_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
     else:
       validate_unbinned_models( [model], test_loader, args, results=results, labels=["original", "generated"])
-    print("Done")
 
     #update metadata with some result ddinfo
     append_result_metadata(args,results)

@@ -682,6 +682,7 @@ def parse_input():
     parser.add_argument("--cos-damping-period-epochs", type=float, default=1.0, help="Cosine oscillation period in epochs")
     parser.add_argument("--patience", type=int, default=5, help="Early stopping patience")
     parser.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
+    parser.add_argument("--test", action="store_true", default=False, help="Setup with reduced training size for easy debugging/testing")
 
     # model switches
     parser.add_argument("--mdn", action="store_true", default=False, help="Use MDN head (default: True)")
@@ -705,13 +706,11 @@ def parse_input():
     parser.add_argument("--fm", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
     parser.add_argument("--diff", action="store_true", default=False, help="Use Masked autoregressive flow")
     parser.add_argument("--sde", action="store_true", default=False, help="Use Masked autoregressive flow")
-
-    # auxiliary diagnostics
     parser.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for auxiliary flow nets")
-    parser.add_argument("--multi-loss-plot", action="store_true", default=False, help="Log multiple loss definitions without affecting main training")
 
     # misc
     parser.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
+    parser.add_argument("--multi-loss-plot", action="store_true", default=False, help="Log multiple loss definitions without affecting main training")
 
     # logging / checkpointing
     parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
@@ -721,15 +720,16 @@ def parse_input():
     parser.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
     
     # plotting options
-    parser.add_argument( "--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
-    parser.add_argument( "--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
-    parser.add_argument( "--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)
-    parser.add_argument( "--hist2d-shape", "--hist2d_shape", "--hist2d-layout", dest="hist2d_shape", type=int, nargs=2, default=None, metavar=("ROWS", "COLS"), help="Manual 2D Lund subplot shape. Default auto: 2 -> 1x2, 3 -> 1x3, 4 -> 2x2",)
-    parser.add_argument( "--plot-max-batches", type=int, default=None, help="Only plot this many validation batches. Default: plot all batches",)
-    parser.add_argument( "--hist1d-ranges", type=float, nargs="+", default=None, help="Flattened 1D ranges: kt_min kt_max dr_min dr_max",)
-    parser.add_argument( "--hist1d-bins", type=int, default=30, help="Number of bins for 1D histograms",)
-    parser.add_argument( "--hist-ratio-min-count", type=int, default=5, help="Mask 2D relative-difference bins with fewer original entries than this",)
-    parser.add_argument( "--hist-ratio-vmax", type=float, default=1.0, help="Symmetric color limit for 2D fractional relative-difference plots",)
+    parser.add_argument("--validation-size",type=int, default=1000000, help="How many images to generate and make plots for")
+    parser.add_argument("--plot-max-batches", type=int, default=None, help="Only plot this many validation batches. Default: plot all batches",)
+    parser.add_argument("--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
+    parser.add_argument("--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
+    parser.add_argument("--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)
+    parser.add_argument("--hist2d-shape", "--hist2d_shape", "--hist2d-layout", dest="hist2d_shape", type=int, nargs=2, default=None, metavar=("ROWS", "COLS"), help="Manual 2D Lund subplot shape. Default auto: 2 -> 1x2, 3 -> 1x3, 4 -> 2x2",)
+    parser.add_argument("--hist1d-ranges", type=float, nargs="+", default=None, help="Flattened 1D ranges: kt_min kt_max dr_min dr_max",)
+    parser.add_argument("--hist1d-bins", type=int, default=30, help="Number of bins for 1D histograms",)
+    parser.add_argument("--hist-ratio-min-count", type=int, default=5, help="Mask 2D relative-difference bins with fewer original entries than this",)
+    parser.add_argument("--hist-ratio-vmax", type=float, default=1.0, help="Symmetric color limit for 2D fractional relative-difference plots",)
 
     #Some manipulations
     args=parser.parse_args()

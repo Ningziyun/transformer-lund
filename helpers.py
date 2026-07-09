@@ -19,9 +19,7 @@ def make_lundplane(input_vec, pad_length=20):
   for ii in range(input_vec.shape[0]):
 
     # Convert the constituent information into a format usable for fastjet (PseudoJet objects)
-    constituents = []
-    for jj in range(input_vec.shape[1]):
-      constituents.append(fastjet.PseudoJet(float(input_vec[ii,jj,1]), float(input_vec[ii,jj,2]), float(input_vec[ii,jj,3]),float(input_vec[ii,jj,0])))
+    constituents = [ fastjet.PseudoJet( float(px), float(py), float(pz), float(E),) for E, px, py, pz in input_vec[ii] ]
 
     # Run the jet clustering on the jet constituents using the anti-kt algorithm
     cs_akt = fastjet.ClusterSequence(constituents, jetDef10)
@@ -32,12 +30,12 @@ def make_lundplane(input_vec, pad_length=20):
 
     # Get Lund plane declusterings
     lundPlane = ljpHelpers.jet_declusterings(inclusiveJets10[0])
-    lp_points=[]
-    for kk in range(len(lundPlane)):
+    lp_points = np.full((pad_length, 2), -1.0, dtype=np.float32) #Note padded out to -1 already
+    for kk in range(min(len(lundPlane),pad_length)):
       if (lundPlane[kk].delta_R > 0 and lundPlane[kk].z > 0):
         dr_val = math.log(1.0 / lundPlane[kk].delta_R)
         kt_val = math.log(lundPlane[kk].kt)
-        lp_points.append([kt_val,dr_val])
+        lp_points[kk]=[kt_val,dr_val]
 
     # Free C++ memory
     constituents.clear()
@@ -46,10 +44,8 @@ def make_lundplane(input_vec, pad_length=20):
     del lundPlane
 
     #push back and clean-up
-    while len(lp_points)<pad_length:
-      lp_points.append([-1,-1])
-    lund_plane.append(lp_points[:pad_length].copy())
-    lp_points.clear()
+    lund_plane.append(lp_points)
+    del lp_points
 
   #pad the length
   lund_plane=np.asarray(lund_plane)
