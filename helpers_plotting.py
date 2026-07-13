@@ -712,7 +712,7 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
         EEC.append(hist)
 
     if results: results["EEC_chi2_dof"]=np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC)
-    print("EEC_chi2_dof:",np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC))
+    print("EEC_chi2_dof",np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC))
 
     ax.set_xlabel("R")
     ax.set_ylabel("EEC(R)")
@@ -731,8 +731,6 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
 # Main validation function which runs all the plots
 # ---------------------------------------------------------------------
 def validate_unbinned_models(models, test_loader, args, results=None, labels=None, unavailable_model_reasons=None,):
-  if args.plot_max_batches is not None and args.plot_max_batches <= 0:
-    raise ValueError("--plot-max-batches must be a positive integer")
 
   device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
 
@@ -744,17 +742,21 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       labels.extend([f"generated_{ii}" for ii in range(len(models))])
 
   with torch.inference_mode():
-      original_chunks = []
-      generated_chunks = [[] for _ in models]
+      # ---------------------------------------------------------------------
+      # Preallocated validation storage
+      # ---------------------------------------------------------------------
+      original = None
+      generated = [None for _ in models]
+
       active_models = [True for _ in models]
       unavailable_reasons = [None for _ in models]
+
+      max_events = min( args.validation_size, len(test_loader.dataset))
 
       # ---------------------------------------------------------------------
       # Sanity checks
       # ---------------------------------------------------------------------
       for imodel, model in enumerate(models):
-        model.to(device)
-        model.eval()
 
         forced_reason = None
         if unavailable_model_reasons is not None and imodel < len(unavailable_model_reasons):
@@ -775,33 +777,49 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       # ---------------------------------------------------------------------
       printed_example = False
       starttime=time.time()
-      Nimages=0
+      write_idx = 0
+      Nimages = 0
       for batch, X in enumerate(test_loader):
+        batch_size = X.shape[0]
         Nimages+=X.shape[0]
-        if args.plot_max_batches is not None and batch >= args.plot_max_batches:
+        if write_idx >= max_events:
             break
-        if Nimages>args.validation_size: 
-            break
+
         X = X.to(device)
 
-        if args.standardize:
-            original_chunks.append((helpers.undo_preprocess(X,args.input_format)).detach().cpu())
-        else:
-            original_chunks.append(X.detach().cpu())
+        original_seq=X.detach().cpu()
 
+        #undo pre-processing
+        if args.standardize: #FIXME
+            original_seq=helpers.undo_preprocess(original_seq,args.input_format)
+
+        # Allocate original storage after first batch
+        if original is None:
+            max_events = min( args.validation_size, len(test_loader.dataset))
+            original = torch.empty( (max_events, *original_seq.shape[1:]), dtype=original_seq.dtype,)
+
+        # Store original batch
+        end_idx = min( write_idx + batch_size, original.shape[0])
+        original[write_idx:end_idx] = original_seq[:end_idx-write_idx]
+
+        #Loop over models
         for imodel, model in enumerate(models):
           if not active_models[imodel]:
             continue
 
+          # Set models
+          model.to(device)
+          model.eval()
+
+          #Generate the image
           try:
               generated_seq = model.generate(out_dimensions=X.shape)
-              if args.standardize:
-                generated_seq = helpers.undo_preprocess(generated_seq,args.input_format)
+
           except RuntimeError as err:
             reason = f"generation failed: {err}"
             print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)
             active_models[imodel] = False
-            generated_chunks[imodel] = []
+            generated[imodel] = None
             unavailable_reasons[imodel] = reason
             continue
 
@@ -809,24 +827,31 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             reason = "generated sequence contains nan/inf"
             print(f"Generated plot unavailable for model {imodel}: {reason}.", flush=True)
             active_models[imodel] = False
-            generated_chunks[imodel] = []
+            generated[imodel] = None
             unavailable_reasons[imodel] = reason
             continue
+
+          #undo pre-processing
+          if args.standardize:
+            generated_seq = helpers.undo_preprocess(generated_seq,args.input_format)
 
           if args.mixed_loss:
             generated_seq[:, :, -1] = torch.sigmoid(generated_seq[:, :, -1])
             generated_seq[:, 0, -1] = X[:, 0, -1]
 
-          # Immediately move to CPU before storing
-          generated_seq = generated_seq.detach().cpu()
-          generated_chunks[imodel].append(generated_seq)
+          # Allocate generated storage after first successful generation
+          if generated[imodel] is None:
+              generated[imodel] = torch.empty( (original.shape[0], *generated_seq.shape[1:]), dtype=generated_seq.dtype,)
+
+          # Move only final generated batch to CPU
+          generated[imodel][write_idx:end_idx] = generated_seq.detach().cpu()[:end_idx-write_idx]
 
           if not printed_example:
             print("Input example")
-            print(original_chunks[0][0])
+            print(original[0])
             print("Generate example")
             starttime_single=time.time()
-            print(generated_seq[0])
+            print(generated[imodel][0])
             single_image_time=(time.time()-starttime_single)*1000
             print("Took %.2e ms to generate 1 image"%(single_image_time), flush=True)
             printed_example = True
@@ -834,36 +859,21 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
           #save some memory quicker between CUDA/pytorch
           del generated_seq
-          del X
+        del original_seq
+        del X
+        write_idx = end_idx
 
       full_image_time=(time.time()-starttime)/60
       print("Took %.2f min to generate %i images"%(full_image_time,Nimages), flush=True) 
       if results: results["full_image_time"]=full_image_time
       if results: results["validate_N"]=Nimages
 
-      if len(original_chunks) == 0:
-        raise ValueError("No validation batches were plotted")
-      
-      original = torch.cat(original_chunks)
-      generated_list = [
-          torch.cat(chunks)
-          for chunks in generated_chunks
-          if len(chunks) > 0
-      ]
+      if original is None:
+          raise ValueError("No validation batches were plotted")
+
       active_labels = [labels[0]]
-      active_labels.extend(
-          labels[imodel + 1]
-          for imodel, chunks in enumerate(generated_chunks)
-          if len(chunks) > 0 and imodel + 1 < len(labels)
-      )
-      unavailable_notes = [
-          (
-              labels[imodel + 1] if imodel + 1 < len(labels) else f"generated_{imodel}",
-              reason,
-          )
-          for imodel, reason in enumerate(unavailable_reasons)
-          if reason is not None
-      ]
+      active_labels.extend( labels[imodel + 1] for imodel, g in enumerate(generated) if g is not None and imodel + 1 < len(labels))
+      unavailable_notes = [ ( labels[imodel + 1] if imodel + 1 < len(labels) else f"generated_{imodel}", reason,) for imodel, reason in enumerate(unavailable_reasons) if reason is not None ]
 
       #Save some dim info
       Njet=original.shape[0]
@@ -871,7 +881,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
       #Make flat lists for plots, now is of dimension [N plot, Njet*Nconst , N features]
       original_np = original.numpy() #numpy shares memory but can delete original if want
-      generated_np = [g.numpy() for g in generated_list]
+      generated_np = [g.numpy() for g in generated]
       plot_inputs = [original_np] + generated_np
 
       flat_plot_inputs = [ original_np.reshape(-1, original_np.shape[-1]) ] #reshape is a view

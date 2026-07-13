@@ -88,7 +88,8 @@ class model_autoregressive_transformer(nn.Module):
 
   @torch.no_grad()
   def generate(self, out_dimensions):
-      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2])
+      device = next(self.parameters()).device
+      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device)
       steps=out_dimensions[1]
       for ii in range(steps): #loop over length
           pred = self.forward(seq) #get next element prediction, gives you N prediction for N inputs
@@ -121,7 +122,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
       # constraints, don't do in-line replacements of tensors as can mess with gradients
       #alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
-      sigma2=sigma2.clamp(0.001, 10)
+      sigma2=sigma2.clamp(0.001, None)
 
       assert torch.isfinite(alpha).all()
       assert torch.isfinite(mu).all()
@@ -161,7 +162,8 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
   @torch.no_grad()
   def generate(self, out_dimensions):
-      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2])
+      device = next(self.parameters()).device
+      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device)
       steps=out_dimensions[1]
       ninputs=out_dimensions[-1]
       batch_idx=torch.arange(out_dimensions[0]) #For some smoother slicing later

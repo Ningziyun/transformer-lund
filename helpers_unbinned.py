@@ -26,6 +26,7 @@ class ktdr_dataset(torch.utils.data.Dataset):
     self.data=torch.tensor([])
     self.add_stop=add_stop
     self.add_mask=add_mask
+    self.standardize=standardize
 
     f = h5py.File(file_path,'r')
     kts=f["lundplane"]["kt"]
@@ -40,16 +41,14 @@ class ktdr_dataset(torch.utils.data.Dataset):
     if add_mask:
       self.mask=self.DR != -1
 
-    if standardize:
-      mean_std=helpers.preprocess_mean_std("ktdr")
-      self.kt=(self.kt-mean_std[0][0])/mean_std[0][1]
-      self.DR=(self.DR-mean_std[1][0])/mean_std[1][1]
-
   def __getitem__(self, index):
     inputs=np.array([self.kt[index],self.DR[index]])
     if self.add_stop:
-      inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
+        inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
+
+    if self.standardize:
+        helpers.preprocess(self.data,"4vec")
 
     if self.add_mask:
         return [self.data,self.mask[index]]
@@ -64,6 +63,7 @@ class constit_dataset(torch.utils.data.Dataset):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
+    self.standardize=standardize
 
     f = h5py.File(file_path,'r')
     es=f["constituents"]["E"]
@@ -75,14 +75,6 @@ class constit_dataset(torch.utils.data.Dataset):
     self.py=pys[:,:NConstituents]
     self.pz=pzs[:,:NConstituents]
 
-    if standardize:
-        mean_std=helpers.preprocess_mean_std("4vec")
-        self.e=(self.e-mean_std[0][0])/mean_std[0][1]
-        self.px=(self.px-mean_std[1][0])/mean_std[1][1]
-        self.py=(self.py-mean_std[2][0])/mean_std[2][1]
-        self.pz=(self.pz-mean_std[3][0])/mean_std[3][1]
-
-    #Check if next is -1 and padd last const to True
     if add_stop:
       self.stop=self.e[:,1:] == 0
       self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
@@ -90,8 +82,10 @@ class constit_dataset(torch.utils.data.Dataset):
   def __getitem__(self, index):
     inputs=np.array([self.e[index],self.px[index],self.py[index],self.pz[index]])
     if self.add_stop:
-      inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
+        inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
+    if self.standardize:
+        helpers.preprocess(self.data,"4vec")
 
     return self.data
 
@@ -721,7 +715,6 @@ def parse_input():
     
     # plotting options
     parser.add_argument("--validation-size",type=int, default=1000000, help="How many images to generate and make plots for")
-    parser.add_argument("--plot-max-batches", type=int, default=None, help="Only plot this many validation batches. Default: plot all batches",)
     parser.add_argument("--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
     parser.add_argument("--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
     parser.add_argument("--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)

@@ -82,13 +82,47 @@ def preprocess_mean_std(input_format):
         return [[e_mean,e_std],[px_mean,px_std],[py_mean,py_std],[pz_mean,pz_std]]
     return []
 
+def preprocess_min_max(input_format):
+    if input_format=="ktdr":
+        dr_min,dr_max=0.000,14.143
+        kt_min,kt_max=-10.232, 5.853
+        return [[kt_min,kt_max],[dr_min,dr_max]]
+
+    elif input_format=="4vec":
+        e_min,e_max=0.226, 2804.960
+        px_min,px_max=-946.552, 986.375
+        py_min,py_max=-971.391, 895.821
+        pz_min,pz_max=-2699.067, 2506.768
+        return [[e_min,e_max],[px_min,px_max],[py_min,py_max],[pz_min,pz_max]]
+    return []
+
+def preprocess(X,input_format):
+    '''
+    mean_std=preprocess_mean_std(input_format)
+
+    for ii in range(X.shape[-1]):
+        X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
+    '''
+
+    min_max=preprocess_min_max(input_format)
+    for ii in range(X.shape[-1]):
+        X[:,ii]=(X[:,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
+
 def undo_preprocess(X,input_format):
     #Revert the standardization
+    '''
     mean_std=preprocess_mean_std(input_format)
 
     X_new=torch.zeros(X.shape)
     for ii in range(X_new.shape[-1]):
         X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+    return X_new
+    '''
+
+    min_max=preprocess_min_max(input_format)
+    X_new=torch.zeros(X.shape)
+    for ii in range(X_new.shape[-1]):
+        X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
     return X_new
 
 

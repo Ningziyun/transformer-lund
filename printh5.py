@@ -37,6 +37,7 @@ def recursivePrint(f,depth=0):
         data = val[()]
         filledval = data[data != -1]
         print(f"{space}\t mean={np.mean(filledval):.3f}, std={np.std(filledval):.3f}")
+        print(f"{space}\t min={np.min(filledval):.3f}, max={np.max(filledval):.3f}")
         #print(f"{space}\t {val[:]}")
     elif isinstance(val, h5py.Group):
       print(f"{space} Group: {key}")
