@@ -17,7 +17,7 @@ def evaluate_loss(model,X,mask,args):
   if args.input_format=="4vec" and args.flatten:
     w=flatten_weight(X,device=device)
   else:
-    w=torch.ones(X.shape[0:-1],device=device)
+    w=torch.ones(X.shape[0:-1],device=device) #dim=[Nbatch,Nconst]
 
   #For all flow-based models
   if args.nf or args.diff or args.sde or args.cnf or args.fm:
@@ -27,19 +27,19 @@ def evaluate_loss(model,X,mask,args):
   #All the specifics of the loss function for each model
   if args.nf:
     loss=(model.nll_loss(X)*w2).sum()
-    return loss,w2.sum()
+    return loss,w.sum()
   elif args.diff:
     loss=(model.mse_loss(X)*w2).sum()
-    return loss,w2.sum()
+    return loss,w.sum()
   elif args.sde:
     loss=(model.mse_loss(X)*w2).sum()
-    return loss,w2.sum()
+    return loss,w.sum()
   elif args.cnf:
     loss = (model.nll_loss(X)*w2).sum()
-    return loss,w2.sum()
+    return loss,w.sum()
   elif args.fm:
     loss = (model.mse_loss(X)*w2).sum()
-    return loss,w2.sum()
+    return loss,w.sum()
 
   #Auto-regressive models
   else:
@@ -149,7 +149,7 @@ def test(model, test_loader, args):
 
       #Print loss and save some for later
       if batch % 100 == 0:
-        loss_per_sample = loss / X.shape[0]
+        loss_per_sample = loss / sum_w
         print(f"test batch: {batch} loss:{loss_per_sample}", flush=True)
       epoch_loss += loss.item() #sum the loss across the batch, rolling sum across all batches
       num_samples+=sum_w
