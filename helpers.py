@@ -96,35 +96,42 @@ def preprocess_min_max(input_format):
         return [[e_min,e_max],[px_min,px_max],[py_min,py_max],[pz_min,pz_max]]
     return []
 
-def preprocess(X,input_format):
-    '''
-    mean_std=preprocess_mean_std(input_format)
+def preprocess(X,input_format,method="log"):
+    if method=="standardize":
+        mean_std=preprocess_mean_std(input_format)
+        for ii in range(X.shape[-1]):
+            X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
 
-    for ii in range(X.shape[-1]):
-        X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
-    '''
+    elif method=="linearize":
+        min_max=preprocess_min_max(input_format)
+        for ii in range(X.shape[-1]):
+            X[:,ii]=(X[:,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
 
-    min_max=preprocess_min_max(input_format)
-    for ii in range(X.shape[-1]):
-        X[:,ii]=(X[:,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
+    elif method=="log":
+        mask = X == -1
+        X[...] = torch.sign(X) * torch.log1p(torch.abs(X)) #sign(x)+log(x+1)
+        X[mask]=-1 #restore padding
 
-def undo_preprocess(X,input_format):
-    #Revert the standardization
-    '''
-    mean_std=preprocess_mean_std(input_format)
+def undo_preprocess(X,input_format,method="log"):
 
     X_new=torch.zeros(X.shape)
-    for ii in range(X_new.shape[-1]):
-        X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
-    return X_new
-    '''
 
-    min_max=preprocess_min_max(input_format)
-    X_new=torch.zeros(X.shape)
-    for ii in range(X_new.shape[-1]):
-        X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
-    return X_new
+    if method=="standardize":
+        mean_std=preprocess_mean_std(input_format)
+        for ii in range(X_new.shape[-1]):
+            X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
 
+    elif method=="linearize":
+        min_max=preprocess_min_max(input_format)
+        for ii in range(X_new.shape[-1]):
+            X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
+
+    elif method=="log":
+        mask = X == -1
+        X_new = torch.sign(X) * torch.expm1(torch.abs(X))
+        X_new[mask] = -1
+
+    return X_new
 
 def flatten_weight(X):
     #Predfined value reweight

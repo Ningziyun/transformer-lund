@@ -790,7 +790,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         original_seq=X.detach().cpu()
 
         #undo pre-processing
-        if args.standardize: #FIXME
+        if args.preprocess:
             original_seq=helpers.undo_preprocess(original_seq,args.input_format)
 
         # Allocate original storage after first batch
@@ -832,7 +832,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             continue
 
           #undo pre-processing
-          if args.standardize:
+          if args.preprocess:
             generated_seq = helpers.undo_preprocess(generated_seq,args.input_format)
 
           if args.mixed_loss:

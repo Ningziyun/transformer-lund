@@ -41,6 +41,7 @@ if __name__ == "__main__":
 
 
     #Plot results
+    print("\n")
     string=""
     for metric in args.metrics:
         string+=f" | %15s"%metric
@@ -56,5 +57,5 @@ if __name__ == "__main__":
                 string+=f" | %15s"%result[metric]
         string+=" |"
         print(string)
-
+    print("\n")
         

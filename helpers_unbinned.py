@@ -21,12 +21,12 @@ import helpers
 # Data loaders
 # ---------------------------------------------------------------------
 class ktdr_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_stop=False, add_mask=False, standardize=False):
+  def __init__(self, file_path, NConstituents=20, add_stop=False, add_mask=False, preprocess=False):
     super(ktdr_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
     self.add_mask=add_mask
-    self.standardize=standardize
+    self.preprocess=preprocess
 
     f = h5py.File(file_path,'r')
     kts=f["lundplane"]["kt"]
@@ -47,8 +47,8 @@ class ktdr_dataset(torch.utils.data.Dataset):
         inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
-    if self.standardize:
-        helpers.preprocess(self.data,"4vec")
+    if self.preprocess:
+        helpers.preprocess(self.data,"ktdr")
 
     if self.add_mask:
         return [self.data,self.mask[index]]
@@ -59,11 +59,11 @@ class ktdr_dataset(torch.utils.data.Dataset):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_stop=False, standardize=False):
+  def __init__(self, file_path, NConstituents=20, add_stop=False, preprocess=False):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
-    self.standardize=standardize
+    self.preprocess=preprocess
 
     f = h5py.File(file_path,'r')
     es=f["constituents"]["E"]
@@ -84,7 +84,8 @@ class constit_dataset(torch.utils.data.Dataset):
     if self.add_stop:
         inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
-    if self.standardize:
+
+    if self.preprocess:
         helpers.preprocess(self.data,"4vec")
 
     return self.data
@@ -95,15 +96,15 @@ class constit_dataset(torch.utils.data.Dataset):
 def get_loaders(args):
 
   if args.input_format=="ktdr":
-    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="4vec":
-    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, standardize=args.standardize)
+    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
   return train_loader,test_loader
 
@@ -655,7 +656,7 @@ def parse_input():
     parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     parser.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
-    parser.add_argument("--standardize", action="store_true", default=False, help="Standardize the ouput (default: False)")
+    parser.add_argument("--preprocess", action="store_true", default=False, help="Preprocess the ouput (default: False)")
     parser.add_argument("--flatten", action="store_true", default=False, help="Flatten the energy during training (default: False)")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
 
@@ -691,9 +692,9 @@ def parse_input():
 
     # transformer hyperparams (keep defaults = your current test_model defaults)
     parser.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
-    parser.add_argument("--num-heads", type=int, default=1, help="Transformer num heads")
+    parser.add_argument("--num-heads", type=int, default=2, help="Transformer num heads")
     parser.add_argument("--num-layers", type=int, default=2, help="Transformer num layers")
-    parser.add_argument("--ff-dim", type=int, default=128, help="Transformer feedforward dim")
+    parser.add_argument("--ff-dim", type=int, default=256, help="Transformer feedforward dim")
 
     #
     parser.add_argument("--nf", action="store_true", default=False, help="Use NormFlows")
@@ -714,7 +715,7 @@ def parse_input():
     parser.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
     
     # plotting options
-    parser.add_argument("--validation-size",type=int, default=1000000, help="How many images to generate and make plots for")
+    parser.add_argument("--validation-size",type=int, default=100000, help="How many images to generate and make plots for")
     parser.add_argument("--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
     parser.add_argument("--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
     parser.add_argument("--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)
