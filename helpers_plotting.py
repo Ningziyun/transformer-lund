@@ -789,13 +789,8 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
         original_seq=X.detach().cpu()
 
-        #undo pre-processing
-        if args.preprocess:
-            original_seq=helpers.undo_preprocess(original_seq,args.input_format)
-
         # Allocate original storage after first batch
         if original is None:
-            max_events = min( args.validation_size, len(test_loader.dataset))
             original = torch.empty( (max_events, *original_seq.shape[1:]), dtype=original_seq.dtype,)
 
         # Store original batch
@@ -830,10 +825,6 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             generated[imodel] = None
             unavailable_reasons[imodel] = reason
             continue
-
-          #undo pre-processing
-          if args.preprocess:
-            generated_seq = helpers.undo_preprocess(generated_seq,args.input_format)
 
           if args.mixed_loss:
             generated_seq[:, :, -1] = torch.sigmoid(generated_seq[:, :, -1])
@@ -886,6 +877,34 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
       flat_plot_inputs = [ original_np.reshape(-1, original_np.shape[-1]) ] #reshape is a view
       flat_plot_inputs.extend( g.reshape(-1, g.shape[-1]) for g in generated_np)
+
+      # ---------------------------------------------------------------------
+      # Undo pre-processing
+      # ---------------------------------------------------------------------
+      if args.preprocess:
+        #make plot of original regression
+        projection_plot(
+          flat_plot_inputs,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+          name="projection_preprocess",
+          unavailable_notes=unavailable_notes,
+        )
+
+        #Clear memory and remkae
+        del original_np
+        for g in generated_np: del g
+        original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
+        generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
+
+        flat_plot_inputs = [ original_np.reshape(-1, original_np.shape[-1]) ] #reshape is a view
+        flat_plot_inputs.extend( g.reshape(-1, g.shape[-1]) for g in generated_np)
+
+        #make a quick dump
+        print("Input example removing preprocess")
+        print(original_np[0])
+        print("Generate example removing preproecess")
+        print(generated_np[0][0])
 
       # ---------------------------------------------------------------------
       # Make the plots

@@ -21,7 +21,7 @@ import helpers
 # Data loaders
 # ---------------------------------------------------------------------
 class ktdr_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_stop=False, add_mask=False, preprocess=False):
+  def __init__(self, file_path, NConstituents=20, add_stop=False, add_mask=False, preprocess=None):
     super(ktdr_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
@@ -48,7 +48,7 @@ class ktdr_dataset(torch.utils.data.Dataset):
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
     if self.preprocess:
-        helpers.preprocess(self.data,"ktdr")
+        helpers.preprocess(self.data,"ktdr",self.preprocess)
 
     if self.add_mask:
         return [self.data,self.mask[index]]
@@ -59,7 +59,7 @@ class ktdr_dataset(torch.utils.data.Dataset):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_stop=False, preprocess=False):
+  def __init__(self, file_path, NConstituents=20, add_stop=False, preprocess=None):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_stop=add_stop
@@ -86,7 +86,7 @@ class constit_dataset(torch.utils.data.Dataset):
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
     if self.preprocess:
-        helpers.preprocess(self.data,"4vec")
+        helpers.preprocess(self.data,"4vec",self.preprocess)
 
     return self.data
 
@@ -576,14 +576,9 @@ def loss_plot(loss_train,loss_test,out_dir="./Plots/", loss_curves=None):
   min_train=np.min(train_arr)
   min_test=np.min(test_arr)
   if min_train<0 or min_test<0:
-      print(train_arr)
-      print(test_arr)
-      print(min_train,min_test)
       min_total=min(min_train,min_test)-1
       train_arr-=min_total
       test_arr-=min_total
-      print(train_arr)
-      print(test_arr)
 
   fig,ax = plt.subplots(figsize=(6.0, 4.0))
   if n_epochs > 0:
@@ -656,7 +651,7 @@ def parse_input():
     parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     parser.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
-    parser.add_argument("--preprocess", action="store_true", default=False, help="Preprocess the ouput (default: False)")
+    parser.add_argument("--preprocess", type=str, default=None, help="Preprocess the output (default: lNone")
     parser.add_argument("--flatten", action="store_true", default=False, help="Flatten the energy during training (default: False)")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
 

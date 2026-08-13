@@ -127,7 +127,7 @@ def test(model, test_loader, args):
   model.eval()  # disable dropout for evaluation
 
   #Store some values
-  num_samples=0
+  n_samples=0
   epoch_loss = 0.0
 
   # CNF needs gradients; others don't.
@@ -152,10 +152,10 @@ def test(model, test_loader, args):
         loss_per_sample = loss / sum_w
         print(f"test batch: {batch} loss:{loss_per_sample}", flush=True)
       epoch_loss += loss.item() #sum the loss across the batch, rolling sum across all batches
-      num_samples+=sum_w
+      n_samples+=sum_w
 
     #Get the average loss across whole batch
-    epoch_loss /= num_samples #Divide total numper of events
+    epoch_loss /= n_samples #Divide total numper of events
     print(f"test loss={epoch_loss}", flush=True)
     return epoch_loss
 

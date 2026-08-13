@@ -110,7 +110,11 @@ def preprocess(X,input_format,method="log"):
     elif method=="log":
         mask = X == -1
         X[...] = torch.sign(X) * torch.log1p(torch.abs(X)) #sign(x)+log(x+1)
-        X[mask]=-1 #restore padding
+        X[mask]=-10 #restore padding
+
+    elif method=="shiftnan":
+        mask = X == -1
+        X[mask]=-5e3
 
 def undo_preprocess(X,input_format,method="log"):
 
@@ -127,9 +131,12 @@ def undo_preprocess(X,input_format,method="log"):
             X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
 
     elif method=="log":
-        mask = X == -1
+        mask = X == -10
         X_new = torch.sign(X) * torch.expm1(torch.abs(X))
         X_new[mask] = -1
+
+    elif method=="shiftnan":
+        return X
 
     return X_new
 
