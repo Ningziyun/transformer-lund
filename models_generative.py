@@ -42,7 +42,7 @@ class model_autoregressive_transformer(nn.Module):
   '''
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
   '''
-  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128):
+  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512):
       super(model_autoregressive_transformer, self).__init__()
 
       self.input_dim=input_dim
@@ -52,14 +52,17 @@ class model_autoregressive_transformer(nn.Module):
       self.num_layers=num_layers
 
       #Add the embedding layer
-      self.embed=nn.Linear(input_dim, self.embed_dim)
+      self.embed = nn.Sequential(nn.Linear(self.input_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
 
       #specify the transformer block and number of layers
       encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.1, batch_first=True)
       self.encoder = nn.TransformerEncoder(encoder_layer, self.num_layers)
 
+      #Layer norm:
+      self.norm = nn.LayerNorm(embed_dim)
+
       #Now de-embed back to original output
-      self.deembed = nn.Linear(self.embed_dim, self.input_dim)
+      self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.input_dim))
 
   def forward(self, x):
 
@@ -77,6 +80,8 @@ class model_autoregressive_transformer(nn.Module):
 
   def mse_loss(self, pred, targets):
       loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
+      #loss_fn = nn.HuberLoss(reduction='mean', delta=1.0)
+
       '''
       if args.mixed_loss:
         #loss_fn2 = nn.CrossEntropyLoss() #expects logits
@@ -84,7 +89,7 @@ class model_autoregressive_transformer(nn.Module):
         sigmoid=nn.Sigmoid()
       '''
 
-      return loss_fn(pred,targets)
+      return loss_fn(pred,targets).sum(dim=-1)
 
   @torch.no_grad()
   def generate(self, out_dimensions):
@@ -101,13 +106,13 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   '''
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   '''
-  def __init__(self, input_dim, n_mix=25, embed_dim=128, num_heads=1, num_layers=2, ff_dim=128):
+  def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512):
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim)
 
       self.n_mix=n_mix
 
       #Final space is now a multi-D Gaussian mixture model: prod \alpha_i Gaus(\arrow\mu_i,\arrow\sigma_i) , where dimension=length of ouput (aka 4 for 4-vec)
-      self.deembed = nn.Linear(self.embed_dim, self.n_mix*(1+input_dim+input_dim))
+      self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim,self.n_mix*(1+input_dim+input_dim)))
 
   def forward(self, x):
 
@@ -122,7 +127,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
       # constraints, don't do in-line replacements of tensors as can mess with gradients
       #alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
-      sigma2=sigma2.clamp(0.001, None)
+      sigma2=sigma2.clamp(0.001, 10)
 
       assert torch.isfinite(alpha).all()
       assert torch.isfinite(mu).all()
