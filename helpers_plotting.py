@@ -826,10 +826,6 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             unavailable_reasons[imodel] = reason
             continue
 
-          if args.mixed_loss:
-            generated_seq[:, :, -1] = torch.sigmoid(generated_seq[:, :, -1])
-            generated_seq[:, 0, -1] = X[:, 0, -1]
-
           # Allocate generated storage after first successful generation
           if generated[imodel] is None:
               generated[imodel] = torch.empty( (original.shape[0], *generated_seq.shape[1:]), dtype=generated_seq.dtype,)

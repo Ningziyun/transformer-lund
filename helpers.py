@@ -131,7 +131,11 @@ def undo_preprocess(X,input_format,method="log"):
             X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
 
     elif method=="log":
-        mask = X == -10
+        #mask = X == -10
+        if input_format=="4vec":
+            mask = X[:,:,0] < 0
+        else:
+            mask = X[:,:,-1] < 0
         X_new = torch.sign(X) * torch.expm1(torch.abs(X))
         X_new[mask] = -1
 

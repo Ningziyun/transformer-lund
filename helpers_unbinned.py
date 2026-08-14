@@ -317,6 +317,7 @@ def build_unbinned_model(input_dim, args_or_dict):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
         )
     elif architecture=="CNF":
         return models_generative.model_CNF(
@@ -351,6 +352,7 @@ def build_unbinned_model(input_dim, args_or_dict):
         num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
         num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
         ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+        multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
     )
 
 def save_model(model, log_dir, name):

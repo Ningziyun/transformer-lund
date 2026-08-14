@@ -47,27 +47,16 @@ def evaluate_loss(model,X,mask,args):
     targets = X # the whole f-vector
     pred = model(inputs)       # (batch, seq_len-1, feature_dim)
 
-    #mask = ~((targets[:, :, 0] == -1) & (targets[:, :, 1] == -1))  # shape: [B, L]
-    mask=None
+    if args.mixed_loss:
+        pad_mask=(targets < 0).all(dim=-1)  # shape: [B, L]
+    else:
+        pad_mask=None
 
     if args.mdn:
-        loss = (model.nll_loss(pred, targets, mask)*w).sum()
+        loss = (model.nll_loss(pred, targets, pad_mask)*w).sum()
     else:
-        loss = (model.mse_loss(pred, targets)*w).sum()
+        loss = (model.mse_loss(pred, targets, pad_mask)*w).sum()
     return loss, w.sum()
-
-    '''
-    if args.mixed_loss:
-      lambd=1
-      #print(loss_fn(pred[:,:,:-1],targets[:,:,:-1]).shape,loss_fn2(pred[:,:,-1],targets[:,:,-1]).shape)
-      loss= loss_fn(pred[:,:,:-1],targets[:,:,:-1]).sum(dim=-1)+lambd*loss_fn2(pred[:,:,-1],targets[:,:,-1]) #mixed loss
-    else:
-      loss = loss_fn(pred, targets) #whole loss
-    if mask==None:
-      loss=loss.sum()
-    else:
-      loss=loss[mask].sum() 
-    '''
 
 def train(model,train_loader,args):
   model.train() #Set to training mode to caluclate gradients
@@ -204,14 +193,13 @@ if __name__ == "__main__":
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape,flush=True)
-    elif args.mdn:
+    else:
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(X_example).shape, flush=True)
-    else:   
-      print("Input shape,",X_example.shape, flush=True)
-      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(X_example).shape, flush=True)
+      if args.mixed_loss:
+        print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
+      else:
+        print("Output shape,", model(X_example).shape, flush=True)
     model.to(device)
 
     #Set the scheduler
