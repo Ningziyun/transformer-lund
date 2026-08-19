@@ -285,41 +285,21 @@ def _config_get(args_or_dict, key, default=None):
         return args_or_dict.get(key, default)
     return getattr(args_or_dict, key, default)
 
-def model_architecture_type(args_or_dict):
-    isMDN=_as_bool(_config_get(args_or_dict, "mdn", False))
-    isCNF=_as_bool(_config_get(args_or_dict, "cnf", False))
-    isNF=_as_bool(_config_get(args_or_dict, "nf", False))
-    isFM=_as_bool(_config_get(args_or_dict, "fm", False))
-    isDiff=_as_bool(_config_get(args_or_dict, "diff", False))
-    isSDE=_as_bool(_config_get(args_or_dict, "sde", False))
-
-    if sum([isMDN,isCNF,isNF,isFM,isDiff,isSDE]) >1:
-        raise ValueError("Too many architecture specified at once")
-
-    if isMDN: return "MDN"
-    elif isCNF: return "CNF"
-    elif isNF: return "NF"
-    elif isFM: return "FM"
-    elif isDiff: return "Diff"
-    elif isSDE: return "SDE"
-    else: return "Trans"
-
 # ---------------------------------------------------------------------
 # Load model
 # ---------------------------------------------------------------------
 def build_unbinned_model(input_dim, args_or_dict):
-    architecture=model_architecture_type(args_or_dict)
-    if architecture=="MDN":
+    if args_or_dict.architecture=="MDN":
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_dim[2],
-            n_mix=_as_int(_config_get(args_or_dict,"n_mix")),
+            n_mix=_as_int(_config_get(args_or_dict,"MDN_nmix")),
             embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
             multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
         )
-    elif architecture=="CNF":
+    elif args_or_dict.architecture=="CNF":
         return models_generative.model_CNF(
             input_dim=input_dim[1]*input_dim[2],
             embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
@@ -327,33 +307,50 @@ def build_unbinned_model(input_dim, args_or_dict):
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
             cnf_hidden=_as_int(_config_get(args_or_dict,"cnf_hidden")),
-            #, _config_get(args_or_dict,"flow_hidden", 128)), 128),
-            #cnf_steps=_as_int(_config_get(args_or_dict,"cnf_steps", 8), 8),
+            steps=_as_int(_config_get(args_or_dict,"cnf_steps")),
+            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
         )
-    elif architecture=="FM":
+    elif args_or_dict.architecture=="FM":
         return models_generative.model_FM(
             input_dim=input_dim[1]*input_dim[2],
             hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            steps=_as_int(_config_get(args_or_dict,"cnf_steps")),
+            steps=_as_int(_config_get(args_or_dict,"fm_steps")),
+            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
         )
-    elif architecture=="NF":
+    elif args_or_dict.architecture=="NF":
         return models_generative.model_normalizing_flow(
             input_dim=input_dim[1]*input_dim[2],
-            num_flows=6,
-            latent_dim=128,
+            num_flows=_as_int(_config_get(args_or_dict,"nflows")),
+            latent_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            flow_type=args_or_dict.nf_type,
         )
-    elif architecture=="Diff":
-        return models_generative.model_diffusion(input_dim=input_dim[1]*input_dim[2], hidden_dim=256)
-    elif architecture=="SDE":
-        return models_generative.model_score_SDE(input_dim=input_dim[1]*input_dim[2], hidden_dim=256)
-    return models_generative.model_autoregressive_transformer(
-        input_dim=input_dim[2],
-        embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-        num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-        num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-        ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-        multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
-    )
+    elif args_or_dict.architecture=="Diffusion":
+        return models_generative.model_diffusion(
+                input_dim=input_dim[1]*input_dim[2], 
+                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+                timesteps=_as_int(_config_get(args_or_dict,"diff_steps")),
+                beta_start=_as_float(_config_get(args_or_dict,"diff_beta_start")),
+                beta_end=_as_float(_config_get(args_or_dict,"diff_beta_start")),
+                mode=args_or_dict.diff_type,
+                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+        )
+    elif args_or_dict.architecture=="SDE":
+        return models_generative.model_score_SDE(
+                input_dim=input_dim[1]*input_dim[2],
+                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+                beta_min=_as_float(_config_get(args_or_dict,"sde_beta_min")),
+                beta_max=_as_float(_config_get(args_or_dict,"sde_beta_max")),
+                mode=args_or_dict.sde_type,
+        )
+    elif args_or_dict.architecture=="Transformer":
+        return models_generative.model_autoregressive_transformer(
+            input_dim=input_dim[2],
+            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+        )
 
 def save_model(model, log_dir, name):
     torch.save(model, os.path.join(log_dir, f"model_{name}.pt"))
@@ -405,7 +402,6 @@ def save_checkpoint(
     args_dict = dict(args) if isinstance(args, dict) else vars(args).copy()
     checkpoint_info = {
         "save_mode": save_mode,
-        "architecture":model_architecture_type(args),
         "epoch": epoch,
         "loss": loss,
         "best_epoch": best_epoch,
@@ -634,7 +630,6 @@ def save_argument_metadata(args):
     #Loop over arguments and save them
     os.makedirs(args.log_dir)
     with open(os.path.join(args.log_dir, "arguments.txt"), "w") as f:
-        f.write(f"{'architecture':20s} {model_architecture_type(args)}\n\n")
         arg_dict = vars(args)
         for k, v in arg_dict.items():
             f.write(f"{k:20s} {v}\n")
@@ -657,6 +652,10 @@ def parse_input():
     parser.add_argument("--flatten", action="store_true", default=False, help="Flatten the energy during training (default: False)")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
 
+    # Architectures
+    parser.add_argument("--architecture","-a",type=str, choices=["Transformer","MDN","NF","CNF","Diffusion","SDE","FM"], help="Architecture to run")
+    parser.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
+
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
@@ -676,29 +675,39 @@ def parse_input():
     parser.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
     parser.add_argument("--test", action="store_true", default=False, help="Setup with reduced training size for easy debugging/testing")
 
-    # model switches
-    parser.add_argument("--mdn", action="store_true", default=False, help="Use MDN head (default: True)")
-    parser.add_argument("--no-mdn", dest="mdn", action="store_false", help="Disable MDN, use regression head")
-    parser.add_argument("--n-mix", type=int, default=25, help="Number of MDN mixtures")
-    parser.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
-
-    # CNF switch (overrides mdn/regression)
-    parser.add_argument("--cnf", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
-    parser.add_argument("--cnf-hidden", type=int, default=128, help="CNF vector field hidden size")
-    parser.add_argument("--cnf-steps", type=int, default=8, help="CNF Euler steps for integration")
+    # general model parameters
+    parser.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
+    parser.add_argument("--time-dim", type=int, default=64, help="Transformer embedding dim")
 
     # transformer hyperparams (keep defaults = your current test_model defaults)
-    parser.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
     parser.add_argument("--num-heads", type=int, default=2, help="Transformer num heads")
     parser.add_argument("--num-layers", type=int, default=2, help="Transformer num layers")
     parser.add_argument("--ff-dim", type=int, default=256, help="Transformer feedforward dim")
 
-    #
-    parser.add_argument("--nf", action="store_true", default=False, help="Use NormFlows")
-    parser.add_argument("--fm", action="store_true", default=False, help="Use Continuous Normalizing Flow head")
-    parser.add_argument("--diff", action="store_true", default=False, help="Use Masked autoregressive flow")
-    parser.add_argument("--sde", action="store_true", default=False, help="Use Masked autoregressive flow")
-    parser.add_argument("--flow-hidden", type=int, default=128, help="Hidden size for auxiliary flow nets")
+    # MDN parameters
+    parser.add_argument("--MDN-nmix", type=int, default=25, help="Number of MDN mixtures")
+
+    # CNF paramaters
+    parser.add_argument("--cnf-hidden", type=int, default=128, help="CNF vector field hidden size")
+    parser.add_argument("--cnf-steps", type=int, default=25, help="CNF Euler steps for integration")
+
+    # FM parameters
+    parser.add_argument("--fm-steps", type=int, default=25, help="FM Euler steps for integration")
+
+    # NF paramaters
+    parser.add_argument("--nflows", type=int, default=10, help="NF steps")
+    parser.add_argument("--flow-type", type=str, default="neuralspline_coupling", choices=["realnvp","maf","neuralspline_coupling","neuralspline_autoregressive"], help="Algorithm for the normalizing flows")
+
+    # Diff paramaters
+    parser.add_argument("--diff-steps", type=int, default=1000, help="Diffusion timesteps")
+    parser.add_argument("--diff-beta-start", type=float, default=1e-4, help="Diffusion beta start")
+    parser.add_argument("--diff-beta-end", type=float, default=2e-2, help="Diffusion beta end")
+    parser.add_argument("--diff-type", type=str, default="DDPM", choices=["DDPM","DDIM"], help="Algorithm for the diffusion")
+
+    # SDE parameters
+    parser.add_argument("--SDE-beta-min", type=float, default=0.1, help="SDE beta min")
+    parser.add_argument("--SDE-beta-max", type=float, default=20.0, help="SDE beta max")
+    parser.add_argument("--SDE-type", type=str, default="sde", choices=["sde","ode"], help="Algorithm for the SDE")
 
     # misc
     parser.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")

@@ -36,6 +36,114 @@ class model_DNN(nn.Module):
       return x
 
 # ---------------------------------------------------------------------
+# Re-used blocks
+# ---------------------------------------------------------------------
+class Sinusoidal_Time_Embedding(nn.Module):
+    """
+    Standard sinusoidal timestep embedding. Converts t -> [sin(w_0 t),cos(w_0 t),sin(w_1 t),cos(w_1 t), ...] (check what is w_i)
+    Can also do a normal embedding?
+    t: (B,)
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        half = self.dim // 2
+        freqs = torch.exp( -math.log(10000) * torch.arange(half, device=t.device, dtype=t.dtype) / (half - 1))
+        args = t * freqs[None, :]
+        return torch.cat( [torch.sin(args), torch.cos(args)], dim=-1)
+
+class VectorFieldTrans(nn.Module):
+  """
+  Conditional vector field: dz/dt = f(z, t, c)
+  z: [B, D]
+  c: [B, C] (context)
+  """
+  def __init__(self, z_dim, c_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, time_dim=64):
+    super().__init__()
+    self.time_dim=time_dim
+
+    self.input_dim=z_dim
+    self.embed_dim=embed_dim
+    self.ff_dim=ff_dim
+    self.num_heads=num_heads
+    self.num_layers=num_layers
+
+    #Add the embedding layer
+    self.embed = nn.Sequential(nn.Linear(self.input_dim + self.time_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
+
+    #specify the transformer block and number of layers
+    encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.1, batch_first=True)
+    self.encoder = nn.TransformerEncoder(encoder_layer, self.num_layers)
+
+    #Now de-embed back to original output
+    self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.input_dim))
+
+    self.time_emb = Sinusoidal_Time_Embedding(time_dim)
+
+  def forward(self, z, t, c=None):
+    tt = t.expand(z.shape[0], 1) #should be on device
+    if self.time_dim>1:
+        tt = self.time_emb(tt)
+
+    z=torch.cat([z,tt],dim=1)
+
+    # Embed the N-dim vector into the embedded space
+    z=self.embed(z) # (batch, seq_len, embed_dim)
+
+    # Causal mask prevents looking ahead
+    seq_len = z.shape[1] # (batch, seq_len, feature_dim)
+    casual_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(z.device)
+
+    #Go through encoder
+    z = self.encoder(z)#, mask=casual_mask)
+
+    #De-embed
+    z=self.deembed(z)
+
+    return z
+
+class VectorFieldNN(nn.Module):
+  """
+  Conditional vector field: dz/dt = f(z, t, c)
+  z: [B, D]
+  c: [B, C] (context)
+  """
+  def __init__(self, z_dim, c_dim, hidden_dim, time_dim):
+    super().__init__()
+    self.time_dim=time_dim
+
+    if self.time_dim==1:
+        self.net = nn.Sequential(
+          nn.Linear(z_dim + c_dim + 1, hidden_dim),  # +1 for time embedding (t)
+          nn.SiLU(),
+          nn.Linear(hidden_dim, hidden_dim),
+          nn.SiLU(),
+          nn.Linear(hidden_dim, z_dim),
+        )
+
+    else:
+        self.net = nn.Sequential(
+          nn.Linear(z_dim + c_dim + time_dim, hidden_dim),
+          nn.SiLU(),
+          nn.Linear(hidden_dim, hidden_dim),
+          nn.SiLU(),
+          nn.Linear(hidden_dim, z_dim),
+        )
+        self.time_emb = Sinusoidal_Time_Embedding(time_dim)
+
+  def forward(self, z, t, c=None):
+    tt = t.expand(z.shape[0], 1) #should be on device
+    if self.time_dim>1:
+        tt = self.time_emb(tt)
+    if c==None:
+        zct = torch.cat([z, tt], dim=-1)
+    else:
+        zct = torch.cat([z, c, tt], dim=-1) 
+    return self.net(zct)
+
+# ---------------------------------------------------------------------
 # Autoregressive trasnformer model
 # ---------------------------------------------------------------------
 class model_autoregressive_transformer(nn.Module):
@@ -245,30 +353,6 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 # ---------------------------------------------------------------------
 # CNF (Continous Normalizing Flow)
 # ---------------------------------------------------------------------
-class VectorFieldNN(nn.Module):
-  """
-  Conditional vector field: dz/dt = f(z, t, c)
-  z: [B, D]
-  c: [B, C] (context from transformer)
-  """
-  def __init__(self, z_dim, c_dim, hidden_dim=128):
-    super().__init__()
-    self.net = nn.Sequential(
-      nn.Linear(z_dim + c_dim + 1, hidden_dim),  # +1 for time embedding (t)
-      nn.SiLU(),
-      nn.Linear(hidden_dim, hidden_dim),
-      nn.SiLU(),
-      nn.Linear(hidden_dim, z_dim),
-    )
-
-  def forward(self, z, t, c=None):
-    tt = t.expand(z.shape[0], 1) #should be on device
-    if c==None:
-        zct = torch.cat([z, tt], dim=-1)
-    else:
-        zct = torch.cat([z, c, tt], dim=-1)
-    return self.net(zct)
-
 def hutch_trace(f, z, eps):
   """
   Hutchinson trace estimator for divergence: tr(df/dt) approx E_p(epsilon){epsilon*df/ft*epilson} for gaussian vector noise epislone
@@ -291,13 +375,13 @@ class CNFDynamics(nn.Module):
   A minimal CNF using RK4 integration + Hutchinson trace estimator.
   This avoids external dependencies (torchdiffeq), and is enough to get a working CNF mode.
   """
-  def __init__(self, x_dim, c_dim, hidden_dim=128, steps=100):
+  def __init__(self, x_dim, c_dim, hidden_dim, time_dim, steps):
     super().__init__()
     self.x_dim = x_dim
     self.c_dim = c_dim
     self.hidden_dim = hidden_dim
 
-    self.vf = VectorFieldNN(x_dim, c_dim, hidden_dim=hidden_dim)
+    self.vf = VectorFieldNN(x_dim, c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
 
     self.steps = steps
     self.register_buffer("time_grid", torch.linspace(0, 1, steps+1))
@@ -372,7 +456,7 @@ class model_CNF(nn.Module):
   Transformer context encoder + CNF head for conditional density p(x_{t+1} | x_{<=t}).
   This produces a likelihood-based model (harder constraints require bounded transforms; CNF itself is on R^D).
   """
-  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128, cnf_hidden=128, cnf_steps=25):
+  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128, cnf_hidden=128, steps=25, time_dim=64):
     super().__init__()
     self.input_dim = input_dim
     self.embed_dim = embed_dim
@@ -387,7 +471,7 @@ class model_CNF(nn.Module):
     #self.ctx = nn.Linear(embed_dim, embed_dim)
 
     #remove steps
-    self.cnf = CNFDynamics(x_dim=input_dim, c_dim=0, hidden_dim=cnf_hidden, steps=cnf_steps)
+    self.cnf = CNFDynamics(x_dim=input_dim, c_dim=0, hidden_dim=cnf_hidden, steps=steps, time_dim=time_dim)
 
   def forward(self, x):
     # Safe forward for debugging / torchinfo; does NOT compute likelihood.
@@ -408,39 +492,45 @@ class model_CNF(nn.Module):
 # Flow matching
 # ---------------------------------------------------------------------
 class FlowMatching(nn.Module):
-    def __init__( self, x_dim, c_dim=0, hidden_dim=128, steps=50,):
+    """
+    Code running the full flow mathing algorithm
+    """
+    def __init__( self, x_dim, c_dim, hidden_dim, time_dim, steps):
         super().__init__()
 
         self.x_dim=x_dim
         self.steps=steps
 
-        self.vf=VectorFieldNN( x_dim, c_dim, hidden_dim=hidden_dim)
+        #Get the vector field prediction v
+        self.vf=VectorFieldNN( x_dim, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+        #self.vf=VectorFieldTrans( x_dim, c_dim=c_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, time_dim=time_dim)
+
+        #Set the timegrid
         self.register_buffer( "time_grid", torch.linspace(0,1,steps+1))
 
     def loss(self, x1):
         B=x1.shape[0]
         device=x1.device
 
+        #sample the original gaussian and a random time
         x0=torch.randn_like(x1)
-
         t=torch.rand(B,1,device=device)
 
-        # probability path
-
+        # probability path at time t
         xt=(1-t)*x0+t*x1
 
         #sigma=1e-4
         #eps=torch.randn_like(x1)
         #xt=(1-(1-sigma)*t)*x0+t*x1+sigma*eps
 
-        # target velocity
+        # target velocity for rectified flow
+        u=x1-x0
 
-        ut=x1-x0
-
+        #Get the prediction at time t
         pred=self.vf(xt,t)
 
-        #loss=((pred-ut)**2)
-        loss = F.mse_loss(pred,ut,reduction='none')
+        #MSE loss
+        loss = F.mse_loss(pred,u,reduction='none')
 
         return loss
 
@@ -448,12 +538,14 @@ class FlowMatching(nn.Module):
     def generate(self,batch_size):
         device=next(self.parameters()).device
 
+        #Get the intial x_0 distribution
         x=torch.randn( batch_size, self.x_dim, device=device)
 
+        #make the time grid
         t=self.time_grid.to(device)
 
+        #push forward x_0 to x_1 via RK4 algorith and the learned velocity
         dt=1/self.steps
-
         for k in range(len(t)-1):
             k1=self.vf(x,t[k])
             k2=self.vf( x+0.5*dt*k1, t[k]+0.5*dt)
@@ -465,10 +557,18 @@ class FlowMatching(nn.Module):
         return x
 
 class model_FM(nn.Module):
-    def __init__( self, input_dim, hidden_dim=128, steps=50):
+    """
+    Flow matching model using rectified linear flows.
+    Attempt to learn the vector field from p_0 to p_1 (aka data) by MSE.
+    As opposed to try to learn the whole flow from 0->1 at once from CNF instead assume rectified linear flow p(x|t,z=(x_0,x_1))=delta((1-t)*x_0 + t*x_1)
+    for intermediate t and train for intermediate time as well. The flow is then u=x_1-x_0 (which is time and intermediate x independent!)
+
+    Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
+    """
+    def __init__(self, input_dim, hidden_dim=128, time_dim=64, steps=50):
         super().__init__()
 
-        self.fm=FlowMatching( x_dim=input_dim, hidden_dim=hidden_dim, steps=steps)
+        self.fm=FlowMatching( x_dim=input_dim, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps)
 
     def forward(self,x):
         t=torch.zeros( x.shape[0], 1, device=x.device, dtype=x.dtype)
@@ -489,7 +589,7 @@ class model_FM(nn.Module):
 # Custom vanilla Normlazing flows, better to use nflows package
 # ---------------------------------------------------------------------
 class realnvp_coupling_layer(nn.Module):
-    def __init__(self, input_dim, latent_dim=256, mask=None):
+    def __init__(self, input_dim, latent_dim, mask=None):
         super().__init__()
 
         #If you give it a mask, treats in 1-flow, otherwise splits into 2 halves manually
@@ -755,32 +855,17 @@ class DiffusionMLP(nn.Module):
     '''
     Simple MLP noise predictor for diffusion. Learning cumulative added noise epsilon(x_{t-1}, t)
     '''
-    def __init__(self, input_dim, hidden_dim=256, time_embed_dim=128):
+    def __init__(self, input_dim, hidden_dim, time_dim):
         super().__init__()
 
-        self.time_embed_dim = time_embed_dim
-        self.time_mlp = nn.Sequential(nn.Linear(time_embed_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim),)
+        self.time_dim = time_dim
+        self.time_mlp = nn.Sequential(nn.Linear(time_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim),)
 
         #self.mlp = nn.Sequential(nn.Linear(input_dim + hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),) 
         self.mlp = nn.Sequential(nn.Linear(input_dim + 1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
 
-    def sinusoidal_embedding(self, t, dim):
-        """
-        Standard sinusoidal timestep embedding. Converts t -> [sin(w_0 t),cos(w_0 t),sin(w_1 t),cos(w_1 t), ...] (check what is w_i)
-        Can also do a normal embedding?
-        t: (B,)
-        """
-        device = t.device
-        half_dim = dim // 2
+        self.time_emb = Sinusoidal_Time_Embedding(time_dim)
 
-        emb_scale = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb_scale)
-
-        emb = t[:, None] * emb[None, :]
-        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-
-        return emb
-     
     def forward(self, x, t):
         """
         x: (B, D)
@@ -788,13 +873,13 @@ class DiffusionMLP(nn.Module):
         """
 
         #Add the sinusioidal time conditioner
-        #t_emb = self.sinusoidal_embedding(t.float(), self.time_embed_dim)
+        #t_emb = self.time_emb(t.float(), self.time_embed_dim)
         #t_emb = self.time_mlp(t_emb)
 
         #Linear timestep instead
         ##t_emb = t.float().view(-1, 1)
         t_emb = t.float().unsqueeze(-1)
-        t_emb = t_emb / 1000.0 # normalize by max timestep
+        t_emb = t_emb / 1000.0 # normalize by max timestep #FIXME
 
         h = torch.cat([x, t_emb], dim=-1)
 
@@ -807,7 +892,7 @@ class model_diffusion(nn.Module):
     Consider diffusion/forward processa s function compostion   q(x_{1:T}|x_0)=prod^T q(x_t|x_{t-1})                where q(x_t|x_{t-1})=Gaus(sqrt(1-beta_t),beta_t))
     and allows a closed form at step t                          q(x_t|x_0)=Gaus(sqrt(baralpha_t)*x0,1-baralpha_t)    where alpha_t=1-beta_t and baralpha_t=prod^t alpha_t
     We can also re-paramtrize this as                           q(x_t|x_0)=sqrt(baralpha_t)*x0+(1-baralpha_t)*epsilon for epsilon=Gaus(0,1)
-    Note need increasing noisce beta_1 < beta_2 < ...
+    Note need increasing noise beta_1 < beta_2 < ...
 
     The reverse process is only defined when condtioned on x_0  q(x_{t-1}|x_t,x_0)=Gaus(tildemu_t(x_t,x_0),tildebeta_t)    with complicated expresions for tildemu and tildebeta
     Want to learn reverse process                               p_theta(x_{0:T})=p(x_0) prod^T p_theta(x_{t_1}|x_t)      where p(x_{t-1}|x_t)=Gaus(mu_theta(x_t,t),beta_t^2)
@@ -820,7 +905,7 @@ class model_diffusion(nn.Module):
     In DDIM update rules is determinitistic     x_{t_1}= sqrt(alpha_{t-1}) hat x_0 + sqrt(1-alpha_{t-1})*epsilon_theta   where x_0=sqrt(alpha_{t-1}/alpha_t)*(x_t-sqrt(1-alpha_t)*epsilon_theta)
         
     """
-    def __init__(self, input_dim, hidden_dim=256, timesteps=1000, beta_start=1e-4, beta_end=2e-2,mode="DDPM"):
+    def __init__(self, input_dim, hidden_dim=256, time_dim=64, timesteps=1000, beta_start=1e-4, beta_end=2e-2,mode="DDPM"):
         super().__init__()
 
         self.input_dim = input_dim
@@ -828,7 +913,7 @@ class model_diffusion(nn.Module):
         self.mode      = mode
 
         # Noise predictor network
-        self.epsilon_model = DiffusionMLP(input_dim=input_dim, hidden_dim=hidden_dim,)
+        self.epsilon_model = DiffusionMLP(input_dim=input_dim, hidden_dim=hidden_dim, time_dim=time_dim)
 
         # Linear beta schedule
         betas = torch.linspace(beta_start, beta_end, timesteps)
@@ -951,7 +1036,7 @@ class model_diffusion(nn.Module):
 # Score based stochastic differntial equation
 # ---------------------------------------------------------------------
 class ScoreNet(nn.Module): #Same as DiffusionMLP above!
-    def __init__(self, input_dim, hidden_dim=256):
+    def __init__(self, input_dim, hidden_dim):
         super().__init__()
 
         self.net = nn.Sequential(nn.Linear(input_dim + 1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)

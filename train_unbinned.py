@@ -20,29 +20,29 @@ def evaluate_loss(model,X,mask,args):
     w=torch.ones(X.shape[0:-1],device=device) #dim=[Nbatch,Nconst]
 
   #For all flow-based models
-  if args.nf or args.diff or args.sde or args.cnf or args.fm:
+  if args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
     w2= w.repeat_interleave(X.shape[-1], dim=-1)
     X = X.view(X.shape[0], -1)
 
   #All the specifics of the loss function for each model
-  if args.nf:
+  if args.architecture=="NF":
     loss=(model.nll_loss(X)*w2).sum()
     return loss,w.sum()
-  elif args.diff:
+  elif args.architecture=="Diffusion":
     loss=(model.mse_loss(X)*w2).sum()
     return loss,w.sum()
-  elif args.sde:
+  elif args.architecture=="SDE":
     loss=(model.mse_loss(X)*w2).sum()
     return loss,w.sum()
-  elif args.cnf:
+  elif args.architecture=="CNF":
     loss = (model.nll_loss(X)*w2).sum()
     return loss,w.sum()
-  elif args.fm:
+  elif args.architecture=="FM":
     loss = (model.mse_loss(X)*w2).sum()
     return loss,w.sum()
 
   #Auto-regressive models
-  else:
+  if args.architecture=="Transformer" or args.architecture=="MDN":
     inputs = F.pad(input=X[:, :-1, :], pad=(0,0,1,0), mode='constant', value=0) #X[:, :-1, :]   # all but last, with a 0 start token at front #pad=pad(left, right, top, bottom))
     targets = X # the whole f-vector
     pred = model(inputs)       # (batch, seq_len-1, feature_dim)
@@ -52,7 +52,7 @@ def evaluate_loss(model,X,mask,args):
     else:
         pad_mask=None
 
-    if args.mdn:
+    if args.architecture=="MDN":
         loss = (model.nll_loss(pred, targets, pad_mask)*w).sum()
     else:
         loss = (model.mse_loss(pred, targets, pad_mask)*w).sum()
@@ -120,7 +120,7 @@ def test(model, test_loader, args):
   epoch_loss = 0.0
 
   # CNF needs gradients; others don't.
-  with torch.set_grad_enabled(args.cnf): # CNF needs autograd w.r.t. x to estimate divergence; do NOT use torch.no_grad() here.
+  with torch.set_grad_enabled(args.architecture=="CNF"): # CNF needs autograd w.r.t. x to estimate divergence; do NOT use torch.no_grad() here.
 
     #Loop batches
     for batch, X in enumerate(test_loader):
@@ -174,7 +174,7 @@ if __name__ == "__main__":
 
     # construct model
     if args.contin:
-        model = load_checkpoint_model(X_example.shape,args)
+        model = load_checkpoint_model(X_example.shape, args)
     else:
         model = build_unbinned_model(X_example.shape, args)
 
@@ -183,17 +183,17 @@ if __name__ == "__main__":
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
-    if args.nf:
+    if args.architecture=="NF":
       X_example = X_example.view(X_example.shape[0], -1)
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example)[0].shape, model(X_example)[1].shape, flush=True)
-    elif args.diff or args.sde or args.cnf or args.fm:
+    elif args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
       X_example = X_example.view(X_example.shape[0], -1)
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape,flush=True)
-    else:
+    elif args.architecture=="Transformer" or args.architecture=="MDN":
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       if args.mixed_loss:
