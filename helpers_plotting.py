@@ -162,6 +162,18 @@ def _symmetric_limit(values, fallback=1.0):
     vmax = max(vmax, np.max(merged) if vmax == 0 else vmax)
     return vmax if vmax > 0 else fallback
 
+def fix_badjets(plot_inputs, do_update=False, results=None):
+    #Check for bad values:
+    for ii, jets in enumerate(plot_inputs[1:]):
+        mask_badconst= ~np.all(np.isfinite(jets), axis=-1) | (np.max(np.abs(jets), axis=-1) > 2e3)
+        N_badconst = np.sum(mask_badconst)
+        bad_jets = np.any(mask_badconst, axis=1)
+        N_badjets = np.sum(bad_jets)
+        if results: results["frac_bad"]=N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2])
+        print("frac_badconst",N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2]), "frac_badjet",N_badjets/(jets.shape[0]*jets.shape[1]))
+        if do_update:
+            jets[mask_badconst] = -1
+
 # ---------------------------------------------------------------------
 # Main plots
 # ---------------------------------------------------------------------
@@ -981,6 +993,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       original_np = original.numpy() #numpy shares memory but can delete original if want
       generated_np = [g.numpy() for g in generated]
       plot_inputs = [original_np] + generated_np
+      if not args.preprocess: fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
       flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
       # ---------------------------------------------------------------------
@@ -1003,6 +1016,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
         generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
         plot_inputs = [original_np] + generated_np
+        fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
         flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
         #make a quick dump

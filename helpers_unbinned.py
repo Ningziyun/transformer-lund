@@ -712,6 +712,7 @@ def parse_input():
     # misc
     parser.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
     parser.add_argument("--multi-loss-plot", action="store_true", default=False, help="Log multiple loss definitions without affecting main training")
+    parser.add_argument("--mask-bad", action="store_true", default=False, help="Mask bad generated consitiuents")
 
     # logging / checkpointing
     parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
