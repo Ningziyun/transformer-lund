@@ -680,20 +680,21 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
 
     fig, ax = plt.subplots(1,figsize=(8.0,8.0))
 
+    eps=1e-12
     EEC=[]
     for ii,jets in enumerate(plot_inputs):
         # slice 4-vectors   dim=[Njet, Nconst]
-        E  = jets[..., 0]
-        px = jets[..., 1]
-        py = jets[..., 2]
-        pz = jets[..., 3]
+        const_mask = (jets[..., 0] > -1) & np.all(np.isfinite(jets), axis=-1) & (np.max(np.abs(jets), axis=-1) < 1e6) # Set padded values to zero for numerical safety
+        E  = np.where(const_mask, jets[..., 0], 0.0)
+        px = np.where(const_mask, jets[..., 1], 0.0)
+        py = np.where(const_mask, jets[..., 2], 0.0)
+        pz = np.where(const_mask, jets[..., 3], 0.0)
 
         pt = np.sqrt(px**2 + py**2)
         p = np.sqrt(px**2 + py**2 + pz**2)
-        jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Nket]
+        jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Njet]
 
         # Protect against division by zero
-        eps = 1e-12
         eta = 0.5 * np.log((p + pz + eps)/(p - pz + eps)) # Protect against division by zero
         phi = np.arctan2(py, px)
 
@@ -704,11 +705,18 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
         DR = np.sqrt(deta**2 + dphi**2) 
 
         #get the energy-weight part pt*pt/jet   dim=# [Njet, Nconst, Nconst]
-        e_weights = ( pt[:, :, None] * pt[:, None, :] / jet_pt[:, None, None]**2)
+        e_weights = ( pt[:, :, None] * pt[:, None, :] / (jet_pt[:, None, None]**2+eps))
 
         #Mask the upper-triangle and plot   dim=[Njet, Npairs]
-        mask = np.triu(np.ones((jets.shape[1], jets.shape[1]), dtype=bool))
-        hist, edges, _ = ax.hist( DR[:,mask].ravel(), bins=100, range=(0,1.0), weights=e_weights[:,mask].ravel(),histtype="step",density=False,linestyle=linestyles[ii],label=labels[ii])
+        triangle_mask = np.triu(np.ones((jets.shape[1], jets.shape[1]), dtype=bool))
+
+        #Mask the padded constituents [Njet, Nconst]
+        const_mask = jets[..., 0] > -1
+
+        #make the combined mash with the
+        mask = ( const_mask[:, :, None] & const_mask[:, None, :] & triangle_mask[None, :, :])
+
+        hist, edges, _ = ax.hist( DR[mask].ravel(), bins=100, range=(0,1.2), weights=e_weights[mask].ravel(),histtype="step",density=False,linestyle=linestyles[ii],label=labels[ii])
         EEC.append(hist)
 
     if results: results["EEC_chi2_dof"]=np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC)
@@ -720,6 +728,109 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
     ax.legend()
 
     name = "EEC"
+    fig.savefig(os.path.join(out_dir,name+".png"))
+    fig.savefig(os.path.join(out_dir,name+".pdf"))
+    plt.close(fig)
+    print(f"Plotting EEC to {out_dir}/{name}.pdf")
+
+    return
+
+def highlevel_plot(plot_inputs, results=None, labels=["original","generated","predicted"], out_dir="./Plots/",):
+    '''
+    Plot with the consitient multiplicity, jet-pt, jet-mass, DR(const, j), and etc
+    '''
+
+    linestyles=["-","--","-.",":"]
+    Nplots=4
+    fig, axs = plt.subplots(int(Nplots/2),2,figsize=(4.0*Nplots/2,8.0))
+    axs_list = axs.ravel()
+
+    eps = 1e-12
+    plots=[ [] for _ in range(Nplots)]
+    for ii,jets in enumerate(plot_inputs):
+        # Mask padded constituents and info one
+        mask = (jets[..., 0] > -1) & np.all(np.isfinite(jets), axis=-1) & (np.max(np.abs(jets), axis=-1) < 1e6) # Set padded values to zero for numerical safety
+
+        # Constituent four-vectors
+        E  = np.where(mask, jets[..., 0], 0.0)
+        px = np.where(mask, jets[..., 1], 0.0)
+        py = np.where(mask, jets[..., 2], 0.0)
+        pz = np.where(mask, jets[..., 3], 0.0)
+
+        # Constituent multiplicity
+        multiplicity = mask.sum(axis=1)
+
+        # Jet 4-vectior
+        jet_E  = E.sum(axis=1)
+        jet_px = px.sum(axis=1)
+        jet_py = py.sum(axis=1)
+        jet_pz = pz.sum(axis=1)
+        jet_pt = np.sqrt(jet_px**2 + jet_py**2)
+
+        jet_mass_squared = ( jet_E**2 - jet_px**2 - jet_py**2 - jet_pz**2)
+        jet_mass = np.sqrt(np.maximum(jet_mass_squared, 0.0)) # Numerical precision can occasionally make m^2 slightly negative
+
+        jet_p = np.sqrt( jet_px**2 + jet_py**2 + jet_pz**2)
+        #jet_eta = 0.5 * np.log((jet_p + jet_pz + eps) / (jet_p - jet_pz + eps))
+        jet_eta = np.arcsinh( jet_pz / np.maximum(jet_pt, eps))
+        jet_phi = np.arctan2(jet_py, jet_px)
+
+        # Constituent eta and phi
+        const_pt = np.sqrt(px**2 + py**2)
+        const_p = np.sqrt(px**2 + py**2 + pz**2)
+        #const_eta = 0.5 * np.log((const_p + pz + eps) / (const_p - pz + eps))
+        const_eta = np.arcsinh( pz / np.maximum(const_pt, eps))
+        const_phi = np.arctan2(py, px)
+
+        # Delta R(constituent, jet)
+        deta = const_eta - jet_eta[:, None]
+        dphi = const_phi - jet_phi[:, None]
+        dphi = np.arctan2( np.sin(dphi), np.cos(dphi)) # Wrap Delta phi into (-pi, pi], remove padded_const
+        constituent_dR = np.sqrt(deta**2 + dphi**2)
+        constituent_dR = constituent_dR[mask] #mask out the padded values
+
+        plots[0].append(jet_pt)
+        plots[1].append(jet_mass)
+        plots[2].append(multiplicity)
+        plots[3].append(constituent_dR)
+
+    #Get ranges to use
+    mins=np.zeros(Nplots)
+    maxs=np.zeros(Nplots)
+    for ii in range(Nplots):
+        for jj in range(len(plot_inputs)):
+            mins[ii]=min(mins[ii],np.min(plots[ii][jj]))
+            maxs[ii]=max(maxs[ii],np.max(plots[ii][jj]))
+
+    #Jet pt
+    for jj in range(len(plot_inputs)): axs_list[0].hist(plots[0][jj],bins=20,range=[mins[0],maxs[0]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
+    axs_list[0].set_xlabel("jet pt")
+    axs_list[0].set_ylabel("Counts")
+    axs_list[0].set_yscale("log")
+    axs_list[0].legend()
+
+    #Jet pt
+    for jj in range(len(plot_inputs)): axs_list[1].hist(plots[1][jj],bins=20,range=[mins[1],maxs[1]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
+    axs_list[1].set_xlabel("jet mass")
+    axs_list[1].set_ylabel("Counts")
+    axs_list[1].set_yscale("log")
+    axs_list[1].legend()
+
+    #Jet pt
+    for jj in range(len(plot_inputs)): axs_list[2].hist(plots[2][jj],bins=int(maxs[2]-mins[2]),range=[mins[2],maxs[2]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
+    axs_list[2].set_xlabel("Constituent Multiplicity")
+    axs_list[2].set_ylabel("Counts")
+    axs_list[2].set_yscale("log")
+    axs_list[2].legend()
+
+    #Jet pt
+    for jj in range(len(plot_inputs)): axs_list[3].hist(plots[3][jj],bins=20,range=[mins[3],maxs[3]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
+    axs_list[3].set_xlabel("DR(Constituent, jet-axis)")
+    axs_list[3].set_ylabel("Counts")
+    axs_list[3].set_yscale("log")
+    axs_list[3].legend()
+
+    name = "highlevel"
     fig.savefig(os.path.join(out_dir,name+".png"))
     fig.savefig(os.path.join(out_dir,name+".pdf"))
     plt.close(fig)
@@ -870,9 +981,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       original_np = original.numpy() #numpy shares memory but can delete original if want
       generated_np = [g.numpy() for g in generated]
       plot_inputs = [original_np] + generated_np
-
-      flat_plot_inputs = [ original_np.reshape(-1, original_np.shape[-1]) ] #reshape is a view
-      flat_plot_inputs.extend( g.reshape(-1, g.shape[-1]) for g in generated_np)
+      flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
       # ---------------------------------------------------------------------
       # Undo pre-processing
@@ -890,16 +999,16 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         #Clear memory and remkae
         del original_np
         for g in generated_np: del g
+        for p in plot_inputs: del p
         original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
         generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
-
-        flat_plot_inputs = [ original_np.reshape(-1, original_np.shape[-1]) ] #reshape is a view
-        flat_plot_inputs.extend( g.reshape(-1, g.shape[-1]) for g in generated_np)
+        plot_inputs = [original_np] + generated_np
+        flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
         #make a quick dump
         print("Input example removing preprocess")
         print(original_np[0])
-        print("Generate example removing preproecess")
+        print("Generate example removing preprocess")
         print(generated_np[0][0])
 
       # ---------------------------------------------------------------------
@@ -915,6 +1024,13 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
       if args.input_format=="4vec":
           EEC_plot(
+            plot_inputs,
+            results,
+            labels=active_labels,
+            out_dir=args.plot_dir,
+                  )
+
+          highlevel_plot(
             plot_inputs,
             results,
             labels=active_labels,
@@ -973,7 +1089,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         del plot_inputs
         del flat_plot_inputs
 
-        #remkae lund-plance
+        #remake lund-plane
         starttime=time.time()
         lund_original = helpers.make_lundplane(original_np) #return numpy array
         lund_inputs = [lund_original.reshape(-1,2)]
