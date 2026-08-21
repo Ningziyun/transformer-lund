@@ -292,18 +292,17 @@ def build_unbinned_model(input_dim, args_or_dict):
     if args_or_dict.architecture=="MDN":
         pad_value=-1
         max_value=10
-
         if args_or_dict.input_format=="4vec":
-
-            if args_or_dict.preprocess=="None":
+            if args_or_dict.preprocess==None:
                 max_value=3e3
             elif args_or_dict.preprocess=="standardize":
                 max_value=50
+                pad_value=-10
             elif args_or_dict.preprocess=="linearize":
                 max_value=1
             elif args_or_dict.preprocess=="log":
-                pad_value=-10
                 max_value=11
+                pad_value=-10
 
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_dim[2],

@@ -103,9 +103,11 @@ def preprocess(X,input_format,method="log"):
             X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
 
     elif method=="linearize":
+        mask = X == -1
         min_max=preprocess_min_max(input_format)
         for ii in range(X.shape[-1]):
             X[:,ii]=(X[:,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
+        X[mask]=-10 #restore padding
 
     elif method=="log":
         mask = X == -1
@@ -126,9 +128,14 @@ def undo_preprocess(X,input_format,method="log"):
             X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
 
     elif method=="linearize":
+        if input_format=="4vec":
+            mask = X[:,:,0] < 0
+        else:
+            mask = X[:,:,-1] < 0
         min_max=preprocess_min_max(input_format)
         for ii in range(X_new.shape[-1]):
             X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
+        X_new[mask] = -1
 
     elif method=="log":
         if input_format=="4vec":

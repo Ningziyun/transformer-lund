@@ -61,7 +61,7 @@ class VectorFieldTrans(nn.Module):
   z: [B, D]
   c: [B, C] (context)
   """
-  def __init__(self, z_dim, c_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, time_dim=64):
+  def __init__(self, z_dim, c_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64):
     super().__init__()
     self.time_dim=time_dim
 
@@ -151,7 +151,7 @@ class model_autoregressive_transformer(nn.Module):
   '''
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
   '''
-  def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, multi_head=False, pad_value=-1):
+  def __init__(self, input_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_head=False, pad_value=-1):
       super(model_autoregressive_transformer, self).__init__()
 
       self.input_dim=input_dim
@@ -244,7 +244,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   '''
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   '''
-  def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, multi_head=False, max_range=10, pad_value=-1):
+  def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_head=False, max_range=None, pad_value=-1):
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_head=multi_head, pad_value=pad_value)
 
       self.n_mix=n_mix
@@ -269,8 +269,11 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
       # constraints, don't do in-line replacements of tensors as can mess with gradients
       #alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
-      log_sigma2 = torch.clamp(log_sigma2, -7.0, None)
-      mu=torch.clamp(mu,-1*self.max_range,self.max_range)
+      if self.max_range: 
+          mu=torch.clamp(mu,-1*self.max_range,self.max_range)
+          log_sigma2 = torch.clamp(log_sigma2, -7.0, 2*math.log(self.max_range))
+      else:
+          log_sigma2 = torch.clamp(log_sigma2, -7.0, None)
 
       assert torch.isfinite(alpha).all()
       assert torch.isfinite(mu).all()
