@@ -290,6 +290,21 @@ def _config_get(args_or_dict, key, default=None):
 # ---------------------------------------------------------------------
 def build_unbinned_model(input_dim, args_or_dict):
     if args_or_dict.architecture=="MDN":
+        pad_value=-1
+        max_value=10
+
+        if args_or_dict.input_format=="4vec":
+
+            if args_or_dict.preprocess=="None":
+                max_value=3e3
+            elif args_or_dict.preprocess=="standardize":
+                max_value=50
+            elif args_or_dict.preprocess=="linearize":
+                max_value=1
+            elif args_or_dict.preprocess=="log":
+                pad_value=-10
+                max_value=11
+
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_dim[2],
             n_mix=_as_int(_config_get(args_or_dict,"MDN_nmix")),
@@ -298,6 +313,8 @@ def build_unbinned_model(input_dim, args_or_dict):
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
             multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+            max_range=max_value,
+            pad_value=pad_value,
         )
     elif args_or_dict.architecture=="CNF":
         return models_generative.model_CNF(
@@ -659,7 +676,7 @@ def parse_input():
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw"], help="Optimizer")
+    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw"], help="Optimizer")
     parser.add_argument("--weight-decay", type=float, default=0.0, help="Optimizer weight decay")
     parser.add_argument("--grad-clip", type=float, default=0.0, help="Gradient norm clipping. Set <=0 to disable")
     parser.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "plateau"], help="Learning rate scheduler")
