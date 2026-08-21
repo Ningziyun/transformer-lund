@@ -243,6 +243,7 @@ class model_autoregressive_transformer(nn.Module):
 class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   '''
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
+  Use Choleksy decompostion for the covariance matrix cov=LL* with L lower traingula with positive diagonals.
   '''
   def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_head=False, max_range=None, pad_value=-1):
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_head=multi_head, pad_value=pad_value)
@@ -250,8 +251,13 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       self.n_mix=n_mix
       self.max_range=max_range
 
+      self.n_cholesky = input_dim * (input_dim + 1) // 2
+
       #Final space is now a multi-D Gaussian mixture model: prod \alpha_i Gaus(\arrow\mu_i,\arrow\sigma_i) , where dimension=length of ouput (aka 4 for 4-vec)
-      self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim,self.n_mix*(1+input_dim+input_dim)))
+      self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim,self.n_mix*(1+input_dim+self.n_cholesky)))
+
+      # Indices of the lower triangular matrix
+      self.register_buffer("tri_mask", torch.tril( torch.ones(input_dim, input_dim, dtype=torch.bool)), persistent=False,)
 
   def forward(self, x):
       #Get the usual network result, note we overloaded the original forward to give MDN values and not truly auto-regressive
@@ -262,46 +268,50 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
           encoded=super().forward(x) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
 
       # split into mixture components: here alpha=norm (logits will softmax later), mu=center, log_sigma2=log(variance)
-      encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.input_dim)) #[Nbatch,Nconst,Nmix,(1+2*Ninput)]
+      encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.n_cholesky)) #[Nbatch,Nconst,Nmix,(1+n_mu+n_choleksy)]
       alpha=encoded[:,:,:,0] #[batch,Nconst,Nmix]
       mu=encoded[:,:,:,1:self.input_dim+1] #[batch,Nconst,Nmix,Ninput]
-      log_sigma2 = encoded[..., self.input_dim+1:] #[batch,Nconst,Nmix,Ninput]
+      chol_raw = encoded[..., self.input_dim+1: ] #[batch,Nconst,Nmix,Nchol]
+
+      # Construct lower triangular Cholesky factor
+      L = torch.zeros(encoded.shape[0],encoded.shape[1], self.n_mix, self.input_dim, self.input_dim, device=encoded.device, dtype=encoded.dtype,) #[Nbath,Nconst,Ninput,Ninput]
+      L[ ..., self.tri_mask ] = chol_raw # Put predicted parameters into lower triangle, note the tri mask is diagonal
+      diag = F.softplus(torch.diagonal( L, dim1=-2, dim2=-1)) + 1e-3 #get the diagonal and softplus
+      L = torch.tril(L, diagonal=-1) + torch.diag_embed(diag) #add the lower diagonal to the new softplus diagonal matrix
 
       # constraints, don't do in-line replacements of tensors as can mess with gradients
       #alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
       if self.max_range: 
           mu=torch.clamp(mu,-1*self.max_range,self.max_range)
-          log_sigma2 = torch.clamp(log_sigma2, -7.0, 2*math.log(self.max_range))
-      else:
-          log_sigma2 = torch.clamp(log_sigma2, -7.0, None)
 
       assert torch.isfinite(alpha).all()
       assert torch.isfinite(mu).all()
-      assert torch.isfinite(log_sigma2).all()
+      assert torch.isfinite(L).all()
 
       if self.multi_head:
-          return torch.cat([alpha.unsqueeze(-1),mu,log_sigma2],dim=-1), stop
+          return (alpha,mu,L), stop
       else:
-          return torch.cat([alpha.unsqueeze(-1),mu,log_sigma2],dim=-1)
+          return (alpha,mu,L)
 
   def nll_loss(self, inputs, targets, pad_mask=None):
     if self.multi_head:
          inputs,exists=inputs
     ninputs=targets.shape[-1]
 
-    alpha=inputs[..., 0] #[Nbatch,NConst,Nmix]
-    mu=inputs[..., 1:ninputs+1] #target: [Nbatch,NConst,Nmix,Ninputs]
-    log_sig2=inputs[..., ninputs+1:] #target: [Nbatch,NConst,Nmix,Ninputs]
-    sig2 = torch.exp(log_sig2)
+    alpha,mu,L = inputs #size #[Nbatch,Nconst,Nmix],#[batch,Nconst,Nmix,Ninput], #[batch,Nconst,Nmix,Ninput,Ninput],
 
     #target: [Nbatch,NConst,Ninputs]
     targets = targets.unsqueeze(2)  # target: [Nbatch,NConst,1,Ninputs]
 
-    # central term, sum over the input vector dimension: (sum_{j=1}^{N_input} (x-mu_j)^2/2sigma_j^2)
-    Z_term = torch.sum(((targets - mu)**2 / (2*sig2)), dim=-1)  #[Nbatch,NConst,Nmix]
+    #Mahalanobis term (x-mu)^T (LL^T)^-1 (x-mu), Instead of explicitly computing cov, L y = x-mu then =|y|^2, which can be done very simply with forward substition
+    diff = (targets - mu).unsqueeze(-1) # torch.linalg.solve_triangular expects matrix RHS,needs final dimension treated as RHS
+    solved = torch.linalg.solve_triangular( L, diff, upper=False).squeeze(-1)
+    Z_term = 0.5 * torch.sum( solved ** 2, dim=-1)
 
-    # Norm term: sum_{j=1}^{N_input} 0.5*log(det|covariance|)+N_input/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
-    sig_term = 0.5*torch.sum(log_sig2+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
+    # Norm term: sum_{j=1}^{N_input} 0.5*log(det|covariance|)+N_input/2*log(2pi), use det(cov)=det(LL^T)=det(L)^2 which is also sum of diagonals^2 since triangular
+    L_diag = torch.diagonal( L, dim1=-2, dim2=-1)
+    log_det_term = torch.sum( torch.log(L_diag), dim=-1)
+    sig_term = ( log_det_term + 0.5 * self.input_dim * math.log(2 * math.pi))
 
     #the mixture term: log(alpha_i), al
     #alpha_term=torch.log(alpha)
@@ -341,19 +351,20 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
             active = active & ~finished
 
           #Take the last nconst and get the components
-          alpha=F.softmax(pred[:,-1,:,0], dim=-1) # [Nbatch, Nmix]
-          mu=pred[:,-1,:, 1:ninputs+1] #[Nbatch,Nmix,Ninput]
-          log_sig2=pred[:,-1,:, ninputs+1:] #[Nbatch,Nmix,Ninput]
-          sig2 = torch.exp(log_sig2)
+          alpha, mu, L = pred
+          alpha = F.softmax(alpha[:, -1],dim=-1)
+          mu = mu[:, -1]
+          L = L[:, -1]
 
           # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
           comp = torch.multinomial(alpha, 1).squeeze(-1)  # (B,)
 
-          # Sample the whole MDN distribution by getting the mu and cov-matrix for this component and sample from it
-          loc=mu[batch_idx,comp,:] #(Nbatch,Ninput)
-          covmatrix = torch.diag_embed(sig2[batch_idx,comp,:]) # (Nbatch, Ninput, Ninput)
-          dist = MultivariateNormal(loc,covmatrix)
-          next_pred=dist.sample().unsqueeze(dim=1)
+          # Sample the whole MDN distribution by x = mu + L @ epsilon, note that covmatrix = torch.bmm(L, L.transpose(-1, -2))
+          loc=mu[batch_idx,comp] #(Nbatch,Ninput)
+          chol = L[batch_idx, comp] #[Nbatch,Ninput,Ninput]
+          epsilon = torch.randn_like(loc)
+          next_pred = ( loc + torch.bmm( chol, epsilon.unsqueeze(-1)).squeeze(-1))
+
           next_pred = torch.where(active[:, None, None], next_pred, torch.full_like(next_pred, self.pad_value)) #But first check if active, otherwise pad
           seq = torch.cat([seq, next_pred], dim=1) #append it
 
