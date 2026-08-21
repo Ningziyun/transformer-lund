@@ -196,10 +196,11 @@ if __name__ == "__main__":
     elif args.architecture=="Transformer" or args.architecture=="MDN":
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      out_example=model(X_example)
       if args.mixed_loss:
-        print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
+        print("Output shape,", out_example[0][0].shape,out_example[0][1].shape,out_example[0][2].shape,out_example[-1].shape, flush=True)
       else:
-        print("Output shape,", model(X_example).shape, flush=True)
+        print("Output shape,", out_example[0].shape,out_example[1].shape,out_example[2].shape, flush=True)
     model.to(device)
 
     #Set the scheduler

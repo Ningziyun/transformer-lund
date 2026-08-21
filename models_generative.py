@@ -259,6 +259,13 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       # Indices of the lower triangular matrix
       self.register_buffer("tri_mask", torch.tril( torch.ones(input_dim, input_dim, dtype=torch.bool)), persistent=False,)
 
+  def _make_L(self, chol_raw, Nbatch, Nconst):
+      L = torch.zeros(Nbatch, Nconst, self.n_mix, self.input_dim, self.input_dim, device=chol_raw.device, dtype=chol_raw.dtype,) #[Nbatch,Nconst,Ninput,Ninput]
+      L[ ..., self.tri_mask ] = chol_raw # Put predicted parameters into lower triangle, note the tri mask is diagonal
+      diag = F.softplus(torch.diagonal( L, dim1=-2, dim2=-1)) + 1e-3 #get the diagonal and softplus
+      L = torch.tril(L, diagonal=-1) + torch.diag_embed(diag) #add the lower diagonal to the new softplus diagonal matrix
+      return L
+
   def forward(self, x):
       #Get the usual network result, note we overloaded the original forward to give MDN values and not truly auto-regressive
 
@@ -273,32 +280,26 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       mu=encoded[:,:,:,1:self.input_dim+1] #[batch,Nconst,Nmix,Ninput]
       chol_raw = encoded[..., self.input_dim+1: ] #[batch,Nconst,Nmix,Nchol]
 
-      # Construct lower triangular Cholesky factor
-      L = torch.zeros(encoded.shape[0],encoded.shape[1], self.n_mix, self.input_dim, self.input_dim, device=encoded.device, dtype=encoded.dtype,) #[Nbath,Nconst,Ninput,Ninput]
-      L[ ..., self.tri_mask ] = chol_raw # Put predicted parameters into lower triangle, note the tri mask is diagonal
-      diag = F.softplus(torch.diagonal( L, dim1=-2, dim2=-1)) + 1e-3 #get the diagonal and softplus
-      L = torch.tril(L, diagonal=-1) + torch.diag_embed(diag) #add the lower diagonal to the new softplus diagonal matrix
-
       # constraints, don't do in-line replacements of tensors as can mess with gradients
-      #alpha = nn.functional.softmax(alpha, dim=-1) #weights need to be normalized
       if self.max_range: 
           mu=torch.clamp(mu,-1*self.max_range,self.max_range)
 
       assert torch.isfinite(alpha).all()
       assert torch.isfinite(mu).all()
-      assert torch.isfinite(L).all()
+      assert torch.isfinite(chol_raw).all()
 
       if self.multi_head:
-          return (alpha,mu,L), stop
+          return (alpha,mu,chol_raw), stop
       else:
-          return (alpha,mu,L)
+          return (alpha,mu,chol_raw)
 
   def nll_loss(self, inputs, targets, pad_mask=None):
     if self.multi_head:
          inputs,exists=inputs
     ninputs=targets.shape[-1]
 
-    alpha,mu,L = inputs #size #[Nbatch,Nconst,Nmix],#[batch,Nconst,Nmix,Ninput], #[batch,Nconst,Nmix,Ninput,Ninput],
+    alpha,mu,chol_raw = inputs #size #[Nbatch,Nconst,Nmix],#[batch,Nconst,Nmix,Ninput], #[batch,Nconst,Nmix,Ninput,Ninput],
+    L=self._make_L(chol_raw,targets.shape[0],targets.shape[1])
 
     #target: [Nbatch,NConst,Ninputs]
     targets = targets.unsqueeze(2)  # target: [Nbatch,NConst,1,Ninputs]
@@ -314,7 +315,6 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
     sig_term = ( log_det_term + 0.5 * self.input_dim * math.log(2 * math.pi))
 
     #the mixture term: log(alpha_i), al
-    #alpha_term=torch.log(alpha)
     alpha_term=F.log_softmax(alpha, dim=-1) #more stable to log_softmax
 
     #Total log prob of the datapoint, sum over mixture: log(p_{sample})=log(sum_{i=1}^{N_mix} alpha,i*exp{-sig_term,i}*exp{-Z_term,i})
@@ -334,41 +334,39 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
   @torch.no_grad()
   def generate(self, out_dimensions):
-      device = next(self.parameters()).device
-      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device)
-      steps=out_dimensions[1]
-      ninputs=out_dimensions[-1]
-      batch_idx=torch.arange(out_dimensions[0],device=device) #For some smoother slicing later
-      active = torch.ones(out_dimensions[0], dtype=torch.bool, device=device) #which elements are active
+    device = next(self.parameters()).device
+    seq = torch.zeros(out_dimensions[0], 1, out_dimensions[2], device=device)
+    steps = out_dimensions[1]
+    batch_idx = torch.arange(out_dimensions[0], device=device)
+    active = torch.ones(out_dimensions[0], dtype=torch.bool, device=device)
 
-      for _ in range(steps):
-          pred = self.forward(seq) #get the alpha,mu,sigma values
-
-          if self.multi_head:
-            pred,stop = pred
+    for _ in range(steps):
+        if self.multi_head:
+            encoded, stop = model_autoregressive_transformer.forward(self, seq)
             stop_prob = torch.sigmoid(stop[:, -1])
-            finished = stop_prob > torch.rand(out_dimensions[0], device=device) #stop jet if prob > random-uniform
-            active = active & ~finished
+            active = active & ~(stop_prob > torch.rand(out_dimensions[0], device=device))
+        else:
+            encoded = model_autoregressive_transformer.forward(self, seq)
 
-          #Take the last nconst and get the components
-          alpha, mu, L = pred
-          alpha = F.softmax(alpha[:, -1],dim=-1)
-          mu = mu[:, -1]
-          L = L[:, -1]
+        #Take the last element to save memory and get the components
+        last = encoded[:, -1, :] #Slice just the last
+        last = last.view(last.shape[0], self.n_mix, 1 + self.input_dim + self.n_cholesky)
+        alpha = F.softmax(last[..., 0], dim=-1)
+        mu = last[..., 1:1 + self.input_dim]
+        chol_raw = last[..., 1 + self.input_dim:]
+        L = self._make_L(chol_raw.unsqueeze(1), last.shape[0], 1).squeeze(1)  # [B, n_mix, D, D]
 
-          # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
-          comp = torch.multinomial(alpha, 1).squeeze(-1)  # (B,)
+        # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
+        comp = torch.multinomial(alpha, 1).squeeze(-1)
+        loc = mu[batch_idx, comp]
+        chol = L[batch_idx, comp]
 
-          # Sample the whole MDN distribution by x = mu + L @ epsilon, note that covmatrix = torch.bmm(L, L.transpose(-1, -2))
-          loc=mu[batch_idx,comp] #(Nbatch,Ninput)
-          chol = L[batch_idx, comp] #[Nbatch,Ninput,Ninput]
-          epsilon = torch.randn_like(loc)
-          next_pred = ( loc + torch.bmm( chol, epsilon.unsqueeze(-1)).squeeze(-1))
-
-          next_pred = torch.where(active[:, None, None], next_pred, torch.full_like(next_pred, self.pad_value)) #But first check if active, otherwise pad
-          seq = torch.cat([seq, next_pred], dim=1) #append it
-
-      return seq[:,1:,:]
+        # Sample the whole MDN distribution by x = mu + L @ epsilon, note that covmatrix = torch.bmm(L, L.transpose(-1, -2))
+        eps = torch.randn_like(loc)
+        next_pred = (loc + torch.bmm(chol, eps.unsqueeze(-1)).squeeze(-1)).unsqueeze(1)
+        next_pred = torch.where(active[:, None, None], next_pred, torch.full_like(next_pred, self.pad_value))
+        seq = torch.cat([seq, next_pred], dim=1)
+    return seq[:, 1:, :] 
 
 # ---------------------------------------------------------------------
 # CNF (Continous Normalizing Flow)
