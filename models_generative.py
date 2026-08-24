@@ -264,6 +264,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       L[ ..., self.tri_mask ] = chol_raw # Put predicted parameters into lower triangle, note the tri mask is diagonal
       diag = F.softplus(torch.diagonal( L, dim1=-2, dim2=-1)) + 1e-3 #get the diagonal and softplus
       L = torch.tril(L, diagonal=-1) + torch.diag_embed(diag) #add the lower diagonal to the new softplus diagonal matrix
+      #L = L * torch.eye(self.input_dim, dtype=torch.bool, device=chol_raw.device)  # zero out everything except the diagonal (kills off-diag entries)
       return L
 
   def forward(self, x):
@@ -281,8 +282,8 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       chol_raw = encoded[..., self.input_dim+1: ] #[batch,Nconst,Nmix,Nchol]
 
       # constraints, don't do in-line replacements of tensors as can mess with gradients
-      if self.max_range: 
-          mu=torch.clamp(mu,-1*self.max_range,self.max_range)
+      #if self.max_range: 
+      #    mu=torch.clamp(mu,-1*self.max_range,self.max_range)
 
       assert torch.isfinite(alpha).all()
       assert torch.isfinite(mu).all()
