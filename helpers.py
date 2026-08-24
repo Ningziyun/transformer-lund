@@ -171,3 +171,12 @@ def flatten_weight(X):
     w = weights[idx]
 
     return w
+
+def format_input(X, args, device):
+    if args.mixed_loss:
+        X, mask=X
+    else:
+        mask=None
+    X = X.to(device)
+    if mask is not None: mask=mask.to(device)
+    return X, mask

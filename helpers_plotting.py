@@ -903,12 +903,13 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       write_idx = 0
       Nimages = 0
       for batch, X in enumerate(test_loader):
+        #input data
+        X,mask=helpers.format_input(X,args,device)
+
         batch_size = X.shape[0]
         Nimages+=X.shape[0]
         if write_idx >= max_events:
             break
-
-        X = X.to(device)
 
         original_seq=X.detach().cpu()
 

@@ -133,8 +133,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PZ_train = grp_const_train.create_dataset("PZ", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
 
           grp_ljp_train = outfile_train.create_group("lundplane")
-          dset_kt_train = grp_ljp_train.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
-          dset_dr_train = grp_ljp_train.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
+          dset_kt_train = grp_ljp_train.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
+          dset_dr_train = grp_ljp_train.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
 
           grp_const_test = outfile_test.create_group("constituents")
           dset_E_test = grp_const_test.create_dataset("E", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
@@ -143,8 +143,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PZ_test = grp_const_test.create_dataset("PZ", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
 
           grp_ljp_test = outfile_test.create_group("lundplane")
-          dset_kt_test = grp_ljp_test.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
-          dset_dr_test = grp_ljp_test.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
+          dset_kt_test = grp_ljp_test.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
+          dset_dr_test = grp_ljp_test.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
 
         #Loop over the input files in chunks via uproot
         chunk_size = 2**11

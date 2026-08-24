@@ -21,10 +21,9 @@ import helpers
 # Data loaders
 # ---------------------------------------------------------------------
 class ktdr_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_stop=False, add_mask=False, preprocess=None):
+  def __init__(self, file_path, NConstituents=20, add_mask=False, preprocess=None):
     super(ktdr_dataset, self).__init__()
     self.data=torch.tensor([])
-    self.add_stop=add_stop
     self.add_mask=add_mask
     self.preprocess=preprocess
 
@@ -34,17 +33,12 @@ class ktdr_dataset(torch.utils.data.Dataset):
     self.kt=kts[:,:NConstituents]
     self.DR=drs[:,:NConstituents]
 
-    #Check if next is -1 and padd last const to True
-    if add_stop:
-      self.stop=self.DR[:,1:] == -1
-      self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
+    #Check if next is -1 and pad last const to True
     if add_mask:
-      self.mask=self.DR != -1
+      self.mask=self.DR == -1
 
   def __getitem__(self, index):
     inputs=np.array([self.kt[index],self.DR[index]])
-    if self.add_stop:
-        inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
     if self.preprocess:
@@ -59,10 +53,10 @@ class ktdr_dataset(torch.utils.data.Dataset):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_stop=False, preprocess=None):
+  def __init__(self, file_path, NConstituents=20, add_mask=False, preprocess=None):
     super(constit_dataset, self).__init__()
     self.data=torch.tensor([])
-    self.add_stop=add_stop
+    self.add_mask=add_mask
     self.preprocess=preprocess
 
     f = h5py.File(file_path,'r')
@@ -75,20 +69,21 @@ class constit_dataset(torch.utils.data.Dataset):
     self.py=pys[:,:NConstituents]
     self.pz=pzs[:,:NConstituents]
 
-    if add_stop:
-      self.stop=self.e[:,1:] == 0
-      self.stop = np.concatenate([self.stop,  np.ones((self.stop.shape[0], 1), dtype=bool)],axis=1)
+    #Check if next is -1 and pad last const to True
+    if add_mask:
+      self.mask=self.e == -1
 
   def __getitem__(self, index):
     inputs=np.array([self.e[index],self.px[index],self.py[index],self.pz[index]])
-    if self.add_stop:
-        inputs=np.concatenate([inputs,[self.stop[index]]],axis=0)
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
     if self.preprocess:
         helpers.preprocess(self.data,"4vec",self.preprocess)
 
-    return self.data
+    if self.add_mask:
+        return [self.data,self.mask[index]]
+    else:
+        return self.data
 
   def __len__(self):
     return len(self.e)
@@ -96,15 +91,15 @@ class constit_dataset(torch.utils.data.Dataset):
 def get_loaders(args):
 
   if args.input_format=="ktdr":
-    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
+    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
+    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="4vec":
-    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
+    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, preprocess=args.preprocess)
+    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
   return train_loader,test_loader
 

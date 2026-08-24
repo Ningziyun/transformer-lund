@@ -203,14 +203,23 @@ class model_autoregressive_transformer(nn.Module):
       if self.multi_head:
           features,exists=pred
 
-          # regression next-step prediction
+          # regression next-step prediction, mask the padded
           loss_fn = nn.MSELoss(reduction='none')
           loss_reg=loss_fn(features,targets)
           loss_reg=loss_reg.masked_fill(pad_mask.unsqueeze(-1), 0.0).sum(dim=-1) #mask to only unpadded values, reduce to [B, C]
 
-          # BCE for stop prediction
+          first_pad = pad_mask.int().argmax(dim=1) 
+          bce_mask = torch.zeros_like(pad_mask)
+          bce_mask[torch.arange(targets.shape[0]), first_pad]=1
+
+          # BCE for stop prediction, mask everything except for last token
           loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
           loss_bce=loss_fn2(exists,(pad_mask).float()) #[B,C]
+          first_pad = pad_mask.int().argmax(dim=1) #get index of first padded
+          bce_mask = torch.zeros_like(pad_mask)
+          bce_mask[torch.arange(targets.shape[0]), first_pad]=1 #is now false everywhere expect for padded point
+          bce_mask=pad_mask & ~(bce_mask.bool()) #mask include all real values, plus first padded
+          loss_bce = loss_bce.masked_fill(bce_mask, 0.0)
 
           return loss_reg+1.0*loss_bce
       else:
@@ -313,10 +322,17 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
     if self.multi_head:
-      loss_reg=-log_prob.masked_fill(pad_mask, 0.0) #mask to only unpadded values
+      #Regression, mask to only unpadded values
+      loss_reg=-log_prob.masked_fill(pad_mask, 0.0) #Regression
 
+      # BCE for stop prediction, mask everything except for last token
       loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
       loss_bce=loss_fn2(exists,(pad_mask).float()) #[B,C]
+      first_pad = pad_mask.int().argmax(dim=1) #get index of first padded
+      bce_mask = torch.zeros_like(pad_mask)
+      bce_mask[torch.arange(targets.shape[0]), first_pad]=1 #is now false everywhere expect for padded point
+      bce_mask=pad_mask & ~(bce_mask.bool()) #mask include all real values, plus first padded
+      loss_bce = loss_bce.masked_fill(bce_mask, 0.0)
 
       return loss_reg + 1.0*loss_bce
     else:

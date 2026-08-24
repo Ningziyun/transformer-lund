@@ -47,15 +47,10 @@ def evaluate_loss(model,X,mask,args):
     targets = X # the whole f-vector
     pred = model(inputs)       # (batch, seq_len-1, feature_dim)
 
-    if args.mixed_loss:
-        pad_mask=(targets < 0).all(dim=-1)  # shape: [B, L]
-    else:
-        pad_mask=None
-
     if args.architecture=="MDN":
-        loss = (model.nll_loss(pred, targets, pad_mask)*w).sum()
+        loss = (model.nll_loss(pred, targets, mask)*w).sum()
     else:
-        loss = (model.mse_loss(pred, targets, pad_mask)*w).sum()
+        loss = (model.mse_loss(pred, targets, mask)*w).sum()
     return loss, w.sum()
 
 def train(model,train_loader,args):
@@ -68,9 +63,9 @@ def train(model,train_loader,args):
 
   #Loop batches
   for batch, X in enumerate(train_loader):
+
       #input data
-      mask=None
-      X = X.to(device)
+      X,mask=format_input(X, args, device)
 
       #calculate loss across the batch (summed and also seperate averaged value)
       optimizer.zero_grad()
@@ -126,8 +121,7 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
 
       #input data
-      mask=None
-      X = X.to(device)
+      X,mask=format_input(X, args, device)
 
       #calculate loss across the batch (summed, not averaged)
       loss,sum_w = evaluate_loss(model, X, mask, args)
@@ -170,13 +164,14 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example=next(iter(train_loader))
+    X_example,mask_example=format_input(next(iter(train_loader)), args, device)
 
     # construct model
     if args.contin:
         model = load_checkpoint_model(X_example.shape, args)
     else:
         model = build_unbinned_model(X_example.shape, args)
+    model.to(device)
 
     #Make output directory and make metadata file to save arguments
     save_argument_metadata(args)
@@ -200,7 +195,6 @@ if __name__ == "__main__":
         print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
       else:
         print("Output shape,", model(X_example).shape, flush=True)
-    model.to(device)
 
     #Set the scheduler
     optimizer = make_optimizer(args, model)
