@@ -80,7 +80,7 @@ def preprocess_mean_std(input_format):
         py_mean,py_std=0.011, 30.174
         pz_mean,pz_std=-0.001, 49.941
         return [[e_mean,e_std],[px_mean,px_std],[py_mean,py_std],[pz_mean,pz_std]]
-    return []
+    return None
 
 def preprocess_min_max(input_format):
     if input_format=="ktdr":
@@ -94,40 +94,44 @@ def preprocess_min_max(input_format):
         py_min,py_max=-971.391, 895.821
         pz_min,pz_max=-2699.067, 2506.768
         return [[e_min,e_max],[px_min,px_max],[py_min,py_max],[pz_min,pz_max]]
-    return []
+    return None
 
 def preprocess(X,input_format,method="log"):
+    mask = X == -1
+
     if method=="standardize":
         mean_std=preprocess_mean_std(input_format)
         for ii in range(X.shape[-1]):
             X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
+        X[mask]=-50 #shift padding
 
-    elif method=="linearize":
-        mask = X == -1
+    elif method=="linear":
         min_max=preprocess_min_max(input_format)
         for ii in range(X.shape[-1]):
             X[:,ii]=(X[:,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
-        X[mask]=-10 #restore padding
+        X[mask]=-1 #shift padding
 
     elif method=="log":
-        mask = X == -1
         X[...] = torch.sign(X) * torch.log1p(torch.abs(X)) #sgn(x)*log(|x|+1)
         X[mask]=-10 #restore padding
 
     elif method=="shiftnan":
-        mask = X == -1
-        X[mask]=-5e3
+        X[mask]=-3e3 #shift padding
 
 def undo_preprocess(X,input_format,method="log"):
-
     X_new=torch.zeros(X.shape)
 
     if method=="standardize":
+        if input_format=="4vec":
+            mask = X[:,:,0] < -49
+        else:
+            mask = X[:,:,-1] < -49
         mean_std=preprocess_mean_std(input_format)
         for ii in range(X_new.shape[-1]):
             X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+        X_new[mask] = -1
 
-    elif method=="linearize":
+    elif method=="linear":
         if input_format=="4vec":
             mask = X[:,:,0] < 0
         else:
