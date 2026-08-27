@@ -19,6 +19,7 @@ def make_hist(valueslist,name,Nbins=20):
     contents,bins,_=ax.hist(values,bins=bins,histtype="step")
     return_contents.append(contents)
   #plt.show()
+  ax.set_yscale("log")
   fig.savefig(name)
   plt.close(fig)
 
@@ -45,17 +46,17 @@ def recursivePrint(f,depth=0):
     else: 
       print(f"{space} Unknown {key}: {val}") 
   
-def recursiveDraw(f,N=1000):
+def recursiveDraw(f, N=1000, groupname=""):
   if not os.path.exists("./Plots"): os.mkdir("./Plots")
 
   for key,val in f.items():
     if isinstance(val, h5py.Dataset):
-      print(f"Drawing {N} entries of key {key}")
+      print(f"Drawing {N} entries of key {key} in group {groupname}")
       print(f"{val[:100]}")
       values=val[:N].flatten()
-      make_hist([values],"Plots/plot_"+key+".pdf")
+      make_hist([values],"Plots/plot_"+groupname+key+".pdf")
     elif isinstance(val, h5py.Group):
-      recursiveDraw(val,N)
+      recursiveDraw(val,N,groupname=key+"_")
 
 def findValByKey(f,key):
     for key2,val in f.items():
@@ -85,9 +86,9 @@ if __name__ == "__main__":
   infile=sys.argv[1]
   f = h5py.File(infile, 'r')
 
-  recursivePrint(f)
-  #recursiveDraw(f,100)
-  deriveFlattening(f,"E")
+  #recursivePrint(f)
+  recursiveDraw(f,100)
+  #deriveFlattening(f,"E")
 
   #Draw seperating via labels, hardcoded right now
   '''

@@ -19,7 +19,7 @@ def make_lundplane(input_vec, pad_length=20):
   for ii in range(input_vec.shape[0]):
 
     # Convert the constituent information into a format usable for fastjet (PseudoJet objects)
-    constituents = [ fastjet.PseudoJet( float(px), float(py), float(pz), float(E),) for E, px, py, pz in input_vec[ii] ]
+    constituents = [ fastjet.PseudoJet( float(px), float(py), float(pz), float(E),) for E, px, py, pz in input_vec[ii] if E>0 ] 
 
     # Run the jet clustering on the jet constituents using the anti-kt algorithm
     cs_akt = fastjet.ClusterSequence(constituents, jetDef10)

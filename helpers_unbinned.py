@@ -96,14 +96,14 @@ class constit_relative_dataset(torch.utils.data.Dataset):
     self.preprocess=preprocess
 
     f = h5py.File(file_path,'r')
-    es=f["constituents"]["E"]
-    pxs=f["constituents"]["PX"]
-    pys=f["constituents"]["PY"]
-    pzs=f["constituents"]["PZ"]
-    self.e=es[:,:NConstituents]
-    self.px=pxs[:,:NConstituents]
-    self.py=pys[:,:NConstituents]
-    self.pz=pzs[:,:NConstituents]
+    pts=f["relative_constituents"]["pt"]
+    detas=f["relative_constituents"]["deta"]
+    dphis=f["relative_constituents"]["dphi"]
+    ms=f["relative_constituents"]["m"]
+    self.pt=pts[:,:NConstituents]
+    self.deta=detas[:,:NConstituents]
+    self.dphi=dphis[:,:NConstituents]
+    self.m=ms[:,:NConstituents]
 
     #Check if next is -1 and pad last const to True
     if add_mask:
@@ -111,58 +111,7 @@ class constit_relative_dataset(torch.utils.data.Dataset):
 
   def __getitem__(self, index):
 
-    E  = self.e[index]
-    px = self.px[index]
-    py = self.py[index]
-    pz = self.pz[index]
-
-    # Real constituents
-    valid = E > -1
-    eps = 1e-12
-
-    # Full jet 4-vector
-    jet_E = np.sum(E[valid])
-    jet_px = np.sum(px[valid])
-    jet_py = np.sum(py[valid])
-    jet_pz = np.sum(pz[valid])
-
-    jet_pt = np.hypot(jet_px, jet_py)
-    jet_eta = np.arcsinh( jet_pz / max(jet_pt, eps))
-    jet_phi = np.arctan2( jet_py, jet_px)
-    jet_mass = np.sqrt(max(jet_E**2 - jet_px**2 - jet_py**2 - jet_pz**2, 0.0))
-
-    # Constituent info
-    const_pt = np.hypot(px, py)
-    const_eta = np.zeros_like(const_pt)
-    valid_pt = const_pt > eps
-    const_eta[valid_pt] = np.arcsinh( pz[valid_pt] / const_pt[valid_pt])
-    const_phi = np.arctan2(py, px)
-    const_p = np.sqrt(px**2 + py**2 + pz**2)
-    const_mass = np.log1p(np.sqrt(np.maximum(E**2 - const_p**2, 0.0)))
-
-    # pt in jet axis
-    jet_p = np.sqrt(jet_px**2 + jet_py**2 + jet_pz**2)
-    jet_nx = jet_px / max(jet_p, eps)
-    jet_ny = jet_py / max(jet_p, eps)
-    jet_nz = jet_pz / max(jet_p, eps)
-    p_parallel = (px * jet_nx + py * jet_ny + pz * jet_nz)
-    const_pt_rel = np.sqrt(np.maximum(np.log1p(const_p**2 - p_parallel**2),0.0)) # Transverse component relative to jet axis
-
-    # Relative coordinates
-    delta_eta = const_eta - jet_eta
-    delta_phi = const_phi - jet_phi
-    delta_phi = np.arctan2( np.sin(delta_phi), np.cos(delta_phi)) # Wrap to [-pi, pi]
-
-    # --------------------------------------------------
-    # Remove numerical values from padding
-    # --------------------------------------------------
-    #valid = valid & (np.abs(delta_eta)<1)
-    delta_eta[~valid] = -1
-    delta_phi[~valid] = -1
-    const_pt_rel[~valid] = -1
-    const_mass[~valid] = -1
-
-    inputs=np.array([const_pt_rel,delta_eta,delta_phi,const_mass])
+    inputs=np.array([self.pt[index],self.deta[index],self.dphi[index],self.m[index]])
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
     if self.preprocess:
@@ -174,7 +123,7 @@ class constit_relative_dataset(torch.utils.data.Dataset):
         return self.data
 
   def __len__(self):
-    return len(self.e)
+    return len(self.pt)
 
 def get_loaders(args):
 
