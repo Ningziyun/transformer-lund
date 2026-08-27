@@ -88,6 +88,94 @@ class constit_dataset(torch.utils.data.Dataset):
   def __len__(self):
     return len(self.e)
 
+class constit_relative_dataset(torch.utils.data.Dataset):
+  def __init__(self, file_path, NConstituents=20, add_mask=False, preprocess=None):
+    super(constit_relative_dataset, self).__init__()
+    self.data=torch.tensor([])
+    self.add_mask=add_mask
+    self.preprocess=preprocess
+
+    f = h5py.File(file_path,'r')
+    es=f["constituents"]["E"]
+    pxs=f["constituents"]["PX"]
+    pys=f["constituents"]["PY"]
+    pzs=f["constituents"]["PZ"]
+    self.e=es[:,:NConstituents]
+    self.px=pxs[:,:NConstituents]
+    self.py=pys[:,:NConstituents]
+    self.pz=pzs[:,:NConstituents]
+
+    #Check if next is -1 and pad last const to True
+    if add_mask:
+      self.mask=self.e == -1
+
+  def __getitem__(self, index):
+
+    E  = self.e[index]
+    px = self.px[index]
+    py = self.py[index]
+    pz = self.pz[index]
+
+    # Real constituents
+    valid = E > -1
+    eps = 1e-12
+
+    # Full jet 4-vector
+    jet_E = np.sum(E[valid])
+    jet_px = np.sum(px[valid])
+    jet_py = np.sum(py[valid])
+    jet_pz = np.sum(pz[valid])
+
+    jet_pt = np.hypot(jet_px, jet_py)
+    jet_eta = np.arcsinh( jet_pz / max(jet_pt, eps))
+    jet_phi = np.arctan2( jet_py, jet_px)
+    jet_mass = np.sqrt(max(jet_E**2 - jet_px**2 - jet_py**2 - jet_pz**2, 0.0))
+
+    # Constituent info
+    const_pt = np.hypot(px, py)
+    const_eta = np.zeros_like(const_pt)
+    valid_pt = const_pt > eps
+    const_eta[valid_pt] = np.arcsinh( pz[valid_pt] / const_pt[valid_pt])
+    const_phi = np.arctan2(py, px)
+    const_p = np.sqrt(px**2 + py**2 + pz**2)
+    const_mass = np.log1p(np.sqrt(np.maximum(E**2 - const_p**2, 0.0)))
+
+    # pt in jet axis
+    jet_p = np.sqrt(jet_px**2 + jet_py**2 + jet_pz**2)
+    jet_nx = jet_px / max(jet_p, eps)
+    jet_ny = jet_py / max(jet_p, eps)
+    jet_nz = jet_pz / max(jet_p, eps)
+    p_parallel = (px * jet_nx + py * jet_ny + pz * jet_nz)
+    const_pt_rel = np.sqrt(np.maximum(np.log1p(const_p**2 - p_parallel**2),0.0)) # Transverse component relative to jet axis
+
+    # Relative coordinates
+    delta_eta = const_eta - jet_eta
+    delta_phi = const_phi - jet_phi
+    delta_phi = np.arctan2( np.sin(delta_phi), np.cos(delta_phi)) # Wrap to [-pi, pi]
+
+    # --------------------------------------------------
+    # Remove numerical values from padding
+    # --------------------------------------------------
+    #valid = valid & (np.abs(delta_eta)<1)
+    delta_eta[~valid] = -1
+    delta_phi[~valid] = -1
+    const_pt_rel[~valid] = -1
+    const_mass[~valid] = -1
+
+    inputs=np.array([const_pt_rel,delta_eta,delta_phi,const_mass])
+    self.data=torch.transpose(torch.tensor(inputs),0,1)
+
+    if self.preprocess:
+        helpers.preprocess(self.data,"relvec",self.preprocess)
+
+    if self.add_mask:
+        return [self.data,self.mask[index]]
+    else:
+        return self.data
+
+  def __len__(self):
+    return len(self.e)
+
 def get_loaders(args):
 
   if args.input_format=="ktdr":
@@ -101,6 +189,13 @@ def get_loaders(args):
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
     test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
+
+  elif args.input_format=="relvec":
+    train_dataset = constit_relative_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
+    test_dataset = constit_relative_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
+
   return train_loader,test_loader
 
 # ---------------------------------------------------------------------
@@ -658,7 +753,7 @@ def parse_input():
     parser.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
     parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
-    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec"], default="ktdr", help="What format of inputs we are using")
+    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec","relvec"], default="ktdr", help="What format of inputs we are using")
     parser.add_argument("--preprocess", type=str, default=None, help="Preprocess the output (default: lNone")
     parser.add_argument("--flatten", action="store_true", default=False, help="Flatten the energy during training (default: False)")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
