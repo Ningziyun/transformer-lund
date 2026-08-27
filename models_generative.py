@@ -44,16 +44,29 @@ class Sinusoidal_Time_Embedding(nn.Module):
     Can also do a normal embedding?
     t: (B,)
     """
-    def __init__(self, dim):
+    def __init__(self, dim, max_period=10000, unit_interval=True):
         super().__init__()
         self.dim = dim
+        self.max_period = max_period
+        self.unit_interval = unit_interval
 
     def forward(self, t):
-        half = self.dim // 2
-        freqs = torch.exp( -math.log(10000) * torch.arange(half, device=t.device, dtype=t.dtype) / (half - 1))
-        args = t * freqs[None, :]
+        if self.dim==1:
+            if self.unit_interval:
+                return t
+            else:
+                return t / self.max_period
+    
+        else:
+            half = self.dim // 2
+            freqs = torch.exp( -math.log(self.max_period) * torch.arange(half, device=t.device, dtype=t.dtype) / half)
+            if self.unit_interval: args = 2*math.pi * t * freqs #if in NF/FM, with interval t\in[0,1] add 2pi for angular freq so first freq=1 rotaion
+            else: args = t * freqs #for Diffusion t\in[0,timesteps-1], if integer t sin(2pi*t)=0
 
-        return torch.cat( [torch.sin(args), torch.cos(args)], dim=-1)
+            emb = torch.cat( [torch.sin(args), torch.cos(args)], dim=-1)
+            if self.dim % 2 == 1: emb = F.pad(emb, (0, 1)) #pad an extra zero if odd dimension
+
+            return emb
 
 class VectorFieldTrans(nn.Module):
   """
@@ -880,16 +893,13 @@ class DiffusionMLP(nn.Module):
     '''
     Simple MLP noise predictor for diffusion. Learning cumulative added noise epsilon(x_{t-1}, t)
     '''
-    def __init__(self, input_dim, hidden_dim, time_dim):
+    def __init__(self, input_dim, hidden_dim, time_dim, time_steps):
         super().__init__()
 
         self.time_dim = time_dim
-        self.time_mlp = nn.Sequential(nn.Linear(time_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim),)
 
-        #self.mlp = nn.Sequential(nn.Linear(input_dim + hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),) 
-        self.mlp = nn.Sequential(nn.Linear(input_dim + 1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
-
-        self.time_emb = Sinusoidal_Time_Embedding(time_dim)
+        self.mlp = nn.Sequential(nn.Linear(input_dim + time_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
+        self.time_emb = Sinusoidal_Time_Embedding(time_dim, max_period=time_steps, unit_interval=False)
 
     def forward(self, x, t):
         """
@@ -897,14 +907,8 @@ class DiffusionMLP(nn.Module):
         t: (B,) integer timesteps
         """
 
-        #Add the sinusioidal time conditioner
-        #t_emb = self.time_emb(t.float(), self.time_embed_dim)
-        #t_emb = self.time_mlp(t_emb)
-
-        #Linear timestep instead
-        ##t_emb = t.float().view(-1, 1)
-        t_emb = t.float().unsqueeze(-1)
-        t_emb = t_emb / 1000.0 # normalize by max timestep #FIXME
+        #Add the time-info, either linear time-step or sinusioidal time conditioner
+        t_emb = self.time_emb(t.float().unsqueeze(-1))
 
         h = torch.cat([x, t_emb], dim=-1)
 
@@ -930,18 +934,18 @@ class model_diffusion(nn.Module):
     In DDIM update rules is determinitistic     x_{t_1}= sqrt(alpha_{t-1}) hat x_0 + sqrt(1-alpha_{t-1})*epsilon_theta   where x_0=sqrt(alpha_{t-1}/alpha_t)*(x_t-sqrt(1-alpha_t)*epsilon_theta)
         
     """
-    def __init__(self, input_dim, hidden_dim=256, time_dim=64, timesteps=1000, beta_start=1e-4, beta_end=2e-2,mode="DDPM"):
+    def __init__(self, input_dim, hidden_dim=256, time_dim=64, time_steps=1000, beta_start=1e-4, beta_end=2e-2,mode="DDPM"):
         super().__init__()
 
         self.input_dim = input_dim
-        self.timesteps = timesteps
+        self.time_steps = time_steps
         self.mode      = mode
 
         # Noise predictor network
-        self.epsilon_model = DiffusionMLP(input_dim=input_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+        self.epsilon_model = DiffusionMLP(input_dim=input_dim, hidden_dim=hidden_dim, time_dim=time_dim, time_steps=time_steps)
 
         # Linear beta schedule
-        betas = torch.linspace(beta_start, beta_end, timesteps)
+        betas = torch.linspace(beta_start, beta_end, time_steps)
 
         alphas = 1.0 - betas
         alpha_bar = torch.cumprod(alphas, dim=0)
@@ -982,8 +986,8 @@ class model_diffusion(nn.Module):
         batch_size = x.shape[0]
         device = x.device
 
-        # Random timestep per sample
-        t = torch.randint(0, self.timesteps, (batch_size,), device=device,)
+        # Random timestep per sample in [0, timesteps-1]
+        t = torch.randint(0, self.time_steps, (batch_size,), device=device,)
 
         # Add noise to the sample
         xt, noise = self.q_sample(x, t)
@@ -1018,9 +1022,8 @@ class model_diffusion(nn.Module):
         x = torch.randn(batch_size, self.input_dim, device=device,)
 
         #Should speed up DDPM which can use coarser steps then in the forward process
-
-        #Loop over timesteps, and update
-        for t in reversed(range(self.timesteps)):
+        #Reverse loop over timesteps [timesteps-1, 0], and update
+        for t in reversed(range(self.time_steps)):
 
             #Get the injected noise beta/alpha
             t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long,)
@@ -1050,9 +1053,12 @@ class model_diffusion(nn.Module):
             elif self.mode=="DDIM":
                 # DDIM reverse step
                 # x_{t_1}= sqrt(alpha_{t-1}) hatx_0 + sqrt(1-alpha_{t-1})*epsilon_theta   where hatx_0=(x_t-sqrt(1-alpha_t)*epsilon_theta)/sqrt(alpha_t)
-                x0_pred = (x - torch.sqrt(1 - alpha_t) * eps_theta) / torch.sqrt(alpha_t)
+                x0_pred = (x - torch.sqrt(1 - alpha_t) * epsilon_theta) / torch.sqrt(alpha_t)
 
-                alpha_tm1 = self.alpha[t-1]
+                if t == 0:  #first denoise step has alpha=1
+                    alpha_tm1 = torch.ones_like(alpha_bar_t)
+                else:
+                    alpha_tm1 = self.alpha_bar[t-1]
                 x = (torch.sqrt(alpha_tm1) * x0_pred + torch.sqrt(1 - alpha_tm1) * epsilon_theta)
 
         return x.view(out_dimensions)

@@ -339,7 +339,7 @@ def build_unbinned_model(input_dim, args_or_dict):
         return models_generative.model_diffusion(
                 input_dim=input_dim[1]*input_dim[2], 
                 hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-                timesteps=_as_int(_config_get(args_or_dict,"diff_steps")),
+                time_steps=_as_int(_config_get(args_or_dict,"diff_steps")),
                 beta_start=_as_float(_config_get(args_or_dict,"diff_beta_start")),
                 beta_end=_as_float(_config_get(args_or_dict,"diff_beta_start")),
                 mode=args_or_dict.diff_type,

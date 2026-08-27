@@ -118,6 +118,9 @@ def preprocess(X,input_format,method="log"):
     elif method=="shiftnan":
         X[mask]=-3e3 #shift padding
 
+    else:
+        ValueError(f"Unknown pre-processing method: {method}")
+
 def undo_preprocess(X,input_format,method="log"):
     X_new=torch.zeros(X.shape)
 
