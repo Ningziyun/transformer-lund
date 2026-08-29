@@ -9,7 +9,7 @@ import numpy as np
 import random
 import h5py
 
-from helpers_unbinned import *
+from helpers import make_lundplane
 
 def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", train_test_split=0.8, seed=0, file_format="topbenchmark"):
 
@@ -89,25 +89,6 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           ljp=make_lundplane(constituents, Npad_ljp)
           constituents[constituents==0]=-1 #set pad to -1
 
-          #Add to file
-          '''
-          if random.random()<train_test_split:
-              dset_E_train[index,:] =  constituents[0,:,0]
-              dset_PX_train[index,:] = constituents[0,:,1]
-              dset_PY_train[index,:] = constituents[0,:,2]
-              dset_PZ_train[index,:] = constituents[0,:,3]
-
-              dset_kt_train[index,:] = ljp[0,:,0]
-              dset_dr_train[index,:] = ljp[0,:,1]
-          else:
-              dset_E_test[index,:] =  constituents[0,:,0]
-              dset_PX_test[index,:] = constituents[0,:,1]
-              dset_PY_test[index,:] = constituents[0,:,2]
-              dset_PZ_test[index,:] = constituents[0,:,3]
-
-              dset_kt_test[index,:] = ljp[0,:,0]
-              dset_dr_test[index,:] = ljp[0,:,1]
-          '''
           #train/test split
           if random.random()<train_test_split:
               dset_E=dset_E_train
@@ -137,8 +118,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PX[-constituents.shape[0]:,:] = constituents[:,:,1]
           dset_PY[-constituents.shape[0]:,:] = constituents[:,:,2]
           dset_PZ[-constituents.shape[0]:,:] = constituents[:,:,3]
-          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,1]
-          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,0]
+          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,0]
+          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,1]
           Ncount+=1
 
       if file_format=="jetclass":
@@ -152,8 +133,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PZ_train = grp_const_train.create_dataset("PZ", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
 
           grp_ljp_train = outfile_train.create_group("lundplane")
-          dset_kt_train = grp_ljp_train.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
-          dset_dr_train = grp_ljp_train.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
+          dset_kt_train = grp_ljp_train.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
+          dset_dr_train = grp_ljp_train.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
 
           grp_const_test = outfile_test.create_group("constituents")
           dset_E_test = grp_const_test.create_dataset("E", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
@@ -162,8 +143,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PZ_test = grp_const_test.create_dataset("PZ", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
 
           grp_ljp_test = outfile_test.create_group("lundplane")
-          dset_kt_test = grp_ljp_test.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
-          dset_dr_test = grp_ljp_test.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
+          dset_kt_test = grp_ljp_test.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
+          dset_dr_test = grp_ljp_test.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_ljp), dtype="float32")
 
         #Loop over the input files in chunks via uproot
         chunk_size = 2**11
@@ -217,8 +198,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PX[-constituents.shape[0]:,:] = constituents[:,:,1]
           dset_PY[-constituents.shape[0]:,:] = constituents[:,:,2]
           dset_PZ[-constituents.shape[0]:,:] = constituents[:,:,3]
-          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,1]
-          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,0]
+          dset_kt[-constituents.shape[0]:,:] = ljp[:,:,0]
+          dset_dr[-constituents.shape[0]:,:] = ljp[:,:,1]
           batch+=1
           Ncount+=stop_index-index
 
@@ -231,6 +212,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process benchmarks.')
     parser.add_argument("filepaths", help="", nargs='+')
     parser.add_argument("--outname", help="", default="test.h5")
+    parser.add_argument("--outdir", help="", default="inputFiles/")
     parser.add_argument("--format", choices=["topbenchmark","jetclass"], default="topbenchmark")
     parser.add_argument("--treename", help="", default="tree")
     parser.add_argument("--split",type=float, default=0.8, help="Train/test split fraction")
@@ -240,6 +222,6 @@ if __name__ == "__main__":
     print(args.filepaths)
 
     #try:
-    load_and_lundplane(args.filepaths, args.treename, outname=args.outname, train_test_split=args.split, seed=args.seed, file_format=args.format)
+    load_and_lundplane(args.filepaths, args.treename, outdir=args.outdir, outname=args.outname, train_test_split=args.split, seed=args.seed, file_format=args.format)
     #except Exception as e:
     #    print(f"Failed to read file {args.filename}: \n{e}")
