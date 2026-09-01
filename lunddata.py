@@ -139,7 +139,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PZ_train = grp_const_train.create_dataset("PZ", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
 
           grp_relconst_train = outfile_train.create_group("relative_constituents")
-          dset_pt_train = grp_relconst_train.create_dataset("pt", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
+          dset_ptfrac_train = grp_relconst_train.create_dataset("ptfrac", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
           dset_deta_train = grp_relconst_train.create_dataset("deta", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
           dset_dphi_train = grp_relconst_train.create_dataset("dphi", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
           dset_m_train = grp_relconst_train.create_dataset("m", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
@@ -161,7 +161,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PZ_test = grp_const_test.create_dataset("PZ", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
 
           grp_relconst_test = outfile_test.create_group("relative_constituents")
-          dset_pt_test = grp_relconst_test.create_dataset("pt", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
+          dset_ptfrac_test = grp_relconst_test.create_dataset("ptfrac", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
           dset_deta_test = grp_relconst_test.create_dataset("deta", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
           dset_dphi_test = grp_relconst_test.create_dataset("dphi", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
           dset_m_test = grp_relconst_test.create_dataset("m", shape=(0,Npad_const), maxshape=(None, Npad_const), dtype="float32")
@@ -236,15 +236,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           const_p = np.sqrt(px**2 + py**2 + pz**2)
           const_m = np.sqrt(np.maximum(E**2 - const_p**2, 0.0))
 
-          # pt in jet axis
-          jet_p = np.sqrt(jet_px**2 + jet_py**2 + jet_pz**2)
-          jet_nx = jet_px / np.maximum(jet_p, eps)
-          jet_ny = jet_py / np.maximum(jet_p, eps)
-          jet_nz = jet_pz / np.maximum(jet_p, eps)
-          p_parallel = px * jet_nx[:, None] + py * jet_ny[:, None] + pz * jet_nz[:, None]
-          const_pt_rel = np.sqrt(np.maximum((const_p**2 - p_parallel**2),0.0)) # Transverse component relative to jet axis
-
           # Relative coordinates
+          const_ptfrac = const_pt/jet_pt[:, None]
           const_deta = const_eta - jet_eta[:, None]
           const_dphi = const_phi - jet_phi[:, None]
           const_dphi = np.arctan2(np.sin(const_dphi), np.cos(const_dphi)) # Wrap Delta phi into [-pi, pi]
@@ -254,7 +247,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           px[~const_mask]=-1
           py[~const_mask]=-1
           pz[~const_mask]=-1
-          const_pt[~const_mask]=-1
+          const_ptfrac[~const_mask]=-1
           const_dphi[~const_mask]=-1
           const_deta[~const_mask]=-1
           const_m[~const_mask]=-1
@@ -263,7 +256,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           px         = np.take_along_axis(px,         sort_idx, axis=1)
           py         = np.take_along_axis(py,         sort_idx, axis=1)
           pz         = np.take_along_axis(pz,         sort_idx, axis=1)
-          const_pt   = np.take_along_axis(const_pt,   sort_idx, axis=1)
+          const_ptfrac   = np.take_along_axis(const_ptfrac,   sort_idx, axis=1)
           const_deta  = np.take_along_axis(const_deta,  sort_idx, axis=1)
           const_dphi  = np.take_along_axis(const_dphi,  sort_idx, axis=1)
           const_m  = np.take_along_axis(const_m,  sort_idx, axis=1)
@@ -284,7 +277,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
               dset_PY=dset_PY_train
               dset_PZ=dset_PZ_train
 
-              dset_pt=dset_pt_train
+              dset_ptfrac=dset_ptfrac_train
               dset_deta=dset_deta_train
               dset_dphi=dset_dphi_train
               dset_m=dset_m_train
@@ -302,7 +295,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
               dset_PY=dset_PY_test
               dset_PZ=dset_PZ_test
 
-              dset_pt=dset_pt_test
+              dset_ptfrac=dset_ptfrac_test
               dset_deta=dset_deta_test
               dset_dphi=dset_dphi_test
               dset_m=dset_m_test
@@ -324,7 +317,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PY.resize(new_size, axis=0)
           dset_PZ.resize(new_size, axis=0)
 
-          dset_pt.resize(new_size, axis=0)
+          dset_ptfrac.resize(new_size, axis=0)
           dset_dphi.resize(new_size, axis=0)
           dset_deta.resize(new_size, axis=0)
           dset_m.resize(new_size, axis=0)
@@ -342,9 +335,8 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_PX[old_size:new_size,:] = constituents[:,:,1]
           dset_PY[old_size:new_size,:] = constituents[:,:,2]
           dset_PZ[old_size:new_size,:] = constituents[:,:,3]
-          dset_pt[old_size:new_size,:] = constituents[:,:,0]
 
-          dset_pt[old_size:new_size,:] = const_pt
+          dset_ptfrac[old_size:new_size,:] = const_ptfrac
           dset_dphi[old_size:new_size,:] = const_dphi
           dset_deta[old_size:new_size,:] = const_deta
           dset_m[old_size:new_size,:] = const_m
