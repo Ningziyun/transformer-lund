@@ -96,11 +96,11 @@ class constit_relative_dataset(torch.utils.data.Dataset):
     self.preprocess=preprocess
 
     f = h5py.File(file_path,'r')
-    pts=f["relative_constituents"]["pt"]
+    ptfracs=f["relative_constituents"]["ptfrac"]
     detas=f["relative_constituents"]["deta"]
     dphis=f["relative_constituents"]["dphi"]
     ms=f["relative_constituents"]["m"]
-    self.pt=pts[:,:NConstituents]
+    self.ptfrac=ptfracs[:,:NConstituents]
     self.deta=detas[:,:NConstituents]
     self.dphi=dphis[:,:NConstituents]
     self.m=ms[:,:NConstituents]
@@ -111,7 +111,7 @@ class constit_relative_dataset(torch.utils.data.Dataset):
 
   def __getitem__(self, index):
 
-    inputs=np.array([self.pt[index],self.deta[index],self.dphi[index],self.m[index]])
+    inputs=np.array([self.ptfrac[index],self.deta[index],self.dphi[index]])
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
     if self.preprocess:
@@ -123,7 +123,7 @@ class constit_relative_dataset(torch.utils.data.Dataset):
         return self.data
 
   def __len__(self):
-    return len(self.pt)
+    return len(self.ptfrac)
 
 def get_loaders(args):
 
