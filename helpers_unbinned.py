@@ -123,15 +123,6 @@ def get_exp_scheduler(
     scheduler = LambdaLR(optimizer, lr_lambda=lr_fn)
     return scheduler
 
-def get_cos_scheduler(num_epochs, num_batches, optimizer, eta_min=1e-6):
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer,
-        # T_0=len(train_loader)//5,
-        T_0=num_batches * num_epochs + 1,
-        eta_min=eta_min,
-    )
-    return scheduler
-
 def get_cos_damping_scheduler(
     optimizer,
     base_lr,
@@ -164,12 +155,49 @@ def get_cos_damping_scheduler(
 
     return LambdaLR(optimizer, lr_lambda=lr_lambda)
 
-def get_epoch_cosine_scheduler(optimizer, num_epochs, eta_min=1e-6):
+def get_cosine_scheduler(optimizer, num_epochs, eta_min=1e-6):
     return torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(int(num_epochs), 1),
         eta_min=eta_min,
     )
+
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_epochs, min_lr, max_lr,):
+    """
+    Linear warm-up followed by cosine decay.
+    """
+
+    if num_epochs <= num_warmup_steps:
+        raise ValueError("num_epochs must be greater than num_warmup_steps")
+
+    if min_lr < 0:
+        raise ValueError("min_lr must be >= 0")
+
+    if max_lr <= 0:
+        raise ValueError("max_lr must be > 0")
+
+    if min_lr > max_lr:
+        raise ValueError("min_lr must be <= max_lr")
+
+    # LambdaLR multiplies the optimizer's initial LR, so set the optimizer LR to max_lr.
+    if any(param_group["lr"] != max_lr for param_group in optimizer.param_groups):
+        raise ValueError("optimizer learning rate must be set to max_lr")
+
+    def lr_lambda(current_step):
+
+        # Linear warm-up from min_lr -> max_lr
+        if current_step < num_warmup_steps:
+            lin_ratio = current_step / num_warmup_steps # 0 -> 1
+            return (min_lr + (max_lr - min_lr) * lin_ratio) / max_lr # Convert absolute LR range to a multiplier.
+
+        # Cosine decay from max_lr -> min_lr
+        else:
+            progress = ( current_step - num_warmup_steps) / max( 1, num_epochs - num_warmup_steps,)
+            progress = min(progress, 1.0)
+            cosine = 0.5 * ( 1.0 + math.cos(math.pi * progress)) # 0 -> 1
+            return (min_lr + (max_lr - min_lr) * cosine) / max_lr # Convert absolute LR range to a multiplier.
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 def get_plateau_scheduler(
     optimizer,
@@ -199,10 +227,18 @@ def make_scheduler(args, optimizer):
             cos_damping_period_epochs=args.cos_damping_period_epochs,
         )
     if scheduler_name == "cosine":
-        return get_epoch_cosine_scheduler(
+        return get_cosine_scheduler(
             optimizer=optimizer,
             num_epochs=args.epochs,
             eta_min=args.scheduler_min_lr,
+        )
+    if scheduler_name == "warmup_cosine":
+        return get_cosine_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=max(int(0.2*args.epochs)-1, 0),
+                num_epochs=args.epochs,
+                min_lr=args.scheduler_min_lr,
+                max_lr=args.lr,
         )
     if scheduler_name == "plateau":
         return get_plateau_scheduler(
@@ -671,9 +707,9 @@ def parse_input():
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw"], help="Optimizer")
-    parser.add_argument("--weight-decay", type=float, default=0.0, help="Optimizer weight decay")
-    parser.add_argument("--grad-clip", type=float, default=0.0, help="Gradient norm clipping. Set <=0 to disable")
-    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "plateau"], help="Learning rate scheduler")
+    parser.add_argument("--weight-decay", type=float, default=1e-3, help="Optimizer weight decay")
+    parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient norm clipping. Set <=0 to disable")
+    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "warmup_cosine", "plateau"], help="Learning rate scheduler")
     parser.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="Minimum LR for cosine/plateau schedulers")
     parser.add_argument("--plateau-factor", type=float, default=0.5, help="LR multiplier for --scheduler plateau")
     parser.add_argument("--plateau-patience", type=int, default=2, help="Plateau epochs before reducing LR")

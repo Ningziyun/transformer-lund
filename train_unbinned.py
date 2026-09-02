@@ -80,11 +80,11 @@ def train(model,train_loader,args):
       loss.backward()
 
       #safety check
+      if args.grad_clip is not None and args.grad_clip > 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
       for name, param in model.named_parameters():
         if param.grad is not None and not torch.isfinite(param.grad).all():
           raise NonFiniteLossError( f"Non-finite gradient at batch {batch} in parameter {name}")
-      if args.grad_clip is not None and args.grad_clip > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
       #backprob
       optimizer.step()
@@ -239,6 +239,9 @@ if __name__ == "__main__":
       print(f"\nEpoch {epoch+1}\n-------------------------------", flush=True)
       starttime=time.time()
 
+      current_lr = optimizer.param_groups[0]["lr"]
+      lr_history.append(current_lr)
+
       #Run the training loop and check for errors
       try:
         starttime=time.time()
@@ -256,9 +259,6 @@ if __name__ == "__main__":
         stopped_nonfinite = True
         break
       print("Took %.2f(%.2f) minutes to run training(testing)"%(train_time,test_time), flush=True)
-
-      current_lr = optimizer.param_groups[0]["lr"]
-      lr_history.append(current_lr)
 
       #Save some best values
       best_metric = test_loss if test_loss is not None else train_loss
