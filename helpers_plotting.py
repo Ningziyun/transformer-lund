@@ -904,7 +904,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       Nimages = 0
       for batch, X in enumerate(test_loader):
         #input data
-        X,mask=helpers.format_input(X,args,device)
+        X,mask,jet=helpers.format_input(X,args,device)
 
         batch_size = X.shape[0]
         Nimages+=X.shape[0]
@@ -916,10 +916,12 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         # Allocate original storage after first batch
         if original is None:
             original = torch.empty( (max_events, *original_seq.shape[1:]), dtype=original_seq.dtype,)
+            if jet is not None: jet_list=torch.empty( (max_events, jet.shape[-1]), dtype=jet.dtype,)
 
         # Store original batch
         end_idx = min( write_idx + batch_size, original.shape[0])
         original[write_idx:end_idx] = original_seq[:end_idx-write_idx]
+        if jet is not None: jet_list[write_idx:end_idx] = jet[:end_idx-write_idx]
 
         #Loop over models
         for imodel, model in enumerate(models):
@@ -1010,10 +1012,11 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
           unavailable_notes=unavailable_notes,
         )
 
-        #Clear memory and remkae
+        #Clear memory and remake
         del original_np
         for g in generated_np: del g
         for p in plot_inputs: del p
+
         original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
         generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
         plot_inputs = [original_np] + generated_np
@@ -1037,7 +1040,25 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
           unavailable_notes=unavailable_notes,
       )
 
-      if args.input_format=="4vec":
+      if args.input_format=="relvec":
+
+        #Clear memory and remake
+        for p in plot_inputs: del p
+
+        original_np=helpers.make_absolute_constituents(original,jet_list)
+        generated_np = [helpers.make_absolute_constituents(g,jet_list) for g in generated]
+        plot_inputs = [original_np] + generated_np
+        flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
+
+        projection_plot(
+          flat_plot_inputs,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+          name="projection_4vec",
+          unavailable_notes=unavailable_notes,
+        )
+
+      if args.input_format=="4vec" or args.input_format=="relvec":
           EEC_plot(
             plot_inputs,
             results,
@@ -1101,8 +1122,8 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         lund_inputs = flat_plot_inputs
       else:
         #Free up some memory
-        del plot_inputs
-        del flat_plot_inputs
+        for p in plot_inputs: del p
+        for p in flat_plot_inputs: del p
 
         #remake lund-plane
         starttime=time.time()
@@ -1121,6 +1142,10 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
               name="projection_lund",
               unavailable_notes=unavailable_notes,
           )
+
+        #Clear up more memory
+        del original_np
+        for g in generated_np: del g
 
       lund_plot(
           lund_inputs,

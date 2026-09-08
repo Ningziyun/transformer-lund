@@ -20,7 +20,7 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example=next(iter(train_loader))
+    X_example,_,_=format_input(next(iter(train_loader)), args, device)
 
     #load model
     print(f"Loading model", flush=True)
@@ -28,4 +28,5 @@ if __name__ == "__main__":
 
     #Make validation plots
     validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"])
+
     print("Done")

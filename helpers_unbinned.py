@@ -105,22 +105,32 @@ class constit_relative_dataset(torch.utils.data.Dataset):
     self.dphi=dphis[:,:NConstituents]
     self.m=ms[:,:NConstituents]
 
+    self.jet_E=f["jet"]["E"]
+    self.jet_px=f["jet"]["PX"]
+    self.jet_py=f["jet"]["PY"]
+    self.jet_pz=f["jet"]["PZ"]
+
     #Check if next is -1 and pad last const to True
     if add_mask:
-      self.mask=self.e == -1
+      self.mask=self.ptfrac == -1
 
   def __getitem__(self, index):
 
     inputs=np.array([self.ptfrac[index],self.deta[index],self.dphi[index]])
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
-    if self.preprocess:
-        helpers.preprocess(self.data,"relvec",self.preprocess)
+    eps=1e-12
+    jet_p = np.sqrt(self.jet_px[index]**2 + self.jet_py[index]**2 + self.jet_pz[index]**2)
+    jet_pt = np.hypot(self.jet_px[index], self.jet_py[index])
+    jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
+    jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
+    jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
+    jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m])
 
     if self.add_mask:
-        return [self.data,self.mask[index]]
+        return [self.data,jet_data,self.mask[index]]
     else:
-        return self.data
+        return [self.data,jet_data]
 
   def __len__(self):
     return len(self.ptfrac)
@@ -751,7 +761,7 @@ def parse_input():
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw"], help="Optimizer")
-    parser.add_argument("--weight-decay", type=float, default=1e-3, help="Optimizer weight decay")
+    parser.add_argument("--weight-decay", type=float, default=1e-2, help="Optimizer weight decay")
     parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient norm clipping. Set <=0 to disable")
     parser.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "warmup_cosine", "plateau"], help="Learning rate scheduler")
     parser.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="Minimum LR for cosine/plateau schedulers")

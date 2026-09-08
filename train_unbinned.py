@@ -65,7 +65,7 @@ def train(model,train_loader,args):
   for batch, X in enumerate(train_loader):
 
       #input data
-      X,mask=format_input(X, args, device)
+      X,mask,_=format_input(X, args, device)
 
       #calculate loss across the batch (summed and also seperate averaged value)
       optimizer.zero_grad()
@@ -121,7 +121,7 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
 
       #input data
-      X,mask=format_input(X, args, device)
+      X,mask,_=format_input(X, args, device)
 
       #calculate loss across the batch (summed, not averaged)
       loss,sum_w = evaluate_loss(model, X, mask, args)
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example,mask_example=format_input(next(iter(train_loader)), args, device)
+    X_example,mask_example,_=format_input(next(iter(train_loader)), args, device)
 
     # construct model
     if args.contin:

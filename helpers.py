@@ -52,6 +52,41 @@ def make_lundplane(input_vec, pad_length=20):
   return lund_plane
 
 # ---------------------------------------------------------------------
+# Convert relative const vectors to absolute ones
+# ---------------------------------------------------------------------
+def make_absolute_constituents(relative_vec, jet_vec, pad_length=20):
+
+    # Jet quantities
+    jet_pt = jet_vec[:, 0]
+    jet_eta = jet_vec[:, 1]
+    jet_phi = jet_vec[:, 2]
+
+    # Relative constituent quantities
+    pt_frac = relative_vec[:, :, 0]
+    delta_phi = relative_vec[:, :, 1]
+    delta_eta = relative_vec[:, :, 2]
+
+    # Recover constituent lab-frame coordinates
+    const_pt = pt_frac * jet_pt[:, None]
+    const_phi = delta_phi + jet_phi[:, None]
+    const_eta = delta_eta + jet_eta[:, None]
+
+    # 4-vectro asumming massless
+    E = const_pt * np.cosh(const_eta)
+    px = const_pt * np.cos(const_phi)
+    py = const_pt * np.sin(const_phi)
+    pz = const_pt * np.sinh(const_eta)
+
+    #Apply pad mask
+    mask = pt_frac<0
+    E[mask]=-1
+    px[mask]=-1
+    py[mask]=-1
+    pz[mask]=-1
+
+    return np.stack( [E, px, py, pz], axis=-1)
+
+# ---------------------------------------------------------------------
 # Macros to help with training
 # ---------------------------------------------------------------------
 def set_seeds(seed):
@@ -180,10 +215,23 @@ def flatten_weight(X):
     return w
 
 def format_input(X, args, device):
-    if args.mixed_loss:
-        X, mask=X
-    else:
+
+    #Format the output for each case
+    if args.input_format=="relvec" and args.mixed_loss:
+        X, jet, mask = X
+    elif args.input_format=="relvec":
+        X, jet = X
         mask=None
+    elif args.mixed_loss:
+        X, mask = X
+        jet=None
+    else:
+        jet=None
+        mask=None
+
+    #Set to devices
     X = X.to(device)
     if mask is not None: mask=mask.to(device)
-    return X, mask
+    if jet is not None: jet=jet.to(device)
+
+    return X, mask, jet
