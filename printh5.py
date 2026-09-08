@@ -20,7 +20,8 @@ def make_hist(valueslist,name,Nbins=20):
     return_contents.append(contents)
   #plt.show()
   ax.set_yscale("log")
-  fig.savefig(name)
+  fig.savefig(name+".pdf")
+  fig.savefig(name+".png")
   plt.close(fig)
 
   return return_contents, bins
@@ -54,7 +55,7 @@ def recursiveDraw(f, N=1000, groupname=""):
       print(f"Drawing {N} entries of key {key} in group {groupname}")
       print(f"{val[:100]}")
       values=val[:N].flatten()
-      make_hist([values],"Plots/plot_"+groupname+key+".pdf")
+      make_hist([values],"Plots/plot_"+groupname+key)
     elif isinstance(val, h5py.Group):
       recursiveDraw(val,N,groupname=key+"_")
 
@@ -71,7 +72,7 @@ def deriveFlattening(f,key):
     values=findValByKey(f,key)
     values=values[:].flatten()
     #values=values[values!=-1]
-    content,bins=make_hist([values],"Plots/plot_"+key+".pdf",50)
+    content,bins=make_hist([values],"Plots/plot_"+key,50)
 
     weights=1/content[0]
     weights[np.isinf(weights)] = 0
@@ -110,5 +111,5 @@ if __name__ == "__main__":
         values_bkg.append(f[var][index])
     values_sig=np.asarray(values_sig).flatten()
     values_bkg=np.asarray(values_bkg).flatten()
-    make_hist([values_sig,values_bkg],"Plots/plot_"+var+".pdf")
+    make_hist([values_sig,values_bkg],"Plots/plot_"+var)
     '''
