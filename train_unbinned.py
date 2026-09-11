@@ -26,8 +26,8 @@ def evaluate_loss(model,X,mask,args):
 
   #All the specifics of the loss function for each model
   if args.architecture=="NF":
-    loss=(model.nll_loss(X)*w2).sum()
-    return loss,w.sum()
+    loss=(model.nll_loss(X)).sum() #can't weight sum
+    return loss,torch.tensor(X.shape[-1])
   elif args.architecture=="Diffusion":
     loss=(model.mse_loss(X)*w2).sum()
     return loss,w.sum()
@@ -99,7 +99,7 @@ def train(model,train_loader,args):
         print(f"batch: {batch} loss:{loss_per_sample.item()}", flush=True)
       if loss_per_sample.item()<best_loss: best_loss=loss_per_sample.item()
       epoch_loss += loss.item() #Sum across epoch
-      n_samples += sum_w
+      n_samples += sum_w.item()
       if args.test and batch>1000: break
 
   #Get the average loss across whole epoch (not same as average of per-batch averages)
@@ -135,7 +135,7 @@ def test(model, test_loader, args):
         loss_per_sample = loss / sum_w
         print(f"test batch: {batch} loss:{loss_per_sample}", flush=True)
       epoch_loss += loss.item() #sum the loss across the batch, rolling sum across all batches
-      n_samples+=sum_w
+      n_samples+=sum_w.item()
 
     #Get the average loss across whole batch
     epoch_loss /= n_samples #Divide total numper of events
@@ -178,12 +178,7 @@ if __name__ == "__main__":
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
-    if args.architecture=="NF":
-      X_example = X_example.view(X_example.shape[0], -1)
-      print("Input shape,",X_example.shape, flush=True)
-      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(X_example)[0].shape, model(X_example)[1].shape, flush=True)
-    elif args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
+    if args.architecture=="NF" or  args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
       X_example = X_example.view(X_example.shape[0], -1)
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
@@ -246,12 +241,12 @@ if __name__ == "__main__":
       try:
         starttime=time.time()
         train_loss = train(model,train_loader,args)
-        train_losses.append(train_loss.item())
+        train_losses.append(train_loss)
         train_time=(time.time()-starttime)/60
 
         starttime=time.time()
         test_loss = test(model,test_loader,args)
-        test_losses.append(test_loss.item())
+        test_losses.append(test_loss)
         test_time=(time.time()-starttime)/60
 
       except NonFiniteLossError as err:

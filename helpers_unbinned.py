@@ -423,7 +423,7 @@ def build_unbinned_model(input_dim, args_or_dict):
             input_dim=input_dim[1]*input_dim[2],
             num_flows=_as_int(_config_get(args_or_dict,"nflows")),
             latent_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            flow_type=args_or_dict.nf_type,
+            flow_type=args_or_dict.nflow_type,
         )
     elif args_or_dict.architecture=="Diffusion":
         return models_generative.model_diffusion(
@@ -431,17 +431,19 @@ def build_unbinned_model(input_dim, args_or_dict):
                 hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
                 time_steps=_as_int(_config_get(args_or_dict,"diff_steps")),
                 beta_start=_as_float(_config_get(args_or_dict,"diff_beta_start")),
-                beta_end=_as_float(_config_get(args_or_dict,"diff_beta_start")),
+                beta_end=_as_float(_config_get(args_or_dict,"diff_beta_end")),
                 mode=args_or_dict.diff_type,
                 time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+                sample_time_steps=_as_int(_config_get(args_or_dict,"diff_steps_sample")),
         )
     elif args_or_dict.architecture=="SDE":
         return models_generative.model_score_SDE(
                 input_dim=input_dim[1]*input_dim[2],
                 hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-                beta_min=_as_float(_config_get(args_or_dict,"sde_beta_min")),
-                beta_max=_as_float(_config_get(args_or_dict,"sde_beta_max")),
-                mode=args_or_dict.sde_type,
+                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+                beta_min=_as_float(_config_get(args_or_dict,"SDE_beta_min")),
+                beta_max=_as_float(_config_get(args_or_dict,"SDE_beta_max")),
+                mode=args_or_dict.SDE_type,
         )
     elif args_or_dict.architecture=="Transformer":
         return models_generative.model_autoregressive_transformer(
@@ -797,13 +799,14 @@ def parse_input():
 
     # NF paramaters
     parser.add_argument("--nflows", type=int, default=10, help="NF steps")
-    parser.add_argument("--flow-type", type=str, default="neuralspline_coupling", choices=["realnvp","maf","neuralspline_coupling","neuralspline_autoregressive"], help="Algorithm for the normalizing flows")
+    parser.add_argument("--nflow-type", type=str, default="neuralspline_coupling", choices=["realnvp","maf","neuralspline_coupling","neuralspline_autoregressive"], help="Algorithm for the normalizing flows")
 
     # Diff paramaters
     parser.add_argument("--diff-steps", type=int, default=1000, help="Diffusion timesteps")
     parser.add_argument("--diff-beta-start", type=float, default=1e-4, help="Diffusion beta start")
     parser.add_argument("--diff-beta-end", type=float, default=2e-2, help="Diffusion beta end")
     parser.add_argument("--diff-type", type=str, default="DDPM", choices=["DDPM","DDIM"], help="Algorithm for the diffusion")
+    parser.add_argument("--diff-steps-sample", type=int, default=1000, help="Diffusion sampleing timesteps")
 
     # SDE parameters
     parser.add_argument("--SDE-beta-min", type=float, default=0.1, help="SDE beta min")

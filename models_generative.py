@@ -47,7 +47,7 @@ class Sinusoidal_Time_Embedding(nn.Module):
     def __init__(self, dim, max_period=10000, unit_interval=True):
         super().__init__()
         self.dim = dim
-        self.max_period = max_period
+        self.max_period = float(max_period)
         self.unit_interval = unit_interval
 
     def forward(self, t):
@@ -161,9 +161,9 @@ class VectorFieldNN(nn.Module):
 # Autoregressive trasnformer model
 # ---------------------------------------------------------------------
 class model_autoregressive_transformer(nn.Module):
-  '''
+  """
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
-  '''
+  """
   def __init__(self, input_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_head=False, pad_value=-1):
       super(model_autoregressive_transformer, self).__init__()
 
@@ -263,9 +263,9 @@ class model_autoregressive_transformer(nn.Module):
       return seq[:,1:,:]
 
 class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
-  '''
+  """
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
-  '''
+  """
   def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_head=False, max_range=None, pad_value=-1):
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_head=multi_head, pad_value=pad_value)
 
@@ -406,7 +406,7 @@ def hutch_trace(f, z, eps):
         retain_graph=True,
         only_inputs=True,
     )[0]
-  return (grad * eps).sum(dim=-1)
+  return (grad * eps)
 
 class CNFDynamics(nn.Module):
   """
@@ -437,7 +437,7 @@ class CNFDynamics(nn.Module):
 
     #Intital values: x=0 and prob difference is zero, re-use the eps for numerical speed-up
     x = x.requires_grad_(True)
-    delta_logp = torch.zeros(x.shape[0], device=device, dtype=dtype)
+    delta_logp = torch.zeros(x.shape, device=device, dtype=dtype)
     eps=torch.randn_like(x)
 
     # integrate backward
@@ -456,7 +456,7 @@ class CNFDynamics(nn.Module):
     z = x
 
     # standard normal base log prob
-    logp0 = ( -0.5 * z**2 - 0.5 * torch.log( torch.tensor( 2.0 * torch.pi, device=z.device))).sum(dim=1)
+    logp0 = ( -0.5 * z**2 - 0.5 * torch.log( torch.tensor( 2.0 * torch.pi, device=z.device)))
 
     #want to minimize the nll_loss: log(p(x)) ~ log(p(z_0)) - delta_log(p) #note our delta_logp si flipped sign since inverse int direction before
     return logp0 - delta_logp
@@ -513,7 +513,7 @@ class model_CNF(nn.Module):
 
   def forward(self, x):
     # Safe forward for debugging / torchinfo; does NOT compute likelihood.
-    t = torch.zeros( x.shape[0], 1, device=x.device, dtype=x.dtype)
+    t = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
     return self.cnf.vf(x, t)
 
   def nll_loss(self, x):
@@ -577,7 +577,7 @@ class FlowMatching(nn.Module):
         device=next(self.parameters()).device
 
         #Get the intial x_0 distribution
-        x=torch.randn( batch_size, self.x_dim, device=device)
+        x=torch.randn(batch_size, self.x_dim, device=device)
 
         #make the time grid
         t=self.time_grid.to(device)
@@ -606,10 +606,10 @@ class model_FM(nn.Module):
     def __init__(self, input_dim, hidden_dim=128, time_dim=64, steps=50):
         super().__init__()
 
-        self.fm=FlowMatching( x_dim=input_dim, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps)
+        self.fm=FlowMatching(x_dim=input_dim, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps)
 
     def forward(self,x):
-        t=torch.zeros( x.shape[0], 1, device=x.device, dtype=x.dtype)
+        t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
 
         return self.fm.vf(x,t)
 
@@ -619,7 +619,7 @@ class model_FM(nn.Module):
     @torch.no_grad()
     def generate(self,out_dimensions):
 
-        samples=self.fm.generate( batch_size=out_dimensions[0])
+        samples=self.fm.generate(batch_size=out_dimensions[0])
 
         return samples.view(out_dimensions)
 
@@ -890,9 +890,9 @@ class model_normalizing_flow(nn.Module): #Using normflows package
 # Diffusion model like DDPM/DDIM
 # ---------------------------------------------------------------------
 class DiffusionMLP(nn.Module):
-    '''
+    """
     Simple MLP noise predictor for diffusion. Learning cumulative added noise epsilon(x_{t-1}, t)
-    '''
+    """
     def __init__(self, input_dim, hidden_dim, time_dim, time_steps):
         super().__init__()
 
@@ -934,11 +934,12 @@ class model_diffusion(nn.Module):
     In DDIM update rules is determinitistic     x_{t_1}= sqrt(alpha_{t-1}) hat x_0 + sqrt(1-alpha_{t-1})*epsilon_theta   where x_0=sqrt(alpha_{t-1}/alpha_t)*(x_t-sqrt(1-alpha_t)*epsilon_theta)
         
     """
-    def __init__(self, input_dim, hidden_dim=256, time_dim=64, time_steps=1000, beta_start=1e-4, beta_end=2e-2,mode="DDPM"):
+    def __init__(self, input_dim, hidden_dim=256, time_dim=64, time_steps=1000, beta_start=1e-4, beta_end=2e-2, mode="DDPM", sample_time_steps=100):
         super().__init__()
 
         self.input_dim = input_dim
         self.time_steps = time_steps
+        self.sample_time_steps = sample_time_steps
         self.mode      = mode
 
         # Noise predictor network
@@ -996,7 +997,7 @@ class model_diffusion(nn.Module):
         noise_pred = self.epsilon_model(xt, t)
 
         # Standard DDPM objective |\epsilon-\epsilon_theta|
-        loss = F.mse_loss(noise_pred, noise,reduction='none')
+        loss = F.mse_loss(noise_pred, noise, reduction='none')
 
         return loss
 
@@ -1021,9 +1022,8 @@ class model_diffusion(nn.Module):
         #Sample from final gaussian space x_T~N(0,I) 
         x = torch.randn(batch_size, self.input_dim, device=device,)
 
-        #Should speed up DDPM which can use coarser steps then in the forward process
         #Reverse loop over timesteps [timesteps-1, 0], and update
-        for t in reversed(range(self.time_steps)):
+        for t in reversed(range(self.sample_time_steps)):
 
             #Get the injected noise beta/alpha
             t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long,)
@@ -1053,7 +1053,7 @@ class model_diffusion(nn.Module):
             elif self.mode=="DDIM":
                 # DDIM reverse step
                 # x_{t_1}= sqrt(alpha_{t-1}) hatx_0 + sqrt(1-alpha_{t-1})*epsilon_theta   where hatx_0=(x_t-sqrt(1-alpha_t)*epsilon_theta)/sqrt(alpha_t)
-                x0_pred = (x - torch.sqrt(1 - alpha_t) * epsilon_theta) / torch.sqrt(alpha_t)
+                x0_pred = (x - torch.sqrt(1 - alpha_bar_t) * epsilon_theta) / torch.sqrt(alpha_bar_t)
 
                 if t == 0:  #first denoise step has alpha=1
                     alpha_tm1 = torch.ones_like(alpha_bar_t)
@@ -1067,20 +1067,22 @@ class model_diffusion(nn.Module):
 # Score based stochastic differntial equation
 # ---------------------------------------------------------------------
 class ScoreNet(nn.Module): #Same as DiffusionMLP above!
-    def __init__(self, input_dim, hidden_dim):
+    def __init__(self, input_dim, hidden_dim, time_dim):
         super().__init__()
 
-        self.net = nn.Sequential(nn.Linear(input_dim + 1, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
+        self.net = nn.Sequential(nn.Linear(input_dim + time_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, input_dim),)
+
+        self.time_emb = Sinusoidal_Time_Embedding(time_dim)
 
     def forward(self, x, t):
 
-        t = t.unsqueeze(-1)
-        h = torch.cat([x, t], dim=-1)
+        t_emb = self.time_emb(t.float().unsqueeze(-1))
+        h = torch.cat([x, t_emb], dim=-1)
 
         return self.net(h)
 
 class model_score_SDE(nn.Module):
-    '''
+    """
     Learn the score-function via stochastic differential equation (variance preserving form)
     Whole model is              dx=f(x,t)dt+g(t)dw      for Weiner process w
     We denote  p_t(x) is the density of x(t)
@@ -1096,16 +1098,16 @@ class model_score_SDE(nn.Module):
             sigma(t)=sqrt(1-alpha(t))               (same as in discrete version where alpha(t) is like sqrt(bar alpha))
     and so p_{0t}(x(t)|x(0))=Gaus(x_t|alpha_t*x0,sigma_t) and nabla_x log(p_{0t}) = -epsilon/sigma(t)
     DDPM use lambda(t)=sigma_t^2 in loss which results in loss of L=|epsilon_theta-epsilon| since training gives s(x,t)=-epsilon_theta(x,t)/sigma(t)
-    '''
+    """
 
-    def __init__(self, input_dim, hidden_dim=256, beta_min=0.1, beta_max=20.0, mode="sde"):
+    def __init__(self, input_dim, hidden_dim=256, time_dim=64, beta_min=0.1, beta_max=20.0, mode="sde"):
         super().__init__()
 
         #Will use linear beta scheduler
         self.beta_min = beta_min
         self.beta_max = beta_max
 
-        self.score_model = ScoreNet(input_dim=input_dim, hidden_dim=hidden_dim,)
+        self.score_model = ScoreNet(input_dim=input_dim, hidden_dim=hidden_dim, time_dim=time_dim)
 
         self.mode=mode
         self.input_dim = input_dim
@@ -1141,12 +1143,12 @@ class model_score_SDE(nn.Module):
         score = self.score_model(xt, t)
 
         '''
-        #Loss is sigma**2 |s(x,t)-eps/sigma|
+        #Loss is sigma**2 |s(x,t)-eps/sigma|         score-matching
         target = -epsilon / sigma.unsqueeze(-1)
         loss = (sigma[:, None]**2 * (score - target)**2).mean()
         '''
 
-        #Loss is |epsilon_theta-eps|
+        #Loss is |epsilon_theta-eps|        diffusion
         target = -epsilon
         pred = sigma[:, None] * score
         loss = F.mse_loss(pred, target,reduction="none")
@@ -1158,10 +1160,10 @@ class model_score_SDE(nn.Module):
 
     @torch.no_grad()
     def generate(self, out_dimensions, num_steps=1000,):
-        '''
+        """
         Run Euler–Maruyama forward numerical integration
         dx=(-0.5beta(t)-beta(t) nabla_x log(p_t(x)) )dt + sqrt(beta(t)) dw
-        '''
+        """
 
         batch_size = out_dimensions[0]
 
