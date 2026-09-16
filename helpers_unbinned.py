@@ -563,12 +563,13 @@ def load_checkpoint_args(args, ignore_args=[], checkpoint_model=None):
 
     return checkpoint_info
 
-def load_checkpoint_model(shape, args, checkpoint_model=None):
+def load_checkpoint_model(shape, args, device, checkpoint_model=None):
     if checkpoint_model==None:
         checkpoint_info = load_checkpoint(args)
 
     model = build_unbinned_model(shape, args)
     model.load_state_dict(checkpoint_info["model_state_dict"])
+    model.to(device)
 
     return model
 
@@ -765,7 +766,7 @@ def parse_input():
     parser.add_argument("--optimizer", type=str, default="adamw", choices=["adam", "adamw"], help="Optimizer")
     parser.add_argument("--weight-decay", type=float, default=1e-2, help="Optimizer weight decay")
     parser.add_argument("--grad-clip", type=float, default=1.0, help="Gradient norm clipping. Set <=0 to disable")
-    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "cos_damping", "cosine", "warmup_cosine", "plateau"], help="Learning rate scheduler")
+    parser.add_argument("--scheduler", type=str, default="warmup_cosine", choices=["none", "cos_damping", "cosine", "warmup_cosine", "plateau"], help="Learning rate scheduler")
     parser.add_argument("--scheduler-min-lr", type=float, default=1e-6, help="Minimum LR for cosine/plateau schedulers")
     parser.add_argument("--plateau-factor", type=float, default=0.5, help="LR multiplier for --scheduler plateau")
     parser.add_argument("--plateau-patience", type=int, default=2, help="Plateau epochs before reducing LR")
@@ -774,13 +775,13 @@ def parse_input():
     parser.add_argument("--cos-damping-final-lr", type=float, default=5e-5, help="Final LR for cosine damping")
     parser.add_argument("--cos-damping-amplitude", type=float, default=0.0, help="Cosine oscillation amplitude")
     parser.add_argument("--cos-damping-period-epochs", type=float, default=1.0, help="Cosine oscillation period in epochs")
-    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
     parser.add_argument("--seed", type=int, default=0, help="Random seed (overrides helpers_train default if you want)")
     parser.add_argument("--test", action="store_true", default=False, help="Setup with reduced training size for easy debugging/testing")
 
     # general model parameters
     parser.add_argument("--embed-dim", type=int, default=256, help="Transformer embedding dim")
-    parser.add_argument("--time-dim", type=int, default=64, help="Transformer embedding dim")
+    parser.add_argument("--time-dim", type=int, default=32, help="Transformer embedding dim")
 
     # transformer hyperparams (keep defaults = your current test_model defaults)
     parser.add_argument("--num-heads", type=int, default=2, help="Transformer num heads")
@@ -788,7 +789,7 @@ def parse_input():
     parser.add_argument("--ff-dim", type=int, default=256, help="Transformer feedforward dim")
 
     # MDN parameters
-    parser.add_argument("--MDN-nmix", type=int, default=25, help="Number of MDN mixtures")
+    parser.add_argument("--MDN-nmix", type=int, default=10, help="Number of MDN mixtures")
 
     # CNF paramaters
     parser.add_argument("--cnf-hidden", type=int, default=128, help="CNF vector field hidden size")
@@ -840,5 +841,11 @@ def parse_input():
     args=parser.parse_args()
     if args.plot_dir is None:
         args.plot_dir = args.log_dir
+
+    if args.architecture=="Transformer" or args.architecture=="MDN":
+        args.mixed_loss=True
+
+    if args.input_format=="4vec":
+        args.preprocess="log"
 
     return args
