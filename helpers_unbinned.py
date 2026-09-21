@@ -374,20 +374,25 @@ def _config_get(args_or_dict, key, default=None):
 # Load model
 # ---------------------------------------------------------------------
 def build_unbinned_model(input_dim, args_or_dict):
+
+    pad_value=-1
+    if args_or_dict.input_format=="4vec":
+        if args_or_dict.preprocess=="standardize":
+            pad_value=-10
+        if args_or_dict.preprocess=="log":
+            pad_value=-10
+
     if args_or_dict.architecture=="MDN":
-        pad_value=-1
         max_value=10
         if args_or_dict.input_format=="4vec":
             if args_or_dict.preprocess==None:
                 max_value=3e3
             elif args_or_dict.preprocess=="standardize":
                 max_value=50
-                pad_value=-10
             elif args_or_dict.preprocess=="linearize":
                 max_value=1
             elif args_or_dict.preprocess=="log":
                 max_value=11
-                pad_value=-10
 
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_dim[2],
@@ -413,10 +418,13 @@ def build_unbinned_model(input_dim, args_or_dict):
         )
     elif args_or_dict.architecture=="FM":
         return models_generative.model_FM(
-            input_dim=input_dim[1]*input_dim[2],
+            input_shape=input_dim,
             hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             steps=_as_int(_config_get(args_or_dict,"fm_steps")),
             time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+            cond_dim=_as_int(_config_get(args_or_dict,"fm_cond_dim")),
+            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+            pad_value=pad_value,
         )
     elif args_or_dict.architecture=="NF":
         return models_generative.model_normalizing_flow(
@@ -797,6 +805,7 @@ def parse_input():
 
     # FM parameters
     parser.add_argument("--fm-steps", type=int, default=25, help="FM Euler steps for integration")
+    parser.add_argument("--fm-cond-dim", type=int, default=16, help="Size of mulitplicity embedding dimenson")
 
     # NF paramaters
     parser.add_argument("--nflows", type=int, default=10, help="NF steps")
@@ -841,11 +850,5 @@ def parse_input():
     args=parser.parse_args()
     if args.plot_dir is None:
         args.plot_dir = args.log_dir
-
-    if args.architecture=="Transformer" or args.architecture=="MDN":
-        args.mixed_loss=True
-
-    if args.input_format=="4vec":
-        args.preprocess="log"
 
     return args

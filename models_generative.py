@@ -210,7 +210,7 @@ class model_autoregressive_transformer(nn.Module):
       else:
           return self.deembed(encoded) # (batch, seq_len, feature_dim)
 
-  def mse_loss(self, pred, targets, pad_mask=None):
+  def mse_loss(self, pred, targets, pad_mask=None, lambda_bce=1):
       #pad_mask is 1 for padded values
 
       if self.multi_head:
@@ -234,7 +234,7 @@ class model_autoregressive_transformer(nn.Module):
           bce_mask=pad_mask & ~(bce_mask.bool()) #mask include all real values, plus first padded
           loss_bce = loss_bce.masked_fill(bce_mask, 0.0)
 
-          return loss_reg+1.0*loss_bce
+          return loss_reg+lambda_bce*loss_bce
       else:
           loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
           return loss_fn(pred,targets).sum(dim=-1) #Sum over all the training sample
@@ -306,7 +306,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       else:
           return torch.cat([alpha.unsqueeze(-1),mu,log_sigma2],dim=-1)
 
-  def nll_loss(self, inputs, targets, pad_mask=None):
+  def nll_loss(self, inputs, targets, pad_mask=None, lambda_bce=1.0):
     if self.multi_head:
          inputs,exists=inputs
     ninputs=targets.shape[-1]
@@ -347,7 +347,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       bce_mask=pad_mask & ~(bce_mask.bool()) #mask include all real values, plus first padded
       loss_bce = loss_bce.masked_fill(bce_mask, 0.0)
 
-      return loss_reg + 1.0*loss_bce
+      return loss_reg + lambda_bce*loss_bce
     else:
       return -log_prob.sum() #Sum over all the training sample
 
@@ -533,25 +533,30 @@ class FlowMatching(nn.Module):
     """
     Code running the full flow mathing algorithm
     """
-    def __init__( self, x_dim, c_dim, hidden_dim, time_dim, steps):
+    def __init__(self, x_dim, c_dim, hidden_dim, time_dim, steps, n_max=20):
         super().__init__()
 
         self.x_dim=x_dim
         self.steps=steps
 
         #Get the vector field prediction v
-        self.vf=VectorFieldNN( x_dim, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
-        #self.vf=VectorFieldTrans( x_dim, c_dim=c_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, time_dim=time_dim)
+        self.vf=VectorFieldNN(x_dim, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+        #self.vf=VectorFieldTrans(x_dim, c_dim=c_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, time_dim=time_dim)
 
         #Set the timegrid
         self.register_buffer( "time_grid", torch.linspace(0,1,steps+1))
 
-    def loss(self, x1):
+        #Set the multiplicity embedding
+        if c_dim>0:
+            self.n_emb = nn.Embedding(n_max + 1, c_dim)
+
+    def loss(self, x1, valid, N=None):
         B=x1.shape[0]
         device=x1.device
 
         #sample the original gaussian and a random time
-        x0=torch.randn_like(x1)
+        x1 = x1 * valid
+        x0=torch.randn_like(x1)* valid 
         t=torch.rand(B,1,device=device)
 
         # probability path at time t
@@ -565,34 +570,55 @@ class FlowMatching(nn.Module):
         u=x1-x0
 
         #Get the prediction at time t
-        pred=self.vf(xt,t)
+        if N is not None:
+            c=self.n_emb(N)
+        else:
+            c=None
+        pred=self.vf(xt,t,c)
 
+        '''
         #MSE loss
-        loss = F.mse_loss(pred,u,reduction='none')
+        if pad_mask == None:
+            loss = F.mse_loss(pred,u,reduction='none')
+        else:
+            loss = F.mse_loss(pred,u,reduction='none')
+            loss=loss.masked_fill(pad_mask, 0.0) #FM loss
 
         return loss
+        '''
+
+        #FIXME, new and masking of valid above
+        se = ((pred - u) ** 2) * valid
+        # mean over valid entries per jet, so jets with many constituents don't dominate
+        return se.sum(dim=-1) / valid.sum(dim=-1).clamp(min=1)
 
     @torch.no_grad()
-    def generate(self,batch_size):
+    def generate(self, batch_size, valid, N=None):
         device=next(self.parameters()).device
 
         #Get the intial x_0 distribution
-        x=torch.randn(batch_size, self.x_dim, device=device)
+        x=torch.randn(batch_size, self.x_dim, device=device) * valid
 
         #make the time grid
         t=self.time_grid.to(device)
 
+        #make the multiplicity embedding
+        if N is not None:
+            c=self.n_emb(N)
+        else:
+            c=None
+
         #push forward x_0 to x_1 via RK4 algorith and the learned velocity
         dt=1/self.steps
         for k in range(len(t)-1):
-            k1=self.vf(x,t[k])
-            k2=self.vf( x+0.5*dt*k1, t[k]+0.5*dt)
-            k3=self.vf( x+0.5*dt*k2, t[k]+0.5*dt)
-            k4=self.vf( x+dt*k3, t[k]+dt)
+            k1=self.vf(x, t[k], c) * valid
+            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, c) * valid
+            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, c) * valid
+            k4=self.vf(x+dt*k3, t[k]+dt, c) * valid
 
             x=x+dt*(k1+2*k2+2*k3+k4)/6
 
-        return x
+        return x * valid
 
 class model_FM(nn.Module):
     """
@@ -603,25 +629,70 @@ class model_FM(nn.Module):
 
     Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
     """
-    def __init__(self, input_dim, hidden_dim=128, time_dim=64, steps=50):
+    def __init__(self, input_shape, hidden_dim=128, time_dim=64, cond_dim=16, steps=50, multi_head=False, pad_value=-1):
         super().__init__()
 
-        self.fm=FlowMatching(x_dim=input_dim, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps)
+        self.n_max=input_shape[1]
+        self.n_feat=input_shape[2]
+        self.pad_value=pad_value
+        self.multi_head=multi_head
 
-    def forward(self,x):
+        if self.multi_head:
+            self.fm=FlowMatching(x_dim=self.n_max*self.n_feat, c_dim=cond_dim, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, n_max=self.n_max) # learn density estimation p(x|N)
+            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater fromN = 0..n_max
+
+        else:
+            self.fm=FlowMatching(x_dim=self.n_max*self.n_feat, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps) # learn density estimation p(x)
+
+    def forward(self, x, valid=None):
         t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
 
-        return self.fm.vf(x,t)
+        if self.multi_head:
+            N = valid.view(-1, self.n_max, self.n_feat)[..., 0].sum(-1).long() #count number of non-pad entries
+            c=self.fm.n_emb(N)
+        else: 
+            c=None
+        return self.fm.vf(x,t,c)
 
-    def mse_loss(self,x):
-        return self.fm.loss(x)
+    def mse_loss(self, x, pad_mask=None, lambda_bce=1.0):
+
+        if self.multi_head:
+            #Number of predictions loss p(N)
+            valid = (~pad_mask).float() #[B, Nconst*Nfeat]
+            N = valid.view(-1, self.n_max, self.n_feat)[..., 0].sum(-1).long() #count number of non-pad entries
+            Npred=self.count_logits[None].expand(x.shape[0], -1)
+            count_loss = F.cross_entropy(Npred, N, reduction="none")  # [B]
+
+            #Flow mathcing loss p(x | N)
+            FM_loss=self.fm.loss(x, valid, N) #[Nbatch, Nconst*Nfeat]
+
+            return FM_loss.sum()+lambda_bce*count_loss.sum()
+        else:
+            valid=torch.ones(x.shape, device=x.device)
+            return self.fm.loss(x, valid).sum()
 
     @torch.no_grad()
     def generate(self,out_dimensions):
 
-        samples=self.fm.generate(batch_size=out_dimensions[0])
+        if self.multi_head:
 
-        return samples.view(out_dimensions)
+            #Generate the number of predictions
+            N = torch.distributions.Categorical(logits=self.count_logits).sample((out_dimensions[0],))
+            valid= torch.arange(self.n_max, device=N.device)[None, :] < N[:, None] # [B, n_max]
+            valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, D]
+
+            #Generate the samples
+            samples=self.fm.generate(out_dimensions[0], valid, N)
+
+            #Return the samples masked 
+            samples = samples + (1 - valid) * self.pad_value #mask the output
+            return samples.view(out_dimensions)
+
+        else:
+            device = next(self.parameters()).device
+            valid=torch.ones([out_dimensions[0],out_dimensions[1]*out_dimensions[2]], device=device)
+            samples=self.fm.generate(out_dimensions[0], valid)
+            return samples.view(out_dimensions)
 
 # ---------------------------------------------------------------------
 # Custom vanilla Normlazing flows, better to use nflows package
