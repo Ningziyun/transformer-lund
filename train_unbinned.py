@@ -178,7 +178,7 @@ if __name__ == "__main__":
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
-    if args.architecture=="FM" and args.mixed_loss:
+    if args.architecture=="FM" and args.multi_loss:
       print("Input shape,",X_example.shape, mask_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example,mask_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example,mask_example).shape,flush=True)
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     elif args.architecture=="Transformer" or args.architecture=="MDN":
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      if args.mixed_loss:
+      if args.multi_loss:
         print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
       else:
         print("Output shape,", model(X_example).shape, flush=True)

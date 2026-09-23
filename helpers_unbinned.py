@@ -138,21 +138,21 @@ class constit_relative_dataset(torch.utils.data.Dataset):
 def get_loaders(args):
 
   if args.input_format=="ktdr":
-    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="4vec":
-    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="relvec":
-    train_dataset = constit_relative_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    train_dataset = constit_relative_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_relative_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    test_dataset = constit_relative_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   return train_loader,test_loader
@@ -314,7 +314,7 @@ def step_scheduler(scheduler, args, metric=None):
 def make_optimizer(args, model):
     optimizer_name = getattr(args, "optimizer", "adam")
     if optimizer_name == "adamw":
-        if args.mixed_loss: #Gradient descent on a plain categorical converges slowly and can be biased to zero in AdamW weight decay. Turn off weight-decay and give reasonable LR
+        if args.multi_loss: #Gradient descent on a plain categorical converges slowly and can be biased to zero in AdamW weight decay. Turn off weight-decay and give reasonable LR
             return torch.optim.AdamW([
                     {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
                     {"params": [p for n, p in model.named_parameters() if n == "count_logits"], "lr": 1e-2, "weight_decay": 0.0},
@@ -406,7 +406,7 @@ def build_unbinned_model(input_dim, args_or_dict):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
             max_range=max_value,
             pad_value=pad_value,
         )
@@ -428,7 +428,7 @@ def build_unbinned_model(input_dim, args_or_dict):
             steps=_as_int(_config_get(args_or_dict,"fm_steps")),
             time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
             cond_dim=_as_int(_config_get(args_or_dict,"fm_cond_dim")),
-            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
             pad_value=pad_value,
         )
     elif args_or_dict.architecture=="NF":
@@ -465,7 +465,7 @@ def build_unbinned_model(input_dim, args_or_dict):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
         )
 
 def save_model(model, log_dir, name):
@@ -771,7 +771,7 @@ def parse_input():
 
     # Architectures
     parser.add_argument("--architecture","-a",type=str, choices=["Transformer","MDN","NF","CNF","Diffusion","SDE","FM"], help="Architecture to run")
-    parser.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
+    parser.add_argument("--multi-loss", action="store_true", default=False, help="Use multile objective loss (default: False)")
 
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
