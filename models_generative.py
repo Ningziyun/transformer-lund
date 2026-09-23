@@ -151,7 +151,7 @@ class VectorFieldNN(nn.Module):
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
-    if c==None:
+    if c is None:
         zct = torch.cat([z, tt], dim=-1)
     else:
         zct = torch.cat([z, c, tt], dim=-1) 
@@ -512,11 +512,14 @@ class model_CNF(nn.Module):
     self.cnf = CNFDynamics(x_dim=input_dim, c_dim=0, hidden_dim=cnf_hidden, steps=steps, time_dim=time_dim)
 
   def forward(self, x):
+    x=x.view(x.shape[0], -1)
+
     # Safe forward for debugging / torchinfo; does NOT compute likelihood.
     t = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
     return self.cnf.vf(x, t)
 
   def nll_loss(self, x):
+    x=x.view(x.shape[0], -1)
     return -self.cnf(x)
 
   @torch.no_grad()
@@ -636,34 +639,46 @@ class model_FM(nn.Module):
         self.n_feat=input_shape[2]
         self.pad_value=pad_value
         self.multi_head=multi_head
+        self.fitted=False
 
         if self.multi_head:
             self.fm=FlowMatching(x_dim=self.n_max*self.n_feat, c_dim=cond_dim, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, n_max=self.n_max) # learn density estimation p(x|N)
-            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater fromN = 0..n_max
+            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater fromN = 0 ... n_max
 
         else:
             self.fm=FlowMatching(x_dim=self.n_max*self.n_feat, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps) # learn density estimation p(x)
 
     def forward(self, x, valid=None):
+        x=x.view(x.shape[0], -1)
         t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
 
         if self.multi_head:
-            N = valid.view(-1, self.n_max, self.n_feat)[..., 0].sum(-1).long() #count number of non-pad entries
+            N = valid.sum(dim=-1).long() #count number of non-pad entries
             c=self.fm.n_emb(N)
         else: 
             c=None
         return self.fm.vf(x,t,c)
 
+    def fit_count_prior(self, N_train, smoothing=0.0): #fit the mulitplicity logits right to data
+        with torch.no_grad():
+            counts = torch.bincount(N_train, minlength=self.n_max + 1).float() + smoothing
+            self.count_logits.data=counts
+            self.fitted=True
+
     def mse_loss(self, x, pad_mask=None, lambda_bce=1.0):
+        x=x.view(x.shape[0], -1)
 
         if self.multi_head:
+
             #Number of predictions loss p(N)
-            valid = (~pad_mask).float() #[B, Nconst*Nfeat]
-            N = valid.view(-1, self.n_max, self.n_feat)[..., 0].sum(-1).long() #count number of non-pad entries
+            valid = (~pad_mask).float() #[B, Nconst]
+            N = valid.sum(dim=-1).long() #count number of non-pad entries
+            #if not self.fitted: self.fit_count_prior(N)
+            valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, Nconst*Nfeat]
             Npred=self.count_logits[None].expand(x.shape[0], -1)
             count_loss = F.cross_entropy(Npred, N, reduction="none")  # [B]
 
-            #Flow mathcing loss p(x | N)
+            #Flow matching loss p(x | N)
             FM_loss=self.fm.loss(x, valid, N) #[Nbatch, Nconst*Nfeat]
 
             return FM_loss.sum()+lambda_bce*count_loss.sum()
@@ -942,12 +957,14 @@ class model_normalizing_flow(nn.Module): #Using normflows package
         """
         Compute log probability of data.
         """
+        x=x.view(x.shape[0], -1)
         return self.flow.log_prob(x)
 
     def nll_loss(self, x):
         """
         Compute log likelihood.
         """
+        x=x.view(x.shape[0], -1)
         return -self.flow.log_prob(x)
 
     def generate(self, out_dimensions):
@@ -1057,6 +1074,7 @@ class model_diffusion(nn.Module):
 
         batch_size = x.shape[0]
         device = x.device
+        x=x.view(batch_size, -1)
 
         # Random timestep per sample in [0, timesteps-1]
         t = torch.randint(0, self.time_steps, (batch_size,), device=device,)
@@ -1074,8 +1092,9 @@ class model_diffusion(nn.Module):
 
     def mse_loss(self, x):
         """
-        Kept for API compatibility with your flow model.
+        Kept for API compatibility with flow model
         """
+        x=x.view(x.shape[0], -1)
         return self.forward(x)
 
     # --------------------------------------------------------
@@ -1200,7 +1219,8 @@ class model_score_SDE(nn.Module):
     def forward(self, x0):
 
         B = x0.shape[0]
-        device = x0.device
+        device = x0.device 
+        x0=x0.view(B, -1)
 
         #Avoid t=0 in case sigma->0
         eps=1e-5
@@ -1227,6 +1247,7 @@ class model_score_SDE(nn.Module):
         return loss
 
     def mse_loss(self, x0):
+        x0=x.view(x0.shape[0], -1)
         return self.forward(x0)
 
     @torch.no_grad()

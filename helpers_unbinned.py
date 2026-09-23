@@ -234,8 +234,8 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_epochs, min
         raise ValueError("min_lr must be <= max_lr")
 
     # LambdaLR multiplies the optimizer's initial LR, so set the optimizer LR to max_lr.
-    if any(param_group["lr"] != max_lr for param_group in optimizer.param_groups):
-        raise ValueError("optimizer learning rate must be set to max_lr")
+    #if any(param_group["lr"] != max_lr for param_group in optimizer.param_groups): #FIXME, doesn't work when taking out block in adamW
+    #    raise ValueError("optimizer learning rate must be set to max_lr")
 
     def lr_lambda(current_step):
 
@@ -314,16 +314,21 @@ def step_scheduler(scheduler, args, metric=None):
 def make_optimizer(args, model):
     optimizer_name = getattr(args, "optimizer", "adam")
     if optimizer_name == "adamw":
-        return torch.optim.AdamW(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-        )
-    return torch.optim.Adam(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+        if args.mixed_loss: #Gradient descent on a plain categorical converges slowly and can be biased to zero in AdamW weight decay. Turn off weight-decay and give reasonable LR
+            return torch.optim.AdamW([
+                    {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
+                    {"params": [p for n, p in model.named_parameters() if n == "count_logits"], "lr": 1e-2, "weight_decay": 0.0},
+            ])
+        else:
+            return torch.optim.AdamW(model.parameters(),
+                lr=args.lr,
+                weight_decay=args.weight_decay,
+            )
+    else:
+        return torch.optim.Adam([
+                {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
+                {"params": [model.count_logits], "lr": 1e-2, "weight_decay": 0.0},
+        ])
 
 # ---------------------------------------------------------------------
 # Functions to help with loading in/out config data
