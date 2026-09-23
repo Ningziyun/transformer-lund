@@ -720,7 +720,7 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
         e_weights = ( pt[:, :, None] * pt[:, None, :] / (jet_pt[:, None, None]**2+eps))
 
         #Mask the upper-triangle and plot   dim=[Njet, Npairs]
-        triangle_mask = np.triu(np.ones((jets.shape[1], jets.shape[1]), dtype=bool))
+        triangle_mask = np.triu(np.ones((jets.shape[1], jets.shape[1]), dtype=bool),k=1)
 
         #Mask the padded constituents [Njet, Nconst]
         const_mask = jets[..., 0] > -1
@@ -760,10 +760,10 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
     eps = 1e-12
     plots=[ [] for _ in range(Nplots)]
     for ii,jets in enumerate(plot_inputs):
-        # Mask padded constituents and info one
-        mask = (jets[..., 0] > -1) & np.all(np.isfinite(jets), axis=-1) & (np.max(np.abs(jets), axis=-1) < 1e6) # Set padded values to zero for numerical safety
+        # Valid mask, to set padded values to zerfor numerical safety
+        mask = (jets[..., 0] > -1) & np.all(np.isfinite(jets), axis=-1) & (np.max(np.abs(jets), axis=-1) < 1e6)
 
-        # Constituent four-vectors
+        # Constituent four-vectors      dim=[Njet, Nconst]
         E  = np.where(mask, jets[..., 0], 0.0)
         px = np.where(mask, jets[..., 1], 0.0)
         py = np.where(mask, jets[..., 2], 0.0)
@@ -772,39 +772,40 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
         # Constituent multiplicity
         multiplicity = mask.sum(axis=1)
 
-        # Jet 4-vectior
+        # Jet 4-vector          dim=[Njet]
         jet_E  = E.sum(axis=1)
         jet_px = px.sum(axis=1)
         jet_py = py.sum(axis=1)
         jet_pz = pz.sum(axis=1)
         jet_pt = np.sqrt(jet_px**2 + jet_py**2)
 
-        jet_mass_squared = ( jet_E**2 - jet_px**2 - jet_py**2 - jet_pz**2)
+        jet_mass_squared = (jet_E**2 - jet_px**2 - jet_py**2 - jet_pz**2)
         jet_mass = np.sqrt(np.maximum(jet_mass_squared, 0.0)) # Numerical precision can occasionally make m^2 slightly negative
 
-        jet_p = np.sqrt( jet_px**2 + jet_py**2 + jet_pz**2)
+        jet_p = np.sqrt(jet_px**2 + jet_py**2 + jet_pz**2)
         #jet_eta = 0.5 * np.log((jet_p + jet_pz + eps) / (jet_p - jet_pz + eps))
-        jet_eta = np.arcsinh( jet_pz / np.maximum(jet_pt, eps))
+        jet_eta = np.arcsinh(jet_pz / np.maximum(jet_pt, eps))
         jet_phi = np.arctan2(jet_py, jet_px)
 
         # Constituent eta and phi
         const_pt = np.sqrt(px**2 + py**2)
         const_p = np.sqrt(px**2 + py**2 + pz**2)
         #const_eta = 0.5 * np.log((const_p + pz + eps) / (const_p - pz + eps))
-        const_eta = np.arcsinh( pz / np.maximum(const_pt, eps))
+        const_eta = np.arcsinh(pz / np.maximum(const_pt, eps))
         const_phi = np.arctan2(py, px)
 
         # Delta R(constituent, jet)
         deta = const_eta - jet_eta[:, None]
+        deta[~mask]=0
         dphi = const_phi - jet_phi[:, None]
         dphi = np.arctan2( np.sin(dphi), np.cos(dphi)) # Wrap Delta phi into (-pi, pi], remove padded_const
+        dphi[~mask]=0
         constituent_dR = np.sqrt(deta**2 + dphi**2)
-        constituent_dR = constituent_dR[mask] #mask out the padded values
 
         plots[0].append(jet_pt)
         plots[1].append(jet_mass)
         plots[2].append(multiplicity)
-        plots[3].append(constituent_dR)
+        plots[3].append(constituent_dR[mask])
 
     #Get ranges to use
     mins=np.zeros(Nplots)
