@@ -156,10 +156,11 @@ if __name__ == "__main__":
     print(f"Running on device: {device}", flush=True)
 
     #If continuning
-    if args.contin:
-        checkpoint_info=load_checkpoint_args(args)
-    else:
-        checkpoint_info = None
+    if args.model_checkpoint:
+        ignore_list=[]
+        for argv in sys.argv[1:]:
+            if "--" in argv: ignore_list.append(argv.replace("--","").replace("-","_"))
+        checkpoint_info = load_checkpoint_args(args, ignore_args=ignore_list)
 
     # load and preprocess data
     print(f"Loading training set", flush=True)
@@ -167,8 +168,8 @@ if __name__ == "__main__":
     X_example,mask_example,_=format_input(next(iter(train_loader)), args, device)
 
     # construct model
-    if args.contin:
-        model = load_checkpoint_model(X_example.shape, args)
+    if args.model_checkpoint:
+        model = load_checkpoint_model(X_example.shape, args, device, checkpoint_info)
     else:
         model = build_unbinned_model(X_example.shape, args)
     model.to(device)
@@ -198,13 +199,13 @@ if __name__ == "__main__":
     optimizer = make_optimizer(args, model)
     scheduler = make_scheduler(args, optimizer)
     start_epoch = 0
-    if checkpoint_info is not None:
+    if args.model_checkpoint:
       if checkpoint_info.get("optimizer_state_dict", None) is not None:
         optimizer.load_state_dict(checkpoint_info["optimizer_state_dict"])
       if scheduler is not None and checkpoint_info.get("scheduler_state_dict", None) is not None:
         scheduler.load_state_dict(checkpoint_info["scheduler_state_dict"])
       start_epoch = int(checkpoint_info.get("epoch", -1)) + 1
-      print(f"Resuming after ep {start_epoch}", flush=True)
+      print(f"Resuming after epoch {start_epoch}", flush=True)
 
     #Store loss and etc for per-epoch loop
     best_loss=float("inf")
@@ -214,9 +215,8 @@ if __name__ == "__main__":
     test_losses=[]
     train_losses=[]
     lr_history=[]
-    loss_curves={}
     stopped_nonfinite = False
-    if checkpoint_info is not None:
+    if args.model_checkpoint:
       best_loss = checkpoint_info.get("best_loss", best_loss)
       if best_loss is None:
         best_loss = float("inf")
@@ -226,7 +226,6 @@ if __name__ == "__main__":
       test_losses = list(checkpoint_info.get("test_losses", []))
       train_losses = list(checkpoint_info.get("train_losses", []))
       lr_history = list(checkpoint_info.get("lr_history", []))
-      loss_curves = dict(checkpoint_info.get("loss_curves", {}))
     epochs=args.epochs 
 
     # ---------------------------------------------------------------------
@@ -282,7 +281,6 @@ if __name__ == "__main__":
         is_best=improved,
         train_losses=train_losses,
         test_losses=test_losses,
-        loss_curves=loss_curves,
         lr_history=lr_history,
         best_epoch=best_epoch,
         best_loss=best_loss,
@@ -298,7 +296,7 @@ if __name__ == "__main__":
     # Save info
     # ---------------------------------------------------------------------
     #Make loss plots and scheduler plots
-    loss_plot(train_losses,test_losses,out_dir=args.log_dir,loss_curves=loss_curves)
+    loss_plot(train_losses,test_losses,out_dir=args.log_dir)
     save_lr_csv(lr_history, out_dir=args.log_dir)
     save_lr_plot(lr_history, out_dir=args.log_dir)
 

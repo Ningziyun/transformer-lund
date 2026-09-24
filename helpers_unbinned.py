@@ -390,7 +390,7 @@ def build_unbinned_model(input_dim, args_or_dict):
     if args_or_dict.architecture=="MDN":
         max_value=10
         if args_or_dict.input_format=="4vec":
-            if args_or_dict.preprocess==None:
+            if args_or_dict.preprocess is None:
                 max_value=3e3
             elif args_or_dict.preprocess=="standardize":
                 max_value=50
@@ -468,11 +468,11 @@ def build_unbinned_model(input_dim, args_or_dict):
             multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
         )
 
-def save_model(model, log_dir, name):
-    torch.save(model, os.path.join(log_dir, f"model_{name}.pt"))
+def save_torchpickle(model, model_path):
+    torch.save(model, model_path)
     return
 
-def load_model(model_path, map_location="cpu"):
+def load_torchpickle(model_path, map_location="cpu"):
     #Note that torch load just unpickles a dictionary, which can be our checkpoint. The "model_state_dict" key holds the weights
     try:
         return torch.load(model_path, map_location=map_location, weights_only=False)
@@ -492,7 +492,6 @@ def save_checkpoint(
     ckpt_name=None,
     train_losses=None,
     test_losses=None,
-    loss_curves=None,
     lr_history=None,
     scheduler=None,
     best_epoch=None,
@@ -532,52 +531,45 @@ def save_checkpoint(
             {
                 "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
                 "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-                "scheduler": _config_get(args, "scheduler", "none"),
-                "optimizer": _config_get(args, "optimizer", "adam"),
-                "weight_decay": _config_get(args, "weight_decay", 0.0),
-                "grad_clip": _config_get(args, "grad_clip", 0.0),
-                "lr": _config_get(args, "lr", None),
                 "current_lr": current_lr if current_lr is not None else (optimizer.param_groups[0]["lr"] if optimizer is not None else None),
-                "next_lr": optimizer.param_groups[0]["lr"] if optimizer is not None else None,
                 "train_losses": train_losses if train_losses is not None else [],
                 "test_losses": test_losses if test_losses is not None else [],
-                "loss_curves": loss_curves if loss_curves is not None else {},
                 "lr_history": lr_history if lr_history is not None else [],
             }
         )
 
     #Actually save it
     torch.save(checkpoint_info, ckpt_path)
+    save_torchpickle(checkpoint_info, ckpt_path)
     print(f"Saved checkpoint to {ckpt_path}", flush=True)
     if is_best:  # if best save to it's own file
         best_path=os.path.dirname(ckpt_path) +"/best.pt"
-        torch.save(checkpoint_info, best_path)
+        save_torchpickle(checkpoint_info, best_path)
         print(f"Saved new best checkpoint to {best_path}", flush=True)
     return ckpt_path
 
 def load_checkpoint(args):
-    if len(args.model_path) == 0:
-      raise ValueError("load_checkpoint requires --model-path")
-    load_path = args.model_path[0] if isinstance(args.model_path, list) else args.model_path
-    checkpoint_info = load_model(load_path)
+    if len(args.model_checkpoint) == 0:
+      raise ValueError("load_checkpoint requires --model-checkpoint")
+    load_path = args.model_checkpoint[0] if isinstance(args.model_checkpoint, list) else args.model_checkpoint
+    checkpoint_info = load_torchpickle(load_path)
 
     return checkpoint_info
 
 def load_checkpoint_args(args, ignore_args=[], checkpoint_model=None):
-    if checkpoint_model==None:
+    if checkpoint_model is None:
         checkpoint_info = load_checkpoint(args)
 
     #Load all the arguments
     checkpoint_info_args = checkpoint_info.get("args", {})
     for key in vars(args):
-      if key in checkpoint_info_args:
-        if key in ignore_args: continue
+      if key in checkpoint_info_args and not key in ignore_args:
         setattr(args, key, checkpoint_info_args[key])
 
     return checkpoint_info
 
-def load_checkpoint_model(shape, args, device, checkpoint_model=None):
-    if checkpoint_model==None:
+def load_checkpoint_model(shape, args, device, checkpoint_info=None):
+    if checkpoint_info is None:
         checkpoint_info = load_checkpoint(args)
 
     model = build_unbinned_model(shape, args)
@@ -666,7 +658,7 @@ def save_lr_plot(lr_history, out_dir=""):
     plt.close(fig)
     print(f"Plotting learning rate to {out_dir}/lr_vs_epoch.pdf")
 
-def loss_plot(loss_train,loss_test,out_dir="./Plots/", loss_curves=None):
+def loss_plot(loss_train,loss_test,out_dir="./Plots/"):
 
   if not os.path.exists(out_dir):
     os.makedirs(out_dir)
@@ -713,7 +705,7 @@ def loss_plot(loss_train,loss_test,out_dir="./Plots/", loss_curves=None):
   plt.close(fig)
 
   print(f"Plotting loss to {out_dir}/loss_vs_epoch.pdf")
-  save_loss_csv( epoch_losses=loss_train, loss_curves={"test_loss": loss_test, **(loss_curves or {})}, out_dir=out_dir,)
+  save_loss_csv( epoch_losses=loss_train, loss_curves={"test_loss": loss_test}, out_dir=out_dir,)
 
 # ---------------------------------------------------------------------
 # Arguments and metadata saving
@@ -726,26 +718,19 @@ def append_result_metadata(args, results):
             f.write(f"{k:20s} {v}\n")
 
 def save_argument_metadata(args):
-    #If continuing
-    if getattr(args, "contin", False):
-        os.makedirs(args.log_dir, exist_ok=True)
-        with open(os.path.join(args.log_dir, "arguments.txt"), "w") as f:
-            arg_dict = vars(args)
-            for k, v in arg_dict.items():
-                f.write(f"{k:20s} {v}\n")
-        return
-
-    #enumerate up the output directory if it exists
-    log_dir = args.log_dir
-    i = 0
-    while os.path.isdir(log_dir):
-        i += 1
-        log_dir = args.log_dir + f"_{i}"
-    if args.plot_dir==args.log_dir: args.plot_dir=log_dir
-    args.log_dir = log_dir
+    #enumerate up the output directory if it exists, only do if not continueing
+    if not getattr(args, "model_checkpoint", None):
+        log_dir = args.log_dir
+        i = 0
+        while os.path.isdir(log_dir):
+            i += 1
+            log_dir = args.log_dir + f"_{i}"
+        if args.plot_dir==args.log_dir: args.plot_dir=log_dir
+        args.log_dir = log_dir
 
     #Loop over arguments and save them
-    os.makedirs(args.log_dir)
+    if not os.path.isdir(args.log_dir):
+        os.makedirs(args.log_dir)
     with open(os.path.join(args.log_dir, "arguments.txt"), "w") as f:
         arg_dict = vars(args)
         for k, v in arg_dict.items():
@@ -837,8 +822,7 @@ def parse_input():
     parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
     parser.add_argument("--plot-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
     parser.add_argument("--save-mode", type=str, default="full", choices=["full", "model", "none"], help="Saved training artifact: full info, model-state only, or none")
-    parser.add_argument("--contin", action="store_true", default=False,help="Continue training from a saved model")
-    parser.add_argument("--model-path", "--checkpoint", dest="model_path", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
+    parser.add_argument("--model-checkpoint", "--checkpoint", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
     
     # plotting options
     parser.add_argument("--validation-size",type=int, default=100000, help="How many images to generate and make plots for")
