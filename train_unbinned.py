@@ -20,9 +20,8 @@ def evaluate_loss(model,X,mask,args):
     w=torch.ones(X.shape[0:-1],device=device) #dim=[Nbatch,Nconst]
 
   #For all flow-based models
-  if args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
+  if args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF":
     w2= w.repeat_interleave(X.shape[-1], dim=-1)
-    X = X.view(X.shape[0], -1)
 
   #All the specifics of the loss function for each model
   if args.architecture=="NF":
@@ -38,7 +37,8 @@ def evaluate_loss(model,X,mask,args):
     loss = (model.nll_loss(X)*w2).sum()
     return loss,w.sum()
   elif args.architecture=="FM":
-    loss = (model.mse_loss(X)*w2).sum()
+    #loss = (model.mse_loss(X,mask)*w2).sum()
+    loss=model.mse_loss(X, mask)
     return loss,w.sum()
 
   #Auto-regressive models
@@ -178,15 +178,18 @@ if __name__ == "__main__":
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
-    if args.architecture=="NF" or  args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
-      X_example = X_example.view(X_example.shape[0], -1)
+    if args.architecture=="FM" and args.multi_loss:
+      print("Input shape,",X_example.shape, mask_example.shape, flush=True)
+      modelstats=summary(model, input_data=[X_example,mask_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(X_example,mask_example).shape,flush=True)
+    elif args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape,flush=True)
     elif args.architecture=="Transformer" or args.architecture=="MDN":
       print("Input shape,",X_example.shape, flush=True)
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      if args.mixed_loss:
+      if args.multi_loss:
         print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
       else:
         print("Output shape,", model(X_example).shape, flush=True)

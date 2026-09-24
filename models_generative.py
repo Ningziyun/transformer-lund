@@ -74,49 +74,64 @@ class VectorFieldTrans(nn.Module):
   z: [B, D]
   c: [B, C] (context)
   """
-  def __init__(self, z_dim, c_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64):
+  def __init__(self, n_feat, n_max, c_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64):
     super().__init__()
-    self.time_dim=time_dim
 
-    self.input_dim=z_dim
+    self.n_feat=n_feat
+    self.n_max=n_max
     self.embed_dim=embed_dim
     self.ff_dim=ff_dim
     self.num_heads=num_heads
     self.num_layers=num_layers
+    self.time_dim=time_dim
+    self.c_dim=c_dim
 
     #Add the embedding layer
-    self.embed = nn.Sequential(nn.Linear(self.input_dim + self.time_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
+    self.embed = nn.Sequential(nn.Linear(self.n_feat, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
 
     #specify the transformer block and number of layers
     encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.1, batch_first=True)
     self.encoder = nn.TransformerEncoder(encoder_layer, self.num_layers)
 
     #Now de-embed back to original output
-    self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.input_dim))
+    self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.n_feat))
+    #nn.init.zeros_(self.deembed.weight)   # start near v = 0, like a fresh flow
+    #nn.init.zeros_(self.deembed.bias)
 
     self.time_emb = Sinusoidal_Time_Embedding(time_dim)
+    self.time_proj = nn.Linear(time_dim, embed_dim)
 
-  def forward(self, z, t, c=None):
+    self.n_proj = nn.Linear(c_dim, embed_dim)
+
+  def forward(self, z, t, c, N):
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
+    tt=self.time_proj(tt)[:, None, :] #put into same embedding/dimension as input
 
-    z=torch.cat([z,tt],dim=1)
-
-    # Embed the N-dim vector into the embedded space
+    # Embed the input to the latent space
     z=self.embed(z) # (batch, seq_len, embed_dim)
 
-    # Causal mask prevents looking ahead
-    seq_len = z.shape[1] # (batch, seq_len, feature_dim)
-    casual_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(z.device)
+    if c is None:
+        zct = torch.cat([z, tt], dim=1)
+        n_extra=1
+        valid = torch.ones(z.shape[0], self.n_feat, dtype=torch.bool, device=z.device)
+    else:
+        c = self.n_proj(c)[:, None, :] #put into same embedding/dimension as input
+        zct = torch.cat([z, c, tt], dim=1)
+        n_extra=2
+        valid=torch.arange(self.n_max, device=z.device)[None, :] < N[:, None]
+
+    #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
+    pad = torch.cat([~valid, torch.zeros(z.shape[0], n_extra, dtype=torch.bool, device=z.device)], dim=1)
 
     #Go through encoder
-    z = self.encoder(z)#, mask=casual_mask)
+    zct = self.encoder(zct, src_key_padding_mask=pad)
 
-    #De-embed
-    z=self.deembed(z)
+    #De-embed, only get dimensions mathcing input
+    zct=self.deembed(zct[:,:-n_extra,:])
 
-    return z
+    return zct
 
 class VectorFieldNN(nn.Module):
   """
@@ -147,11 +162,11 @@ class VectorFieldNN(nn.Module):
         )
         self.time_emb = Sinusoidal_Time_Embedding(time_dim)
 
-  def forward(self, z, t, c=None):
+  def forward(self, z, t, c=None, N=None):
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
-    if c==None:
+    if c is None:
         zct = torch.cat([z, tt], dim=-1)
     else:
         zct = torch.cat([z, c, tt], dim=-1) 
@@ -164,7 +179,7 @@ class model_autoregressive_transformer(nn.Module):
   """
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
   """
-  def __init__(self, input_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_head=False, pad_value=-1):
+  def __init__(self, input_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, pad_value=-1):
       super(model_autoregressive_transformer, self).__init__()
 
       self.input_dim=input_dim
@@ -172,7 +187,7 @@ class model_autoregressive_transformer(nn.Module):
       self.ff_dim=ff_dim
       self.num_heads=num_heads
       self.num_layers=num_layers
-      self.multi_head=multi_head
+      self.multi_loss=multi_loss
       self.pad_value=pad_value
 
       #Add the embedding layer
@@ -188,7 +203,7 @@ class model_autoregressive_transformer(nn.Module):
       #Now de-embed back to original output
       self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.input_dim))
 
-      if self.multi_head:
+      if self.multi_loss:
         self.stop_head = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, 1))
 
   def forward(self, x):
@@ -205,15 +220,15 @@ class model_autoregressive_transformer(nn.Module):
       encoded = self.encoder(x, mask=causal_mask)  
       #encoded = self.norm(encoded)
 
-      if self.multi_head:
+      if self.multi_loss:
           return self.deembed(encoded), self.stop_head(encoded).squeeze(-1)  # (batch, seq_len, feature_dim), (batch, seq_len)
       else:
           return self.deembed(encoded) # (batch, seq_len, feature_dim)
 
-  def mse_loss(self, pred, targets, pad_mask=None):
+  def mse_loss(self, pred, targets, pad_mask=None, lambda_bce=1):
       #pad_mask is 1 for padded values
 
-      if self.multi_head:
+      if self.multi_loss:
           features,exists=pred
 
           # regression next-step prediction, mask the padded
@@ -234,7 +249,7 @@ class model_autoregressive_transformer(nn.Module):
           bce_mask=pad_mask & ~(bce_mask.bool()) #mask include all real values, plus first padded
           loss_bce = loss_bce.masked_fill(bce_mask, 0.0)
 
-          return loss_reg+1.0*loss_bce
+          return loss_reg+lambda_bce*loss_bce
       else:
           loss_fn = nn.MSELoss(reduction='none')   # regression next-step prediction
           return loss_fn(pred,targets).sum(dim=-1) #Sum over all the training sample
@@ -250,7 +265,7 @@ class model_autoregressive_transformer(nn.Module):
           pred = self.forward(seq) #get next element prediction, gives you N prediction for N inputs
 
           #if using the stop head
-          if self.multi_head:
+          if self.multi_loss:
             pred,stop = pred
             stop_prob = torch.sigmoid(stop[:, -1])
             finished = stop_prob > torch.rand(out_dimensions[0], device=device) #stop jet if prob > random-uniform
@@ -266,8 +281,8 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   """
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   """
-  def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_head=False, max_range=None, pad_value=-1):
-      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_head=multi_head, pad_value=pad_value)
+  def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, max_range=None, pad_value=-1):
+      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_loss=multi_loss, pad_value=pad_value)
 
       self.n_mix=n_mix
       self.max_range=max_range
@@ -278,7 +293,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   def forward(self, x):
       #Get the usual network result, note we overloaded the original forward to give MDN values and not truly auto-regressive
 
-      if self.multi_head:
+      if self.multi_loss:
           encoded,stop=super().forward(x)
       else:
           encoded=super().forward(x) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
@@ -301,13 +316,13 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       assert torch.isfinite(mu).all()
       assert torch.isfinite(log_sigma2).all()
 
-      if self.multi_head:
+      if self.multi_loss:
           return torch.cat([alpha.unsqueeze(-1),mu,log_sigma2],dim=-1), stop
       else:
           return torch.cat([alpha.unsqueeze(-1),mu,log_sigma2],dim=-1)
 
-  def nll_loss(self, inputs, targets, pad_mask=None):
-    if self.multi_head:
+  def nll_loss(self, inputs, targets, pad_mask=None, lambda_bce=1.0):
+    if self.multi_loss:
          inputs,exists=inputs
     ninputs=targets.shape[-1]
 
@@ -334,7 +349,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
     log_prob = torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
-    if self.multi_head:
+    if self.multi_loss:
       #Regression, mask to only unpadded values
       loss_reg=-log_prob.masked_fill(pad_mask, 0.0) #Regression
 
@@ -347,7 +362,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       bce_mask=pad_mask & ~(bce_mask.bool()) #mask include all real values, plus first padded
       loss_bce = loss_bce.masked_fill(bce_mask, 0.0)
 
-      return loss_reg + 1.0*loss_bce
+      return loss_reg + lambda_bce*loss_bce
     else:
       return -log_prob.sum() #Sum over all the training sample
 
@@ -363,7 +378,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       for _ in range(steps):
           pred = self.forward(seq) #get the alpha,mu,sigma values
 
-          if self.multi_head:
+          if self.multi_loss:
             pred,stop = pred
             stop_prob = torch.sigmoid(stop[:, -1])
             finished = stop_prob > torch.rand(out_dimensions[0], device=device) #stop jet if prob > random-uniform
@@ -512,11 +527,14 @@ class model_CNF(nn.Module):
     self.cnf = CNFDynamics(x_dim=input_dim, c_dim=0, hidden_dim=cnf_hidden, steps=steps, time_dim=time_dim)
 
   def forward(self, x):
+    x=x.view(x.shape[0], -1)
+
     # Safe forward for debugging / torchinfo; does NOT compute likelihood.
     t = torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
     return self.cnf.vf(x, t)
 
   def nll_loss(self, x):
+    x=x.view(x.shape[0], -1)
     return -self.cnf(x)
 
   @torch.no_grad()
@@ -533,29 +551,41 @@ class FlowMatching(nn.Module):
     """
     Code running the full flow mathing algorithm
     """
-    def __init__( self, x_dim, c_dim, hidden_dim, time_dim, steps):
+    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, steps, architecture="transformer"):
         super().__init__()
 
-        self.x_dim=x_dim
+        self.n_feat=n_feat
+        self.n_max=n_max
         self.steps=steps
+        self.architecture = architecture
 
         #Get the vector field prediction v
-        self.vf=VectorFieldNN( x_dim, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
-        #self.vf=VectorFieldTrans( x_dim, c_dim=c_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=512, time_dim=time_dim)
+        if self.architecture == "mlp":
+            self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+        elif self.architecture == "transformer":
+            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=2, num_layers=2, ff_dim=512, time_dim=time_dim)
 
         #Set the timegrid
         self.register_buffer( "time_grid", torch.linspace(0,1,steps+1))
 
-    def loss(self, x1):
+        #Set the multiplicity embedding
+        if c_dim>0:
+            self.n_emb = nn.Embedding(n_max + 1, c_dim)
+
+    def loss(self, x1, valid, N=None):
         B=x1.shape[0]
         device=x1.device
 
         #sample the original gaussian and a random time
-        x0=torch.randn_like(x1)
+        x1 = x1 * valid
+        x0=torch.randn_like(x1)* valid 
         t=torch.rand(B,1,device=device)
 
         # probability path at time t
-        xt=(1-t)*x0+t*x1
+        if self.architecture == "transformer":
+            xt=(1-t[:,:,None])*x0+t[:,:,None]*x1
+        else:
+            xt=(1-t)*x0+t*x1
 
         #sigma=1e-4
         #eps=torch.randn_like(x1)
@@ -565,34 +595,58 @@ class FlowMatching(nn.Module):
         u=x1-x0
 
         #Get the prediction at time t
-        pred=self.vf(xt,t)
+        if N is not None:
+            c=self.n_emb(N)
+        else:
+            c=None
+        pred=self.vf(xt,t,c,N)
 
+        '''
         #MSE loss
-        loss = F.mse_loss(pred,u,reduction='none')
+        if pad_mask == None:
+            loss = F.mse_loss(pred,u,reduction='none')
+        else:
+            loss = F.mse_loss(pred,u,reduction='none')
+            loss=loss.masked_fill(pad_mask, 0.0) #FM loss
 
         return loss
+        '''
+
+        #FIXME, new and masking of valid above
+        se = ((pred - u) ** 2) * valid
+        # mean over valid entries per jet, so jets with many constituents don't dominate
+        return se.sum(dim=-1) / valid.sum(dim=-1).clamp(min=1)
 
     @torch.no_grad()
-    def generate(self,batch_size):
+    def generate(self, batch_size, valid, N=None):
         device=next(self.parameters()).device
 
         #Get the intial x_0 distribution
-        x=torch.randn(batch_size, self.x_dim, device=device)
+        if self.architecture == "transformer":
+            x=torch.randn(batch_size, self.n_max,self.n_feat, device=device) * valid
+        else:
+            x=torch.randn(batch_size, self.n_max*self.n_feat, device=device) * valid
 
         #make the time grid
         t=self.time_grid.to(device)
 
+        #make the multiplicity embedding
+        if N is not None:
+            c=self.n_emb(N)
+        else:
+            c=None
+
         #push forward x_0 to x_1 via RK4 algorith and the learned velocity
         dt=1/self.steps
         for k in range(len(t)-1):
-            k1=self.vf(x,t[k])
-            k2=self.vf( x+0.5*dt*k1, t[k]+0.5*dt)
-            k3=self.vf( x+0.5*dt*k2, t[k]+0.5*dt)
-            k4=self.vf( x+dt*k3, t[k]+dt)
+            k1=self.vf(x, t[k], c, N) * valid
+            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, c, N) * valid
+            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, c, N) * valid
+            k4=self.vf(x+dt*k3, t[k]+dt, c, N) * valid
 
             x=x+dt*(k1+2*k2+2*k3+k4)/6
 
-        return x
+        return x * valid
 
 class model_FM(nn.Module):
     """
@@ -603,25 +657,100 @@ class model_FM(nn.Module):
 
     Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
     """
-    def __init__(self, input_dim, hidden_dim=128, time_dim=64, steps=50):
+    def __init__(self, input_shape, hidden_dim=128, time_dim=64, cond_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="transformer"):
         super().__init__()
 
-        self.fm=FlowMatching(x_dim=input_dim, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps)
+        self.n_max=input_shape[1]
+        self.n_feat=input_shape[2]
+        self.pad_value=pad_value
+        self.multi_loss=multi_loss
+        self.fitted=False
+        self.architecture=architecture
 
-    def forward(self,x):
+        if self.multi_loss:
+            self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=cond_dim, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, architecture=self.architecture) # learn density estimation p(x|N)
+            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater fromN = 0 ... n_max
+
+        else:
+            self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, architecture=self.architecture) # learn density estimation p(x)
+
+    def forward(self, x, pad_mask=None):
+        if self.architecture=="mlp":
+            x=x.view(x.shape[0], -1)
         t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
 
-        return self.fm.vf(x,t)
+        if self.multi_loss:
+            N = (~pad_mask).sum(dim=-1).long() #count number of non-pad entries
+            c=self.fm.n_emb(N)
+        else: 
+            N=None
+            c=None
+        return self.fm.vf(x,t,c,N)
 
-    def mse_loss(self,x):
-        return self.fm.loss(x)
+    @torch.no_grad()
+    def fit_count_prior(self, N_train, smoothing=0.0, freeze=False):
+        """
+        fit the mulitplicity logits right to data
+        """
+        counts = torch.bincount(N_train, minlength=self.n_max + 1).float() + smoothing
+        self.count_logits.copy_(counts.clamp(min=1e-12).log())
+        if freeze: self.count_logits.requires_grad_(False)
+        self.fitted=True
+
+    def mse_loss(self, x, pad_mask=None, lambda_bce=1.0):
+        if self.architecture=="mlp":
+            x=x.view(x.shape[0], -1)
+
+        if self.multi_loss:
+
+            #Number of predictions loss p(N)
+            valid = (~pad_mask).float() #[B, Nconst]
+            N = valid.sum(dim=-1).long() #count number of non-pad entries
+            #if not self.fitted: self.fit_count_prior(N)
+            if self.architecture=="mlp":
+                valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, Nconst*Nfeat]
+            else:
+                valid=valid[:,:,None] #[B, Nconst, 1]
+            Npred=self.count_logits[None].expand(x.shape[0], -1)
+            count_loss = F.cross_entropy(Npred, N, reduction="none")  # [B]
+
+            #Flow matching loss p(x | N)
+            FM_loss=self.fm.loss(x, valid, N) #[Nbatch, Nconst*Nfeat]
+
+            return FM_loss.sum()+lambda_bce*count_loss.sum()
+        else:
+            valid=torch.ones(x.shape, device=x.device)
+            return self.fm.loss(x, valid).sum()
 
     @torch.no_grad()
     def generate(self,out_dimensions):
 
-        samples=self.fm.generate(batch_size=out_dimensions[0])
+        if self.multi_loss:
 
-        return samples.view(out_dimensions)
+            #Generate the number of predictions
+            N = torch.distributions.Categorical(logits=self.count_logits).sample((out_dimensions[0],)) #sample the N
+            valid= torch.arange(self.n_max, device=N.device)[None, :] < N[:, None] #make mask which is true up to N and false after dim=[B, n_max]
+            if self.architecture=="mlp":
+                valid= valid.repeat_interleave(self.n_feat, dim=1).float() # Make it dim=[B, Nconst*nfeat]
+            else:
+                valid=valid.float()[:,:,None] #[B, Nconst, 1]
+
+            #Generate the samples
+            samples=self.fm.generate(out_dimensions[0], valid, N)
+
+            #Return the samples masked 
+            samples = samples + (1 - valid) * self.pad_value #mask the output
+            return samples.view(out_dimensions)
+
+        else:
+            #Generate the samples, all points are valid
+            device = next(self.parameters()).device
+            if self.architecture=="mlp":
+                valid=torch.ones([out_dimensions[0],out_dimensions[1]*out_dimensions[2]], device=device)
+            else:
+                valid=torch.ones([out_dimensions[0],out_dimensions[1],out_dimensions[2]], device=device)
+            samples=self.fm.generate(out_dimensions[0], valid)
+            return samples.view(out_dimensions)
 
 # ---------------------------------------------------------------------
 # Custom vanilla Normlazing flows, better to use nflows package
@@ -871,12 +1000,14 @@ class model_normalizing_flow(nn.Module): #Using normflows package
         """
         Compute log probability of data.
         """
+        x=x.view(x.shape[0], -1)
         return self.flow.log_prob(x)
 
     def nll_loss(self, x):
         """
         Compute log likelihood.
         """
+        x=x.view(x.shape[0], -1)
         return -self.flow.log_prob(x)
 
     def generate(self, out_dimensions):
@@ -986,6 +1117,7 @@ class model_diffusion(nn.Module):
 
         batch_size = x.shape[0]
         device = x.device
+        x=x.view(batch_size, -1)
 
         # Random timestep per sample in [0, timesteps-1]
         t = torch.randint(0, self.time_steps, (batch_size,), device=device,)
@@ -1003,8 +1135,9 @@ class model_diffusion(nn.Module):
 
     def mse_loss(self, x):
         """
-        Kept for API compatibility with your flow model.
+        Kept for API compatibility with flow model
         """
+        x=x.view(x.shape[0], -1)
         return self.forward(x)
 
     # --------------------------------------------------------
@@ -1129,7 +1262,8 @@ class model_score_SDE(nn.Module):
     def forward(self, x0):
 
         B = x0.shape[0]
-        device = x0.device
+        device = x0.device 
+        x0=x0.view(B, -1)
 
         #Avoid t=0 in case sigma->0
         eps=1e-5
@@ -1156,6 +1290,7 @@ class model_score_SDE(nn.Module):
         return loss
 
     def mse_loss(self, x0):
+        x0=x.view(x0.shape[0], -1)
         return self.forward(x0)
 
     @torch.no_grad()

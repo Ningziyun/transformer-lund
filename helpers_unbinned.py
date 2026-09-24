@@ -138,21 +138,21 @@ class constit_relative_dataset(torch.utils.data.Dataset):
 def get_loaders(args):
 
   if args.input_format=="ktdr":
-    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="4vec":
-    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="relvec":
-    train_dataset = constit_relative_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    train_dataset = constit_relative_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_relative_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.mixed_loss, preprocess=args.preprocess)
+    test_dataset = constit_relative_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   return train_loader,test_loader
@@ -234,8 +234,8 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_epochs, min
         raise ValueError("min_lr must be <= max_lr")
 
     # LambdaLR multiplies the optimizer's initial LR, so set the optimizer LR to max_lr.
-    if any(param_group["lr"] != max_lr for param_group in optimizer.param_groups):
-        raise ValueError("optimizer learning rate must be set to max_lr")
+    #if any(param_group["lr"] != max_lr for param_group in optimizer.param_groups): #FIXME, doesn't work when taking out block in adamW
+    #    raise ValueError("optimizer learning rate must be set to max_lr")
 
     def lr_lambda(current_step):
 
@@ -314,16 +314,21 @@ def step_scheduler(scheduler, args, metric=None):
 def make_optimizer(args, model):
     optimizer_name = getattr(args, "optimizer", "adam")
     if optimizer_name == "adamw":
-        return torch.optim.AdamW(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
-        )
-    return torch.optim.Adam(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+        if args.multi_loss: #Gradient descent on a plain categorical converges slowly and can be biased to zero in AdamW weight decay. Turn off weight-decay and give reasonable LR
+            return torch.optim.AdamW([
+                    {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
+                    {"params": [p for n, p in model.named_parameters() if n == "count_logits"], "lr": 1e-2, "weight_decay": 0.0},
+            ])
+        else:
+            return torch.optim.AdamW(model.parameters(),
+                lr=args.lr,
+                weight_decay=args.weight_decay,
+            )
+    else:
+        return torch.optim.Adam([
+                {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
+                {"params": [model.count_logits], "lr": 1e-2, "weight_decay": 0.0},
+        ])
 
 # ---------------------------------------------------------------------
 # Functions to help with loading in/out config data
@@ -374,20 +379,25 @@ def _config_get(args_or_dict, key, default=None):
 # Load model
 # ---------------------------------------------------------------------
 def build_unbinned_model(input_dim, args_or_dict):
+
+    pad_value=-1
+    if args_or_dict.input_format=="4vec":
+        if args_or_dict.preprocess=="standardize":
+            pad_value=-10
+        if args_or_dict.preprocess=="log":
+            pad_value=-10
+
     if args_or_dict.architecture=="MDN":
-        pad_value=-1
         max_value=10
         if args_or_dict.input_format=="4vec":
             if args_or_dict.preprocess==None:
                 max_value=3e3
             elif args_or_dict.preprocess=="standardize":
                 max_value=50
-                pad_value=-10
             elif args_or_dict.preprocess=="linearize":
                 max_value=1
             elif args_or_dict.preprocess=="log":
                 max_value=11
-                pad_value=-10
 
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_dim[2],
@@ -396,7 +406,7 @@ def build_unbinned_model(input_dim, args_or_dict):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
             max_range=max_value,
             pad_value=pad_value,
         )
@@ -413,10 +423,13 @@ def build_unbinned_model(input_dim, args_or_dict):
         )
     elif args_or_dict.architecture=="FM":
         return models_generative.model_FM(
-            input_dim=input_dim[1]*input_dim[2],
+            input_shape=input_dim,
             hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             steps=_as_int(_config_get(args_or_dict,"fm_steps")),
             time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+            cond_dim=_as_int(_config_get(args_or_dict,"fm_cond_dim")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
+            pad_value=pad_value,
         )
     elif args_or_dict.architecture=="NF":
         return models_generative.model_normalizing_flow(
@@ -452,7 +465,7 @@ def build_unbinned_model(input_dim, args_or_dict):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            multi_head=_as_bool(_config_get(args_or_dict,"mixed_loss")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
         )
 
 def save_model(model, log_dir, name):
@@ -758,7 +771,7 @@ def parse_input():
 
     # Architectures
     parser.add_argument("--architecture","-a",type=str, choices=["Transformer","MDN","NF","CNF","Diffusion","SDE","FM"], help="Architecture to run")
-    parser.add_argument("--mixed-loss", action="store_true", default=False, help="Use mixed loss (default: False)")
+    parser.add_argument("--multi-loss", action="store_true", default=False, help="Use multile objective loss (default: False)")
 
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
@@ -797,6 +810,7 @@ def parse_input():
 
     # FM parameters
     parser.add_argument("--fm-steps", type=int, default=25, help="FM Euler steps for integration")
+    parser.add_argument("--fm-cond-dim", type=int, default=16, help="Size of mulitplicity embedding dimenson")
 
     # NF paramaters
     parser.add_argument("--nflows", type=int, default=10, help="NF steps")
@@ -841,11 +855,5 @@ def parse_input():
     args=parser.parse_args()
     if args.plot_dir is None:
         args.plot_dir = args.log_dir
-
-    if args.architecture=="Transformer" or args.architecture=="MDN":
-        args.mixed_loss=True
-
-    if args.input_format=="4vec":
-        args.preprocess="log"
 
     return args
