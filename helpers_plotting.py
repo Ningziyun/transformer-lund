@@ -3,12 +3,14 @@ import time
 #os.environ.setdefault("MPLCONFIGDIR", os.path.join("/tmp", f"matplotlib-{os.environ.get('USER', 'user')}"))
 #os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 import numpy as np
+import awkward as ak
 import math
 import csv
 import re
 import textwrap
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import fastjet
 
 import torch
 
@@ -753,8 +755,8 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
     '''
 
     linestyles=["-","--","-.",":"]
-    Nplots=4
-    fig, axs = plt.subplots(int(Nplots/2),2,figsize=(4.0*Nplots/2,8.0))
+    Nplots=12
+    fig, axs = plt.subplots(int(Nplots/2),2,figsize=(8.0,4.0*Nplots/2))
     axs_list = axs.ravel()
 
     eps = 1e-12
@@ -802,10 +804,32 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
         dphi[~mask]=0
         constituent_dR = np.sqrt(deta**2 + dphi**2)
 
+
+        # Get substructure plpts
+        good = multiplicity > 0  # fastjet needs at least one constituent
+        const = ak.unflatten(ak.zip({"px": px[mask], "py": py[mask], "pz": pz[mask], "E": E[mask]}), multiplicity[good])
+        cs = fastjet.ClusterSequence(const, fastjet.JetDefinition(fastjet.cambridge_algorithm, 10.0))
+        tau = ak.to_numpy(cs.njettiness(njets=[1, 2, 3], beta=1.0, R0=0.8))  # tau_1, tau_2, tau_3 (one-pass kt axes)
+        d2 = ak.to_numpy(cs.exclusive_jets_energy_correlator(njets=1, func="d2", beta=1.0))
+        msd = ak.to_numpy(cs.exclusive_jets_softdrop_grooming(njets=1, beta=0, symmetry_cut=0.1, R0=0.8).msoftdrop)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            tau21 = tau[:, 1] / tau[:, 0]
+            tau32 = tau[:, 2] / tau[:, 1]
+            log_mpt=np.log(jet_mass**2/jet_pt**2)
+        log_mpt=np.nan_to_num(log_mpt,nan=10,posinf=10,neginf=10)
+
         plots[0].append(jet_pt)
         plots[1].append(jet_mass)
-        plots[2].append(multiplicity)
-        plots[3].append(constituent_dR[mask])
+        plots[2].append(jet_eta)
+        plots[3].append(multiplicity)
+        plots[4].append(dphi[mask])
+        plots[5].append(deta[mask])
+        plots[6].append(constituent_dR[mask])
+        plots[7].append(tau21[np.isfinite(tau21)])
+        plots[8].append(tau32[np.isfinite(tau32)])
+        plots[9].append(d2[np.isfinite(d2)])
+        plots[10].append(msd[np.isfinite(msd)])
+        plots[11].append(log_mpt)
 
     #Get ranges to use
     mins=np.zeros(Nplots)
@@ -815,35 +839,16 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
             mins[ii]=min(mins[ii],np.min(plots[ii][jj]))
             maxs[ii]=max(maxs[ii],np.max(plots[ii][jj]))
 
-    #Jet pt
-    for jj in range(len(plot_inputs)): axs_list[0].hist(plots[0][jj],bins=20,range=[mins[0],maxs[0]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
-    axs_list[0].set_xlabel("jet pt")
-    axs_list[0].set_ylabel("Counts")
-    axs_list[0].set_yscale("log")
-    axs_list[0].legend()
-
-    #Jet pt
-    for jj in range(len(plot_inputs)): axs_list[1].hist(plots[1][jj],bins=20,range=[mins[1],maxs[1]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
-    axs_list[1].set_xlabel("jet mass")
-    axs_list[1].set_ylabel("Counts")
-    axs_list[1].set_yscale("log")
-    axs_list[1].legend()
-
-    #Jet pt
-    for jj in range(len(plot_inputs)): axs_list[2].hist(plots[2][jj],bins=int(maxs[2]-mins[2]),range=[mins[2],maxs[2]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
-    axs_list[2].set_xlabel("Constituent Multiplicity")
-    axs_list[2].set_ylabel("Counts")
-    axs_list[2].set_yscale("log")
-    axs_list[2].legend()
-
-    #Jet pt
-    for jj in range(len(plot_inputs)): axs_list[3].hist(plots[3][jj],bins=20,range=[mins[3],maxs[3]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
-    axs_list[3].set_xlabel("DR(Constituent, jet-axis)")
-    axs_list[3].set_ylabel("Counts")
-    axs_list[3].set_yscale("log")
-    axs_list[3].legend()
+    #Plot stuff
+    for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"Multiplicity",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
+        for jj in range(len(plot_inputs)): axs_list[ip].hist(plots[ip][jj],bins=20,range=[mins[ip],maxs[ip]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
+        axs_list[ip].set_xlabel(xlabel)
+        axs_list[ip].set_ylabel("Counts")
+        axs_list[ip].set_yscale("log")
+        axs_list[ip].legend()
 
     name = "highlevel"
+    fig.tight_layout()
     fig.savefig(os.path.join(out_dir,name+".png"))
     fig.savefig(os.path.join(out_dir,name+".pdf"))
     plt.close(fig)
