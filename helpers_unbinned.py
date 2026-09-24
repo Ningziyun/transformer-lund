@@ -429,6 +429,10 @@ def build_unbinned_model(input_dim, args_or_dict):
             time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
             cond_dim=_as_int(_config_get(args_or_dict,"fm_cond_dim")),
             multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
+            architecture=_config_get(args_or_dict,"fm_architecture"),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
             pad_value=pad_value,
         )
     elif args_or_dict.architecture=="NF":
@@ -809,6 +813,7 @@ def parse_input():
     parser.add_argument("--cnf-steps", type=int, default=25, help="CNF Euler steps for integration")
 
     # FM parameters
+    parser.add_argument("--fm-architecture", default="mlp", choices=["mlp","transformer"], help="Type of model for the flow prediction")
     parser.add_argument("--fm-steps", type=int, default=25, help="FM Euler steps for integration")
     parser.add_argument("--fm-cond-dim", type=int, default=16, help="Size of mulitplicity embedding dimenson")
 

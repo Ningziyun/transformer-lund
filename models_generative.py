@@ -103,7 +103,7 @@ class VectorFieldTrans(nn.Module):
 
     self.n_proj = nn.Linear(c_dim, embed_dim)
 
-  def forward(self, z, t, c, N):
+  def forward(self, z, t, c, N): #FIXME, there is a couple places where both the N, valid, and embedding c are provided redundatnly together. Might be a better interface somehow?
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
@@ -115,7 +115,7 @@ class VectorFieldTrans(nn.Module):
     if c is None:
         zct = torch.cat([z, tt], dim=1)
         n_extra=1
-        valid = torch.ones(z.shape[0], self.n_feat, dtype=torch.bool, device=z.device)
+        valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
     else:
         c = self.n_proj(c)[:, None, :] #put into same embedding/dimension as input
         zct = torch.cat([z, c, tt], dim=1)
@@ -126,7 +126,10 @@ class VectorFieldTrans(nn.Module):
     pad = torch.cat([~valid, torch.zeros(z.shape[0], n_extra, dtype=torch.bool, device=z.device)], dim=1)
 
     #Go through encoder
-    zct = self.encoder(zct, src_key_padding_mask=pad)
+    if c is None: #FIXME not sure why the pad mask is causing a crash for the all ones case
+        zct = self.encoder(zct)
+    else:
+        zct = self.encoder(zct, src_key_padding_mask=pad)
 
     #De-embed, only get dimensions mathcing input
     zct=self.deembed(zct[:,:-n_extra,:])
@@ -551,7 +554,7 @@ class FlowMatching(nn.Module):
     """
     Code running the full flow mathing algorithm
     """
-    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, steps, architecture="transformer"):
+    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, steps, architecture, num_heads, num_layers, ff_dim):
         super().__init__()
 
         self.n_feat=n_feat
@@ -563,10 +566,10 @@ class FlowMatching(nn.Module):
         if self.architecture == "mlp":
             self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
         elif self.architecture == "transformer":
-            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=2, num_layers=2, ff_dim=512, time_dim=time_dim)
+            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim)
 
         #Set the timegrid
-        self.register_buffer( "time_grid", torch.linspace(0,1,steps+1))
+        self.register_buffer("time_grid", torch.linspace(0,1,steps+1))
 
         #Set the multiplicity embedding
         if c_dim>0:
@@ -657,7 +660,7 @@ class model_FM(nn.Module):
 
     Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
     """
-    def __init__(self, input_shape, hidden_dim=128, time_dim=64, cond_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="transformer"):
+    def __init__(self, input_shape, hidden_dim=128, time_dim=64, cond_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512):
         super().__init__()
 
         self.n_max=input_shape[1]
@@ -668,11 +671,11 @@ class model_FM(nn.Module):
         self.architecture=architecture
 
         if self.multi_loss:
-            self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=cond_dim, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, architecture=self.architecture) # learn density estimation p(x|N)
             self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater fromN = 0 ... n_max
-
         else:
-            self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=0, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, architecture=self.architecture) # learn density estimation p(x)
+            cond_dim=0
+
+        self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=cond_dim, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim) # learn density estimation p(x|N)
 
     def forward(self, x, pad_mask=None):
         if self.architecture=="mlp":
