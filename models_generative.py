@@ -563,7 +563,7 @@ class FlowMatching(nn.Module):
         if self.architecture == "mlp":
             self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
         elif self.architecture == "transformer":
-            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=1, num_layers=2, ff_dim=512, time_dim=time_dim)
+            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=2, num_layers=2, ff_dim=512, time_dim=time_dim)
 
         #Set the timegrid
         self.register_buffer( "time_grid", torch.linspace(0,1,steps+1))
