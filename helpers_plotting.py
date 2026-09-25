@@ -10,6 +10,8 @@ import re
 import textwrap
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.ticker as ticker
+
 import fastjet
 
 import torch
@@ -175,6 +177,40 @@ def fix_badjets(plot_inputs, do_update=False, results=None):
         print("frac_badconst",N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2]), "frac_badjet",N_badjets/(jets.shape[0]*jets.shape[1]))
         if do_update:
             jets[mask_badconst] = -1
+
+def hist_with_ratio(ax, rax, data_list, labels, linestyles, bin_range, xlabel, bins=20, ratio_ylim=(0.0, 2.0)):
+    '''
+    Histograms of data_list on ax, and their ratio to data_list[0] on rax (placed underneath).
+    The grey band on the ratio panel is the Poisson uncertainty of the reference.
+    '''
+    edges = np.linspace(bin_range[0], bin_range[1], bins + 1)
+
+    #Make main histogram
+    counts = [ax.hist(d, bins=edges, histtype="step", color=f"C{jj}", linestyle=linestyles[jj], label=labels[jj])[0] for jj, d in enumerate(data_list)]
+
+    #Make the ratio pannel
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ref = counts[0]
+        rel_err = np.sqrt(ref) / ref
+        rax.stairs(1 + rel_err, edges, baseline=1 - rel_err, fill=True, color="grey", alpha=0.3, lw=0)
+        for jj, n in enumerate(counts): rax.stairs(n / ref, edges, color=f"C{jj}", linestyle=linestyles[jj])
+
+    #Plot style
+    ax.set_ylabel("Counts")
+    ax.set_yscale("log")
+    ax.legend()
+    #ax.tick_params(labelbottom=False)
+    ax.tick_params(axis="both", which="both", direction="in", top=True, right=True, labelbottom=False)
+    ax.xaxis.set_minor_locator(ticker.AutoMinorLocator())
+
+    rax.axhline(1.0, color="grey", lw=0.8)
+    rax.set_ylim(*ratio_ylim)
+    #rax.set_ylabel(f"Ratio to\n{labels[0]}")
+    rax.set_ylabel("Ratio")
+    rax.set_xlabel(xlabel)
+    rax.set_xlim(edges[0], edges[-1])
+    rax.yaxis.set_major_locator(ticker.MultipleLocator(0.5))
+    rax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
 
 # ---------------------------------------------------------------------
 # Main plots
@@ -756,8 +792,27 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
 
     linestyles=["-","--","-.",":"]
     Nplots=12
-    fig, axs = plt.subplots(int(Nplots/2),2,figsize=(8.0,4.0*Nplots/2))
-    axs_list = axs.ravel()
+    Ncols=3
+    Nrows = int(np.ceil(Nplots/Ncols))
+
+    fig = plt.figure(figsize=(4.0*Ncols, 5.0*Nrows))
+    subfigs = fig.subfigures(Nrows, Ncols).ravel()
+    outer = fig.add_gridspec(Nrows, Ncols)
+    axs_list, rax_list = [], []
+    for ip in range(Nplots):
+        inner = outer[ip // Ncols, ip % Ncols].subgridspec(2, 1, height_ratios=[3, 1], hspace=0.0) #subgridspec splits the "outer" plot into 2
+        axs_list.append(fig.add_subplot(inner[0])) #create main plot
+        rax_list.append(fig.add_subplot(inner[1], sharex=axs_list[-1])) #creates ratio plot with shared axis
+
+    '''   
+    fig = plt.figure(figsize=(4.0*Ncols, 5.0*Nrows), layout="constrained")
+    subfigs = fig.subfigures(Nrows, Ncols).ravel()
+    axs_list, rax_list = [], []
+    for sf in subfigs[:Nplots]:
+        ax, rax = sf.subplots(2, 1, sharex=True, height_ratios=[3, 1], gridspec_kw={"hspace": 0.0})
+        axs_list.append(ax)
+        rax_list.append(rax)
+    '''
 
     eps = 1e-12
     plots=[ [] for _ in range(Nplots)]
@@ -804,7 +859,6 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
         dphi[~mask]=0
         constituent_dR = np.sqrt(deta**2 + dphi**2)
 
-
         # Get substructure plpts
         good = multiplicity > 0  # fastjet needs at least one constituent
         const = ak.unflatten(ak.zip({"px": px[mask], "py": py[mask], "pz": pz[mask], "E": E[mask]}), multiplicity[good])
@@ -832,8 +886,8 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
         plots[11].append(log_mpt)
 
     #Get ranges to use
-    mins=np.zeros(Nplots)
-    maxs=np.zeros(Nplots)
+    mins=np.full(Nplots, np.inf)
+    maxs=np.full(Nplots, -np.inf)
     for ii in range(Nplots):
         for jj in range(len(plot_inputs)):
             mins[ii]=min(mins[ii],np.min(plots[ii][jj]))
@@ -841,11 +895,7 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
 
     #Plot stuff
     for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"Multiplicity",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
-        for jj in range(len(plot_inputs)): axs_list[ip].hist(plots[ip][jj],bins=20,range=[mins[ip],maxs[ip]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
-        axs_list[ip].set_xlabel(xlabel)
-        axs_list[ip].set_ylabel("Counts")
-        axs_list[ip].set_yscale("log")
-        axs_list[ip].legend()
+        hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel)
 
     name = "highlevel"
     fig.tight_layout()
