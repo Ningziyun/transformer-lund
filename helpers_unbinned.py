@@ -21,11 +21,12 @@ import helpers
 # Data loaders
 # ---------------------------------------------------------------------
 class ktdr_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_mask=False, preprocess=None):
+  def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None):
     super(ktdr_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_mask=add_mask
     self.preprocess=preprocess
+    self.add_conditional=add_conditional
 
     f = h5py.File(file_path,'r')
     kts=f["lundplane"]["kt"]
@@ -33,13 +34,29 @@ class ktdr_dataset(torch.utils.data.Dataset):
     self.kt=kts[:,:NConstituents]
     self.DR=drs[:,:NConstituents]
 
-    #Check if next is -1 and pad last const to True
-    if add_mask:
+    if self.add_conditional:
+        self.jet_E=f["jet"]["E"]
+        self.jet_px=f["jet"]["PX"]
+        self.jet_py=f["jet"]["PY"]
+        self.jet_pz=f["jet"]["PZ"]
+
+    #Mask which stores if padded. True/False=Padded/unpadded
+    if add_mask or self.add_conditional:
       self.mask=self.DR == -1
 
   def __getitem__(self, index):
     inputs=np.array([self.kt[index],self.DR[index]])
     self.data=torch.transpose(torch.tensor(inputs),0,1)
+
+    if self.add_conditional:
+        eps=1e-12
+        jet_p = np.sqrt(self.jet_px[index]**2 + self.jet_py[index]**2 + self.jet_pz[index]**2)
+        jet_pt = np.hypot(self.jet_px[index], self.jet_py[index])
+        jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
+        jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
+        jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
+        jet_Nconst= (~self.mask).sum(dim=-1).long()
+        jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
     if self.preprocess:
         helpers.preprocess(self.data,"ktdr",self.preprocess)
@@ -49,15 +66,25 @@ class ktdr_dataset(torch.utils.data.Dataset):
     else:
         return self.data
 
+    if self.add_mask and self.add_conditional:
+        return [self.data,jet_data,self.mask[index]]
+    elif self.add_mask:
+        return [self.data,self.mask[index]]
+    elif self.add_conditional:
+        return [self.data,jet_data]
+    else:
+        return self.data
+
   def __len__(self):
     return len(self.DR)
 
 class constit_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_mask=False, preprocess=None):
-    super(constit_dataset, self).__init__()
+  def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None):
+    super(constit_dataset, self).__init__() 
     self.data=torch.tensor([])
     self.add_mask=add_mask
     self.preprocess=preprocess
+    self.add_conditional=add_conditional
 
     f = h5py.File(file_path,'r')
     es=f["constituents"]["E"]
@@ -69,19 +96,41 @@ class constit_dataset(torch.utils.data.Dataset):
     self.py=pys[:,:NConstituents]
     self.pz=pzs[:,:NConstituents]
 
-    #Check if next is -1 and pad last const to True
-    if add_mask:
-      self.mask=self.e == -1
+    if self.add_conditional:
+        self.jet_E=f["jet"]["E"]
+        self.jet_px=f["jet"]["PX"]
+        self.jet_py=f["jet"]["PY"]
+        self.jet_pz=f["jet"]["PZ"]
+
+    #Mask which stores if padded. True/False=Padded/unpadded
+    if add_mask or self.add_conditional:
+      self.mask=self.e < 0
 
   def __getitem__(self, index):
     inputs=np.array([self.e[index],self.px[index],self.py[index],self.pz[index]])
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
+    if self.add_conditional:
+        eps=1e-12
+        jet_p = np.sqrt(self.jet_px[index]**2 + self.jet_py[index]**2 + self.jet_pz[index]**2)
+        jet_pt = np.hypot(self.jet_px[index], self.jet_py[index])
+        jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
+        jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
+        jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
+        #print(self.e[0])
+        #print(self.mask[0])
+        jet_Nconst= np.asarray(~self.mask[index]).sum(axis=-1)
+        jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
+
     if self.preprocess:
         helpers.preprocess(self.data,"4vec",self.preprocess)
 
-    if self.add_mask:
+    if self.add_mask and self.add_conditional:
+        return [self.data,jet_data,self.mask[index]]
+    elif self.add_mask:
         return [self.data,self.mask[index]]
+    elif self.add_conditional:
+        return [self.data,jet_data]
     else:
         return self.data
 
@@ -89,11 +138,12 @@ class constit_dataset(torch.utils.data.Dataset):
     return len(self.e)
 
 class constit_relative_dataset(torch.utils.data.Dataset):
-  def __init__(self, file_path, NConstituents=20, add_mask=False, preprocess=None):
+  def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=True, preprocess=None):
     super(constit_relative_dataset, self).__init__()
     self.data=torch.tensor([])
     self.add_mask=add_mask
     self.preprocess=preprocess
+    self.add_conditional=add_conditional
 
     f = h5py.File(file_path,'r')
     ptfracs=f["relative_constituents"]["ptfrac"]
@@ -105,13 +155,14 @@ class constit_relative_dataset(torch.utils.data.Dataset):
     self.dphi=dphis[:,:NConstituents]
     self.m=ms[:,:NConstituents]
 
-    self.jet_E=f["jet"]["E"]
-    self.jet_px=f["jet"]["PX"]
-    self.jet_py=f["jet"]["PY"]
-    self.jet_pz=f["jet"]["PZ"]
+    if self.add_conditional:
+        self.jet_E=f["jet"]["E"]
+        self.jet_px=f["jet"]["PX"]
+        self.jet_py=f["jet"]["PY"]
+        self.jet_pz=f["jet"]["PZ"]
 
-    #Check if next is -1 and pad last const to True
-    if add_mask:
+    #Mask which stores if padded. True/False=Padded/unpadded
+    if add_mask or self.add_conditional:
       self.mask=self.ptfrac == -1
 
   def __getitem__(self, index):
@@ -119,18 +170,24 @@ class constit_relative_dataset(torch.utils.data.Dataset):
     inputs=np.array([self.ptfrac[index],self.deta[index],self.dphi[index]])
     self.data=torch.transpose(torch.tensor(inputs),0,1)
 
-    eps=1e-12
-    jet_p = np.sqrt(self.jet_px[index]**2 + self.jet_py[index]**2 + self.jet_pz[index]**2)
-    jet_pt = np.hypot(self.jet_px[index], self.jet_py[index])
-    jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
-    jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
-    jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
-    jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m])
+    if self.add_conditional:
+        eps=1e-12
+        jet_p = np.sqrt(self.jet_px[index]**2 + self.jet_py[index]**2 + self.jet_pz[index]**2)
+        jet_pt = np.hypot(self.jet_px[index], self.jet_py[index])
+        jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
+        jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
+        jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
+        jet_Nconst= (~self.mask).sum(dim=-1).long()
+        jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
-    if self.add_mask:
+    if self.add_mask and self.add_conditional:
         return [self.data,jet_data,self.mask[index]]
-    else:
+    elif self.add_mask:
+        return [self.data,self.mask[index]]
+    elif self.add_conditional:
         return [self.data,jet_data]
+    else:
+        return self.data
 
   def __len__(self):
     return len(self.ptfrac)
@@ -138,21 +195,21 @@ class constit_relative_dataset(torch.utils.data.Dataset):
 def get_loaders(args):
 
   if args.input_format=="ktdr":
-    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
+    train_dataset = ktdr_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, add_conditional=args.conditional, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
+    test_dataset = ktdr_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, add_conditional=args.conditional, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="4vec":
-    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
+    train_dataset = constit_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, add_conditional=args.conditional,preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
+    test_dataset = constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, add_conditional=args.conditional, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   elif args.input_format=="relvec":
-    train_dataset = constit_relative_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
+    train_dataset = constit_relative_dataset(args.train_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, add_conditional=True, preprocess=args.preprocess)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
-    test_dataset = constit_relative_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, preprocess=args.preprocess)
+    test_dataset = constit_relative_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=args.multi_loss, add_conditional=True, preprocess=args.preprocess)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
 
   return train_loader,test_loader
@@ -378,7 +435,7 @@ def _config_get(args_or_dict, key, default=None):
 # ---------------------------------------------------------------------
 # Load model
 # ---------------------------------------------------------------------
-def build_unbinned_model(input_dim, args_or_dict):
+def build_unbinned_model(input_shape, cond_shape, args_or_dict):
 
     pad_value=-1
     if args_or_dict.input_format=="4vec":
@@ -400,7 +457,8 @@ def build_unbinned_model(input_dim, args_or_dict):
                 max_value=11
 
         return models_generative.model_autoregressive_transformer_MDN(
-            input_dim=input_dim[2],
+            input_dim=input_shape[2],
+            cond_dim=cond_shape[-1],
             n_mix=_as_int(_config_get(args_or_dict,"MDN_nmix")),
             embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
@@ -412,7 +470,7 @@ def build_unbinned_model(input_dim, args_or_dict):
         )
     elif args_or_dict.architecture=="CNF":
         return models_generative.model_CNF(
-            input_dim=input_dim[1]*input_dim[2],
+            input_dim=input_shape[1]*input_shape[2],
             embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
@@ -423,7 +481,7 @@ def build_unbinned_model(input_dim, args_or_dict):
         )
     elif args_or_dict.architecture=="FM":
         return models_generative.model_FM(
-            input_shape=input_dim,
+            input_shape=input_shape,
             hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             steps=_as_int(_config_get(args_or_dict,"fm_steps")),
             time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
@@ -437,14 +495,14 @@ def build_unbinned_model(input_dim, args_or_dict):
         )
     elif args_or_dict.architecture=="NF":
         return models_generative.model_normalizing_flow(
-            input_dim=input_dim[1]*input_dim[2],
+            input_dim=input_shape[1]*input_shape[2],
             num_flows=_as_int(_config_get(args_or_dict,"nflows")),
             latent_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             flow_type=args_or_dict.nflow_type,
         )
     elif args_or_dict.architecture=="Diffusion":
         return models_generative.model_diffusion(
-                input_dim=input_dim[1]*input_dim[2], 
+                input_dim=input_shape[1]*input_shape[2], 
                 hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
                 time_steps=_as_int(_config_get(args_or_dict,"diff_steps")),
                 beta_start=_as_float(_config_get(args_or_dict,"diff_beta_start")),
@@ -455,7 +513,7 @@ def build_unbinned_model(input_dim, args_or_dict):
         )
     elif args_or_dict.architecture=="SDE":
         return models_generative.model_score_SDE(
-                input_dim=input_dim[1]*input_dim[2],
+                input_dim=input_shape[1]*input_shape[2],
                 hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
                 time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
                 beta_min=_as_float(_config_get(args_or_dict,"SDE_beta_min")),
@@ -464,7 +522,8 @@ def build_unbinned_model(input_dim, args_or_dict):
         )
     elif args_or_dict.architecture=="Transformer":
         return models_generative.model_autoregressive_transformer(
-            input_dim=input_dim[2],
+            input_dim=input_shape[2],
+            cond_dim=cond_shape[-1],
             embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
@@ -572,11 +631,11 @@ def load_checkpoint_args(args, ignore_args=[], checkpoint_model=None):
 
     return checkpoint_info
 
-def load_checkpoint_model(shape, args, device, checkpoint_info=None):
+def load_checkpoint_model(args, shape, cond_shape=[0], device="cpu", checkpoint_info=None):
     if checkpoint_info is None:
         checkpoint_info = load_checkpoint(args)
 
-    model = build_unbinned_model(shape, args)
+    model = build_unbinned_model(shape, cond_shape, args)
     model.load_state_dict(checkpoint_info["model_state_dict"])
     model.to(device)
 
@@ -761,6 +820,7 @@ def parse_input():
     # Architectures
     parser.add_argument("--architecture","-a",type=str, choices=["Transformer","MDN","NF","CNF","Diffusion","SDE","FM"], help="Architecture to run")
     parser.add_argument("--multi-loss", action="store_true", default=False, help="Use multile objective loss (default: False)")
+    parser.add_argument("--conditional", action="store_true", default=False, help="Add conditional information (default: False)")
 
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")

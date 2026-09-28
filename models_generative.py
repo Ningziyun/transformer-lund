@@ -182,10 +182,11 @@ class model_autoregressive_transformer(nn.Module):
   """
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
   """
-  def __init__(self, input_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, pad_value=-1):
+  def __init__(self, input_dim, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, pad_value=-1):
       super(model_autoregressive_transformer, self).__init__()
 
       self.input_dim=input_dim
+      self.cond_dim = cond_dim
       self.embed_dim=embed_dim
       self.ff_dim=ff_dim
       self.num_heads=num_heads
@@ -206,21 +207,34 @@ class model_autoregressive_transformer(nn.Module):
       #Now de-embed back to original output
       self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.input_dim))
 
+      #Add a embedding layer for the conditional info as well
+      if cond_dim>0:
+        self.cond_embed = nn.Sequential( nn.Linear(cond_dim, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
+
+      #Add a network to learn the BCE loss of next token being padded
       if self.multi_loss:
         self.stop_head = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, 1))
 
-  def forward(self, x):
+  def forward(self, x, c=None):
 
       seq_len = x.shape[1] # (batch, seq_len, feature_dim)
 
       # Embed the N-dim vector into the embedded space
-      x=self.embed(x) # (batch, seq_len, embed_dim)
+      h = self.embed(x)
+      if self.cond_dim>0:
+          h = h + self.cond_embed(c).unsqueeze(1)
+
+      '''
+      if self.cond_dim>0:
+        c = self.cond_embed(cond).unsqueeze(1)  # (B, 1, E)
+        h = torch.cat([c, h[:, 1:, :]], dim=1)  # replace start-token embedding with cond
+      '''
 
       # Causal mask prevents looking ahead
       causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
 
       # Take the x[0:-1] embedded and learn the embedded x[1:]
-      encoded = self.encoder(x, mask=causal_mask)  
+      encoded = self.encoder(h, mask=causal_mask)  
       #encoded = self.norm(encoded)
 
       if self.multi_loss:
@@ -258,14 +272,16 @@ class model_autoregressive_transformer(nn.Module):
           return loss_fn(pred,targets).sum(dim=-1) #Sum over all the training sample
 
   @torch.no_grad()
-  def generate(self, out_dimensions):
+  def generate(self, out_dimensions, c=None):
       device = next(self.parameters()).device
-      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device) #jet sequence to fill, start with 0-padded start jet
+      if c is not None:
+        c = c.to(device)
+      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device) #jet sequence to fill, start with 0-padded start jet, conditional generation will replace this in forward
       active = torch.ones(out_dimensions[0], dtype=torch.bool, device=device) #which elements are active
 
       steps=out_dimensions[1]
       for _ in range(steps): #loop over length
-          pred = self.forward(seq) #get next element prediction, gives you N prediction for N inputs
+          pred = self.forward(seq, c) #get next element prediction, gives you N prediction for N inputs
 
           #if using the stop head
           if self.multi_loss:
@@ -284,8 +300,8 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   """
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   """
-  def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, max_range=None, pad_value=-1):
-      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_loss=multi_loss, pad_value=pad_value)
+  def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, max_range=None, pad_value=-1):
+      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_loss=multi_loss, pad_value=pad_value)
 
       self.n_mix=n_mix
       self.max_range=max_range
@@ -293,13 +309,13 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       #Final space is now a multi-D Gaussian mixture model: prod \alpha_i Gaus(\arrow\mu_i,\arrow\sigma_i) , where dimension=length of ouput (aka 4 for 4-vec)
       self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim,self.n_mix*(1+input_dim+input_dim)))
 
-  def forward(self, x):
+  def forward(self, x, c=None):
       #Get the usual network result, note we overloaded the original forward to give MDN values and not truly auto-regressive
 
       if self.multi_loss:
-          encoded,stop=super().forward(x)
+          encoded,stop=super().forward(x, c)
       else:
-          encoded=super().forward(x) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
+          encoded=super().forward(x, c) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
 
       # split into mixture components: here alpha=norm (logits will softmax later), mu=center, log_sigma2=log(variance)
       encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.input_dim)) #[Nbatch,Nconst,Nmix,(1+2*Ninput)]
@@ -370,8 +386,10 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       return -log_prob.sum() #Sum over all the training sample
 
   @torch.no_grad()
-  def generate(self, out_dimensions):
+  def generate(self, out_dimensions, c=None):
       device = next(self.parameters()).device
+      if c is not None:
+        c = c.to(device)
       seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device)
       steps=out_dimensions[1]
       ninputs=out_dimensions[-1]
@@ -379,7 +397,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       active = torch.ones(out_dimensions[0], dtype=torch.bool, device=device) #which elements are active
 
       for _ in range(steps):
-          pred = self.forward(seq) #get the alpha,mu,sigma values
+          pred = self.forward(seq, c) #get the alpha,mu,sigma values
 
           if self.multi_loss:
             pred,stop = pred

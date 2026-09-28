@@ -217,9 +217,9 @@ def flatten_weight(X):
 def format_input(X, args, device):
 
     #Format the output for each case
-    if args.input_format=="relvec" and args.multi_loss:
+    if (args.input_format=="relvec" and args.multi_loss) or (args.conditional and args.multi_loss):
         X, jet, mask = X
-    elif args.input_format=="relvec":
+    elif args.input_format=="relvec" or args.conditional:
         X, jet = X
         mask=None
     elif args.multi_loss:

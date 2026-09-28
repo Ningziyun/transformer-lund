@@ -20,12 +20,17 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example,_,_=format_input(next(iter(train_loader)), args, device)
+    X_example,_,jet_example=format_input(next(iter(train_loader)), args, device)
+
+    cond_shape=[0]
+    if args.conditional:
+        cond_shape=jet_example.shape
 
     #load model
     print(f"Loading model", flush=True)
-    model=load_checkpoint_model(X_example.shape,args,device)
+    model=load_checkpoint_model(args,X_example.shape,cond_shape,device)
 
+    '''
     if args.architecture=="MDN":
         output=model(X_example)
         stop=None
@@ -57,6 +62,7 @@ if __name__ == "__main__":
         print("\nmax/min alpha:",torch.max(alpha).item(),torch.min(alpha).item())
         print("max/min mu:",torch.max(mu).item(),torch.min(mu).item())
         print("max/min sigma2:",torch.max(sigma2).item(),torch.min(sigma2).item())
+    '''
 
     #Make validation plots
     validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"])

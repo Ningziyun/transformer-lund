@@ -12,7 +12,7 @@ class NonFiniteLossError(RuntimeError):
 # ---------------------------------------------------------------------
 # Functions for train and test loop
 # ---------------------------------------------------------------------
-def evaluate_loss(model,X,mask,args):
+def evaluate_loss(model,args,X,mask=None,c=None):
 
   if args.input_format=="4vec" and args.flatten:
     w=flatten_weight(X,device=device)
@@ -45,7 +45,7 @@ def evaluate_loss(model,X,mask,args):
   if args.architecture=="Transformer" or args.architecture=="MDN":
     inputs = F.pad(input=X[:, :-1, :], pad=(0,0,1,0), mode='constant', value=0) #X[:, :-1, :]   # all but last, with a 0 start token at front #pad=pad(left, right, top, bottom))
     targets = X # the whole f-vector
-    pred = model(inputs)       # (batch, seq_len-1, feature_dim)
+    pred = model(inputs,c)       # (batch, seq_len-1, feature_dim)
 
     if args.architecture=="MDN":
         loss = (model.nll_loss(pred, targets, mask)*w).sum()
@@ -65,11 +65,11 @@ def train(model,train_loader,args):
   for batch, X in enumerate(train_loader):
 
       #input data
-      X,mask,_=format_input(X, args, device)
+      X,mask,jet=format_input(X, args, device)
 
       #calculate loss across the batch (summed and also seperate averaged value)
       optimizer.zero_grad()
-      loss,sum_w =evaluate_loss(model, X, mask, args)
+      loss,sum_w =evaluate_loss(model,args, X, mask, jet)
       loss_per_sample = loss / sum_w #average the loss across batch
 
       #safety check
@@ -121,10 +121,10 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
 
       #input data
-      X,mask,_=format_input(X, args, device)
+      X,mask,jet=format_input(X, args, device)
 
       #calculate loss across the batch (summed, not averaged)
-      loss,sum_w = evaluate_loss(model, X, mask, args)
+      loss,sum_w = evaluate_loss(model, args, X, mask, jet)
 
       #safety check
       if not torch.isfinite(loss):
@@ -165,13 +165,17 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example,mask_example,_=format_input(next(iter(train_loader)), args, device)
+    X_example,mask_example,jet_example=format_input(next(iter(train_loader)), args, device)
+
+    cond_shape=[0]
+    if args.conditional:
+        cond_shape=jet_example.shape
 
     # construct model
     if args.model_checkpoint:
-        model = load_checkpoint_model(X_example.shape, args, device, checkpoint_info)
+        model = load_checkpoint_model(args, X_example.shape, cond_shape, args, device, checkpoint_info)
     else:
-        model = build_unbinned_model(X_example.shape, args)
+        model = build_unbinned_model(X_example.shape, cond_shape, args)
     model.to(device)
 
     #Make output directory and make metadata file to save arguments
@@ -188,12 +192,20 @@ if __name__ == "__main__":
       modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(X_example).shape,flush=True)
     elif args.architecture=="Transformer" or args.architecture=="MDN":
-      print("Input shape,",X_example.shape, flush=True)
-      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      if args.multi_loss:
-        print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
+      if args.conditional:
+          print("Input shape,",X_example.shape,cond_shape, flush=True)
+          modelstats=summary(model, input_data=[X_example,jet_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+          if args.multi_loss:
+            print("Output shape,", model(X_example,jet_example)[0].shape,model(X_example,jet_example)[-1].shape, flush=True)
+          else:
+            print("Output shape,", model(X_example,jet_example).shape, flush=True)
       else:
-        print("Output shape,", model(X_example).shape, flush=True)
+          print("Input shape,",X_example.shape, flush=True)
+          modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+          if args.multi_loss:
+            print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
+          else:
+            print("Output shape,", model(X_example).shape, flush=True)
 
     #Set the scheduler
     optimizer = make_optimizer(args, model)
