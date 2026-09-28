@@ -160,30 +160,30 @@ def undo_preprocess(X,input_format,method="log"):
     X_new=torch.zeros(X.shape)
 
     if method=="standardize":
-        if input_format=="4vec":
-            mask = X[:,:,0] < -49
-        else:
+        if input_format=="ktdr":
             mask = X[:,:,-1] < -49
+        else:
+            mask = X[:,:,0] < -49
         mean_std=preprocess_mean_std(input_format)
         for ii in range(X_new.shape[-1]):
             X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
         X_new[mask] = -1
 
     elif method=="linear":
-        if input_format=="4vec":
-            mask = X[:,:,0] < 0
-        else:
+        if input_format=="ktdr":
             mask = X[:,:,-1] < 0
+        else:
+            mask = X[:,:,0] < 0
         min_max=preprocess_min_max(input_format)
         for ii in range(X_new.shape[-1]):
             X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
         X_new[mask] = -1
 
     elif method=="log":
-        if input_format=="4vec":
-            mask = X[:,:,0] < 0
-        else:
+        if input_format=="ktdr":
             mask = X[:,:,-1] < 0
+        else:
+            mask = X[:,:,-0] < 0
         X_new = torch.sign(X) * torch.expm1(torch.abs(X))
         X_new[mask] = -1
 
