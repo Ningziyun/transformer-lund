@@ -142,13 +142,15 @@ class VectorFieldNN(nn.Module):
   z: [B, D]
   c: [B, C] (context)
   """
-  def __init__(self, z_dim, c_dim, hidden_dim, time_dim):
+  def __init__(self, z_dim, c_dim, hidden_dim, time_dim=1, N_dim=0):
     super().__init__()
     self.time_dim=time_dim
+    self.c_dim=c_dim
+    self.N_dim=N_dim
 
     if self.time_dim==1:
         self.net = nn.Sequential(
-          nn.Linear(z_dim + c_dim + 1, hidden_dim),  # +1 for time embedding (t)
+          nn.Linear(z_dim + c_dim + 1 + N_dim, hidden_dim),  # +1 for time embedding (t)
           nn.SiLU(),
           nn.Linear(hidden_dim, hidden_dim),
           nn.SiLU(),
@@ -157,7 +159,7 @@ class VectorFieldNN(nn.Module):
 
     else:
         self.net = nn.Sequential(
-          nn.Linear(z_dim + c_dim + time_dim, hidden_dim),
+          nn.Linear(z_dim + c_dim + time_dim + N_dim, hidden_dim),
           nn.SiLU(),
           nn.Linear(hidden_dim, hidden_dim),
           nn.SiLU(),
@@ -165,14 +167,17 @@ class VectorFieldNN(nn.Module):
         )
         self.time_emb = Sinusoidal_Time_Embedding(time_dim)
 
-  def forward(self, z, t, c=None, N=None):
+  def forward(self, z, t, c=None, Nembed=None):
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
-    if c is None:
-        zct = torch.cat([z, tt], dim=-1)
-    else:
-        zct = torch.cat([z, c, tt], dim=-1) 
+    zct = torch.cat([z, tt], dim=-1)
+
+    if self.c_dim>0:
+        zct = torch.cat([zct, c], dim=-1)
+    if self.N_dim>0:
+        zct = torch.cat([zct, Nembed], dim=-1)
+
     return self.net(zct)
 
 # ---------------------------------------------------------------------
@@ -209,7 +214,7 @@ class model_autoregressive_transformer(nn.Module):
 
       #Add a embedding layer for the conditional info as well
       if cond_dim>0:
-        self.cond_embed = nn.Sequential( nn.Linear(cond_dim, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
+        self.cond_embed = nn.Sequential(nn.Linear(cond_dim, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
 
       #Add a network to learn the BCE loss of next token being padded
       if self.multi_loss:
@@ -222,13 +227,9 @@ class model_autoregressive_transformer(nn.Module):
       # Embed the N-dim vector into the embedded space
       h = self.embed(x)
       if self.cond_dim>0:
-          h = h + self.cond_embed(c).unsqueeze(1)
-
-      '''
-      if self.cond_dim>0:
-        c = self.cond_embed(cond).unsqueeze(1)  # (B, 1, E)
-        h = torch.cat([c, h[:, 1:, :]], dim=1)  # replace start-token embedding with cond
-      '''
+          #h = h + self.cond_embed(c).unsqueeze(1) # Add context embedding into const embedding
+          c = self.cond_embed(c).unsqueeze(1)  # (B, 1, E)
+          h = torch.cat([c, h[:, 1:, :]], dim=1)  # replace start-token embedding with cond
 
       # Causal mask prevents looking ahead
       causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
@@ -572,7 +573,7 @@ class FlowMatching(nn.Module):
     """
     Code running the full flow mathing algorithm
     """
-    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, steps, architecture, num_heads, num_layers, ff_dim):
+    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, Nembed_dim, steps, architecture, num_heads, num_layers, ff_dim):
         super().__init__()
 
         self.n_feat=n_feat
@@ -582,7 +583,7 @@ class FlowMatching(nn.Module):
 
         #Get the vector field prediction v
         if self.architecture == "mlp":
-            self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+            self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim, N_dim=Nembed_dim)
         elif self.architecture == "transformer":
             self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim)
 
@@ -590,10 +591,14 @@ class FlowMatching(nn.Module):
         self.register_buffer("time_grid", torch.linspace(0,1,steps+1))
 
         #Set the multiplicity embedding
-        if c_dim>0:
-            self.n_emb = nn.Embedding(n_max + 1, c_dim)
+        if Nembed_dim>0:
+            self.n_emb = nn.Embedding(n_max + 1, Nembed_dim)
 
-    def loss(self, x1, valid, N=None):
+        #Add a embedding layer for the conditional info as well
+        if c_dim>0:
+            self.cond_embed = nn.Sequential(nn.Linear(c_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim))
+
+    def loss(self, x1, c=None, valid=None, N=None):
         B=x1.shape[0]
         device=x1.device
 
@@ -617,10 +622,11 @@ class FlowMatching(nn.Module):
 
         #Get the prediction at time t
         if N is not None:
-            c=self.n_emb(N)
+            Nembed=self.n_emb(N)
         else:
-            c=None
-        pred=self.vf(xt,t,c,N)
+            Nembed=None
+
+        pred=self.vf(xt,t,c,Nembed)
 
         '''
         #MSE loss
@@ -639,7 +645,7 @@ class FlowMatching(nn.Module):
         return se.sum(dim=-1) / valid.sum(dim=-1).clamp(min=1)
 
     @torch.no_grad()
-    def generate(self, batch_size, valid, N=None):
+    def generate(self, batch_size, c=None, valid=None, N=None):
         device=next(self.parameters()).device
 
         #Get the intial x_0 distribution
@@ -653,17 +659,17 @@ class FlowMatching(nn.Module):
 
         #make the multiplicity embedding
         if N is not None:
-            c=self.n_emb(N)
+            Nembed=self.n_emb(N)
         else:
-            c=None
+            Nembed=None
 
         #push forward x_0 to x_1 via RK4 algorith and the learned velocity
         dt=1/self.steps
         for k in range(len(t)-1):
-            k1=self.vf(x, t[k], c, N) * valid
-            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, c, N) * valid
-            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, c, N) * valid
-            k4=self.vf(x+dt*k3, t[k]+dt, c, N) * valid
+            k1=self.vf(x, t[k], c, Nembed) * valid
+            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, c, Nembed) * valid
+            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, c, Nembed) * valid
+            k4=self.vf(x+dt*k3, t[k]+dt, c, Nembed) * valid
 
             x=x+dt*(k1+2*k2+2*k3+k4)/6
 
@@ -678,35 +684,36 @@ class model_FM(nn.Module):
 
     Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
     """
-    def __init__(self, input_shape, hidden_dim=128, time_dim=64, cond_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512):
+    def __init__(self, input_shape, cond_shape, hidden_dim=128, time_dim=64, Nembed_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512):
         super().__init__()
 
         self.n_max=input_shape[1]
         self.n_feat=input_shape[2]
+        self.c_dim=cond_shape[-1]
         self.pad_value=pad_value
         self.multi_loss=multi_loss
         self.fitted=False
         self.architecture=architecture
 
         if self.multi_loss:
-            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater fromN = 0 ... n_max
+            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater from N = 0 ... n_max
         else:
-            cond_dim=0
+            Nembed_dim=0
 
-        self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=cond_dim, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim) # learn density estimation p(x|N)
+        self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=self.c_dim, hidden_dim=hidden_dim, time_dim=time_dim, Nembed_dim=Nembed_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim) # learn density estimation p(X|c) or p(x|N,c) depeding if Nembed_dim provided,
 
-    def forward(self, x, pad_mask=None):
+    def forward(self, x, c=None, pad_mask=None):
         if self.architecture=="mlp":
             x=x.view(x.shape[0], -1)
         t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
 
         if self.multi_loss:
             N = (~pad_mask).sum(dim=-1).long() #count number of non-pad entries
-            c=self.fm.n_emb(N)
+            Nembed = self.fm.n_emb(N)
         else: 
-            N=None
-            c=None
-        return self.fm.vf(x,t,c,N)
+            Nembed=None
+
+        return self.fm.vf(x,t,c,Nembed)
 
     @torch.no_grad()
     def fit_count_prior(self, N_train, smoothing=0.0, freeze=False):
@@ -718,7 +725,7 @@ class model_FM(nn.Module):
         if freeze: self.count_logits.requires_grad_(False)
         self.fitted=True
 
-    def mse_loss(self, x, pad_mask=None, lambda_bce=1.0):
+    def mse_loss(self, x, c=None, pad_mask=None, lambda_bce=1.0):
         if self.architecture=="mlp":
             x=x.view(x.shape[0], -1)
 
@@ -735,16 +742,16 @@ class model_FM(nn.Module):
             Npred=self.count_logits[None].expand(x.shape[0], -1)
             count_loss = F.cross_entropy(Npred, N, reduction="none")  # [B]
 
-            #Flow matching loss p(x | N)
-            FM_loss=self.fm.loss(x, valid, N) #[Nbatch, Nconst*Nfeat]
+            #Flow matching loss p(x|c, N)
+            FM_loss=self.fm.loss(x, c, valid, N) #[Nbatch, Nconst*Nfeat]
 
             return FM_loss.sum()+lambda_bce*count_loss.sum()
         else:
             valid=torch.ones(x.shape, device=x.device)
-            return self.fm.loss(x, valid).sum()
+            return self.fm.loss(x, c, valid).sum()
 
     @torch.no_grad()
-    def generate(self,out_dimensions):
+    def generate(self,out_dimensions, c=None):
 
         if self.multi_loss:
 
@@ -757,7 +764,7 @@ class model_FM(nn.Module):
                 valid=valid.float()[:,:,None] #[B, Nconst, 1]
 
             #Generate the samples
-            samples=self.fm.generate(out_dimensions[0], valid, N)
+            samples=self.fm.generate(out_dimensions[0], c, valid, N)
 
             #Return the samples masked 
             samples = samples + (1 - valid) * self.pad_value #mask the output
@@ -770,7 +777,7 @@ class model_FM(nn.Module):
                 valid=torch.ones([out_dimensions[0],out_dimensions[1]*out_dimensions[2]], device=device)
             else:
                 valid=torch.ones([out_dimensions[0],out_dimensions[1],out_dimensions[2]], device=device)
-            samples=self.fm.generate(out_dimensions[0], valid)
+            samples=self.fm.generate(out_dimensions[0], c, valid)
             return samples.view(out_dimensions)
 
 # ---------------------------------------------------------------------

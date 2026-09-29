@@ -38,7 +38,7 @@ def evaluate_loss(model,args,X,mask=None,c=None):
     return loss,w.sum()
   elif args.architecture=="FM":
     #loss = (model.mse_loss(X,mask)*w2).sum()
-    loss=model.mse_loss(X, mask)
+    loss=model.mse_loss(X, c, mask)
     return loss,w.sum()
 
   #Auto-regressive models
@@ -65,7 +65,7 @@ def train(model,train_loader,args):
   for batch, X in enumerate(train_loader):
 
       #input data
-      X,mask,jet=format_input(X, args, device)
+      X, mask, jet=format_input(X, args, device)
 
       #calculate loss across the batch (summed and also seperate averaged value)
       optimizer.zero_grad()
@@ -121,7 +121,7 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
 
       #input data
-      X,mask,jet=format_input(X, args, device)
+      X, mask, jet=format_input(X, args, device)
 
       #calculate loss across the batch (summed, not averaged)
       loss,sum_w = evaluate_loss(model, args, X, mask, jet)
@@ -165,17 +165,25 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example,mask_example,jet_example=format_input(next(iter(train_loader)), args, device)
+    X_example, mask_example, jet_example=format_input(next(iter(train_loader)), args, device)
 
+    #Shape for later
+    input_example=[X_example]
+    X_shape=X_example.shape
+    mask_shape=mask_example.shape
     cond_shape=[0]
     if args.conditional:
         cond_shape=jet_example.shape
+    if args.conditional and args.multi_loss and args.architecture!="Transformer" and args.architecture!="MDN": 
+        input_example=[X_example,jet_example,mask_example]
+    elif args.conditional:
+        input_example=[X_example,jet_example]
 
     # construct model
     if args.model_checkpoint:
-        model = load_checkpoint_model(args, X_example.shape, cond_shape, args, device, checkpoint_info)
+        model = load_checkpoint_model(args, X_shape, cond_shape, args, device, checkpoint_info)
     else:
-        model = build_unbinned_model(X_example.shape, cond_shape, args)
+        model = build_unbinned_model(args, X_shape, cond_shape)
     model.to(device)
 
     #Make output directory and make metadata file to save arguments
@@ -183,29 +191,25 @@ if __name__ == "__main__":
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
+    print("Input shape,",X_shape, flush=True)
+    if args.conditional: 
+        print("Conditioning shape,", cond_shape, flush=True)
+    if args.multi_loss: 
+        print("Mask shape,",mask_shape, flush=True)
     if args.architecture=="FM" and args.multi_loss:
-      print("Input shape,",X_example.shape, mask_example.shape, flush=True)
-      modelstats=summary(model, input_data=[X_example,mask_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(X_example,mask_example).shape,flush=True)
+      modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(*input_example).shape,flush=True)
     elif args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
-      print("Input shape,",X_example.shape, flush=True)
-      modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(X_example).shape,flush=True)
+      modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      print("Output shape,", model(*input_example).shape,flush=True)
     elif args.architecture=="Transformer" or args.architecture=="MDN":
       if args.conditional:
-          print("Input shape,",X_example.shape,cond_shape, flush=True)
-          modelstats=summary(model, input_data=[X_example,jet_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+          modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+          output_example=model(*input_example)
           if args.multi_loss:
-            print("Output shape,", model(X_example,jet_example)[0].shape,model(X_example,jet_example)[-1].shape, flush=True)
+            print("Output shape,", output_example[0].shape,output_example[-1].shape, flush=True)
           else:
-            print("Output shape,", model(X_example,jet_example).shape, flush=True)
-      else:
-          print("Input shape,",X_example.shape, flush=True)
-          modelstats=summary(model, input_data=[X_example], col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-          if args.multi_loss:
-            print("Output shape,", model(X_example)[0].shape,model(X_example)[-1].shape, flush=True)
-          else:
-            print("Output shape,", model(X_example).shape, flush=True)
+            print("Output shape,", output_example.shape, flush=True)
 
     #Set the scheduler
     optimizer = make_optimizer(args, model)

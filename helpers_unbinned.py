@@ -55,16 +55,11 @@ class ktdr_dataset(torch.utils.data.Dataset):
         jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
         jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
         jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
-        jet_Nconst= (~self.mask).sum(dim=-1).long()
+        jet_Nconst= np.asarray(~self.mask[index]).sum(axis=-1)
         jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
     if self.preprocess:
         helpers.preprocess(self.data,"ktdr",self.preprocess)
-
-    if self.add_mask:
-        return [self.data,self.mask[index]]
-    else:
-        return self.data
 
     if self.add_mask and self.add_conditional:
         return [self.data,jet_data,self.mask[index]]
@@ -177,7 +172,7 @@ class constit_relative_dataset(torch.utils.data.Dataset):
         jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
         jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
         jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
-        jet_Nconst= (~self.mask).sum(dim=-1).long()
+        jet_Nconst= np.asarray(~self.mask[index]).sum(axis=-1)
         jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
     if self.add_mask and self.add_conditional:
@@ -435,7 +430,7 @@ def _config_get(args_or_dict, key, default=None):
 # ---------------------------------------------------------------------
 # Load model
 # ---------------------------------------------------------------------
-def build_unbinned_model(input_shape, cond_shape, args_or_dict):
+def build_unbinned_model(args_or_dict, input_shape, cond_shape):
 
     pad_value=-1
     if args_or_dict.input_format=="4vec":
@@ -482,10 +477,11 @@ def build_unbinned_model(input_shape, cond_shape, args_or_dict):
     elif args_or_dict.architecture=="FM":
         return models_generative.model_FM(
             input_shape=input_shape,
+            cond_shape=cond_shape,
             hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            steps=_as_int(_config_get(args_or_dict,"fm_steps")),
             time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-            cond_dim=_as_int(_config_get(args_or_dict,"fm_cond_dim")),
+            Nembed_dim=_as_int(_config_get(args_or_dict,"fm_Nembed_dim")),
+            steps=_as_int(_config_get(args_or_dict,"fm_steps")),
             multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
             architecture=_config_get(args_or_dict,"fm_architecture"),
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
@@ -635,7 +631,7 @@ def load_checkpoint_model(args, shape, cond_shape=[0], device="cpu", checkpoint_
     if checkpoint_info is None:
         checkpoint_info = load_checkpoint(args)
 
-    model = build_unbinned_model(shape, cond_shape, args)
+    model = build_unbinned_model(args, shape, cond_shape)
     model.load_state_dict(checkpoint_info["model_state_dict"])
     model.to(device)
 
@@ -860,7 +856,7 @@ def parse_input():
     # FM parameters
     parser.add_argument("--fm-architecture", default="mlp", choices=["mlp","transformer"], help="Type of model for the flow prediction")
     parser.add_argument("--fm-steps", type=int, default=25, help="FM Euler steps for integration")
-    parser.add_argument("--fm-cond-dim", type=int, default=16, help="Size of mulitplicity embedding dimenson")
+    parser.add_argument("--fm-Nembed-dim", type=int, default=16, help="Size of mulitplicity embedding dimenson")
 
     # NF paramaters
     parser.add_argument("--nflows", type=int, default=10, help="NF steps")

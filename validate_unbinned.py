@@ -20,7 +20,7 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example,_,jet_example=format_input(next(iter(train_loader)), args, device)
+    X_example, _, jet_example=format_input(next(iter(train_loader)), args, device)
 
     cond_shape=[0]
     if args.conditional:
