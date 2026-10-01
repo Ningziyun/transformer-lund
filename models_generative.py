@@ -38,6 +38,27 @@ class model_DNN(nn.Module):
 # ---------------------------------------------------------------------
 # Re-used blocks
 # ---------------------------------------------------------------------
+class N_MLP_Embed(nn.Module):
+    """
+    As opposted to taking nn.Embedding which sends N=4 and N=5 to distinct vectors, apply a linear transform and an MLP on this
+    Either:
+    linear: N / n_max puts the input in [0,1]
+    log: log(1 + N) compresses the high end tails
+
+    """
+    def __init__(self, n_max, embed_dim, transform="linear"):
+        super().__init__()
+        self.n_max, self.transform = n_max, transform
+        self.net = nn.Sequential(nn.Linear(1, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
+
+    def forward(self, N): # N: [B] long
+        x = N.float()[:, None]
+        if self.transform=="log":
+            x = torch.log1p(x) / math.log1p(self.n_max)
+        elif self.transform=="linear":
+            x / self.n_max
+        return self.net(x) # [B, E]
+
 class Sinusoidal_Time_Embedding(nn.Module):
     """
     Standard sinusoidal timestep embedding. Converts t -> [sin(w_0 t),cos(w_0 t),sin(w_1 t),cos(w_1 t), ...] with w_i = max_period^(−i/half)
@@ -616,7 +637,8 @@ class FlowMatching(nn.Module):
 
         #Set the multiplicity embedding
         if Nembed_dim>0:
-            self.n_emb = nn.Embedding(n_max + 1, Nembed_dim)
+            #self.n_emb = nn.Embedding(n_max + 1, Nembed_dim)
+            self.n_emb = N_MLP_Embed(n_max, Nembed_dim)
 
     def _get_conditions_kwargs(self, c, N, valid):
         conds={}
@@ -726,13 +748,27 @@ class model_FM(nn.Module):
         self.architecture=architecture
 
         if self.multi_loss:
-            #FIXME, might want to make this instead of a learned parameter, a MLP on the conditioning info. N should vary across class and pt
-            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater from N = 0 ... n_max
+            # p(N): learn multiplicity via a categorical paramater from N = 0 ... n_max . Can also make it conditional p(N|c) if N vary across class and pt
+            if self.c_dim > 0:
+                self.count_head = nn.Sequential(nn.Linear(self.c_dim, 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.n_max + 1),)
+            else:
+                self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1))
         else:
             Nembed_dim=0
 
         #NOTE: in MLP setup input is dimension # [B, Nconst*Nfeat] while in transformer # [B, Nconst, Nfeat]
         self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=self.c_dim, hidden_dim=hidden_dim, time_dim=time_dim, Nembed_dim=Nembed_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim) # learn density estimation p(X|c) or p(x|N,c) depeding if Nembed_dim provided,
+
+    def _count_logits(self, c, B):
+        if self.c_dim > 0:
+            return self.count_head(c)                 # [B, n_max+1]
+        return self.count_logits[None].expand(B, -1)  # same as before
+
+    def _expand_valid(self, valid_c):
+        """valid_c: [B, n_max] float (1 = real constituent). Returns the architecture-specific shape."""
+        if self.architecture == "mlp":
+            return valid_c.repeat_interleave(self.n_feat, dim=1)   # [B, n_max*n_feat]
+        return valid_c[:, :, None]                                  # [B, n_max, 1]
 
     @torch.no_grad()
     def fit_count_prior(self, N_train, smoothing=0.0, freeze=False):
@@ -753,11 +789,7 @@ class model_FM(nn.Module):
         if self.multi_loss:
             valid = (~pad_mask).float() #[B, Nconst]
             N = valid.sum(dim=-1).long() #count number of non-pad entries
-            #if not self.fitted: self.fit_count_prior(N)
-            if self.architecture=="mlp":
-                valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, Nconst*Nfeat]
-            else:
-                valid=valid[:,:,None] #[B, Nconst, 1]
+            valid = self._expand_valid(valid)
         else: 
             valid=torch.ones(x.shape, device=x.device)
             N = None
@@ -774,13 +806,10 @@ class model_FM(nn.Module):
             valid = (~pad_mask).float() #[B, Nconst]
             N = valid.sum(dim=-1).long() #count number of non-pad entries
             #if not self.fitted: self.fit_count_prior(N)
-            if self.architecture=="mlp":
-                valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, Nconst*Nfeat]
-            else:
-                valid=valid[:,:,None] #[B, Nconst, 1]
+            valid = self._expand_valid(valid)
 
             #Number of predictions loss p(N)
-            Npred=self.count_logits[None].expand(x.shape[0], -1)
+            Npred=self._count_logits(c, x.shape[0])
             count_loss = F.cross_entropy(Npred, N, reduction="none")  #Number of predictions loss p(N)
 
             #Flow matching loss p(x|c, N)
@@ -797,12 +826,9 @@ class model_FM(nn.Module):
         if self.multi_loss:
 
             #Generate the number of predictions
-            N = torch.distributions.Categorical(logits=self.count_logits).sample((out_dimensions[0],)) #sample the N
+            N = torch.distributions.Categorical(logits=self._count_logits(c,out_dimensions[0])).sample() #sample the N
             valid= torch.arange(self.n_max, device=N.device)[None, :] < N[:, None] #make mask which is true up to N and false after dim=[B, n_max]
-            if self.architecture=="mlp":
-                valid= valid.repeat_interleave(self.n_feat, dim=1).float() # Make it dim=[B, Nconst*nfeat]
-            else:
-                valid=valid.float()[:,:,None] #[B, Nconst, 1]
+            valid = self._expand_valid(valid).int()
 
             #Generate the samples
             samples=self.fm.generate(out_dimensions[0], c, valid, N)
