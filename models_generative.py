@@ -40,11 +40,11 @@ class model_DNN(nn.Module):
 # ---------------------------------------------------------------------
 class Sinusoidal_Time_Embedding(nn.Module):
     """
-    Standard sinusoidal timestep embedding. Converts t -> [sin(w_0 t),cos(w_0 t),sin(w_1 t),cos(w_1 t), ...] (check what is w_i)
+    Standard sinusoidal timestep embedding. Converts t -> [sin(w_0 t),cos(w_0 t),sin(w_1 t),cos(w_1 t), ...] with w_i = max_period^(−i/half)
     Can also do a normal embedding?
     t: (B,)
     """
-    def __init__(self, dim, max_period=10000, unit_interval=True):
+    def __init__(self, dim, max_period=100, unit_interval=True):
         super().__init__()
         self.dim = dim
         self.max_period = float(max_period)
@@ -89,13 +89,13 @@ class VectorFieldTrans(nn.Module):
     self.embed = nn.Sequential(nn.Linear(self.n_feat, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
 
     #specify the transformer block and number of layers
-    encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.1, batch_first=True)
+    encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.0, batch_first=True)
     self.encoder = nn.TransformerEncoder(encoder_layer, self.num_layers)
 
     #Now de-embed back to original output
     self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.n_feat))
-    #nn.init.zeros_(self.deembed.weight)   # start near v = 0, like a fresh flow
-    #nn.init.zeros_(self.deembed.bias)
+    nn.init.zeros_(self.deembed[-1].weight)   # start near v = 0, like a fresh flow
+    nn.init.zeros_(self.deembed[-1].bias)
 
     self.time_emb = Sinusoidal_Time_Embedding(time_dim)
     self.time_proj = nn.Linear(time_dim, embed_dim)
@@ -109,31 +109,48 @@ class VectorFieldTrans(nn.Module):
     # Embed the input to the latent space
     zct=self.embed(z) # (batch, seq_len, embed_dim)
 
-    #Add the conditioning and time dimensions
-    n_extra=1
-    zct = torch.cat([zct, tt], dim=1)
+    #Add conditiong via injection
     if c is not None:
         c = c[:, None, :]
-        zct = torch.cat([zct, c], dim=1)
-        n_extra+=1
+        zct = zct + c
     if N is not None:
         Nshaped = N[:, None, :]
-        zct = torch.cat([zct, Nshaped], dim=1)
-        n_extra+=1
+        zct = zct + Nshaped
     if valid is None:
         valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
 
     #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
-    pad = torch.cat([~valid, torch.zeros(z.shape[0], n_extra, dtype=torch.bool, device=z.device)], dim=1)
+    zct = self.encoder(zct, src_key_padding_mask=~valid)
+    zct=self.deembed(zct)
+
+    #Below instead adds conditioning as prefix token, not reccomended for low layers
+    '''
+    #Add the conditioning and time dimensions
+    extras = [self.time_proj(tt)]
+    if c is not None:
+        c = c[:, None, :]
+        extras.append(c)
+    if N is not None:
+        N = N[:, None, :]
+        extras.append(N)
+    if valid is None:
+        valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
+    extras = torch.stack(extras, dim=1) # [B, n_extra, E]
+    n_extra = extras.shape[1]
+    h = torch.cat([extras, self.embed(z)], dim=1)
+
+    #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
+    pad = torch.cat([torch.zeros(z.shape[0], n_extra, dtype=torch.bool, device=z.device), ~valid], dim=1)
 
     #Go through encoder
-    if N is None and c is None: #FIXME not sure why the pad mask is causing a crash for the all ones case
+    if N is None and c is None: #FIXME not sure why the pad mask is causing a crash for the all ones case #FIXME: should be fixed
         zct = self.encoder(zct)
     else:
         zct = self.encoder(zct, src_key_padding_mask=pad)
 
     #De-embed, only get dimensions mathcing input
-    zct=self.deembed(zct[:,:-n_extra,:])
+    zct=self.deembed(zct[:,n_extra:,:])
+    '''
 
     return zct
 
@@ -225,7 +242,10 @@ class model_autoregressive_transformer(nn.Module):
       # Embed the N-dim vector into the embedded space
       h = self.embed(x)
       if self.cond_dim>0:
+          #Additive injection
           #h = h + self.cond_embed(c).unsqueeze(1) # Add context embedding into const embedding
+
+          #Prefix conditioning, replace zero-start token with the conditioned token
           c = self.cond_embed(c).unsqueeze(1)  # (B, 1, E)
           h = torch.cat([c, h[:, 1:, :]], dim=1)  # replace start-token embedding with cond
 
@@ -578,6 +598,8 @@ class FlowMatching(nn.Module):
         self.n_max=n_max
         self.steps=steps
         self.architecture = architecture
+        self.c_dim=c_dim
+        self.Nembed_dim=Nembed_dim
 
         #Get the vector field prediction v
         if self.architecture == "mlp":
@@ -585,7 +607,7 @@ class FlowMatching(nn.Module):
             #self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=hidden_dim+Nembed_dim, hidden_dim=hidden_dim, time_dim=time_dim)
         elif self.architecture == "transformer":
             #Will put both the N and c condtioners into same embedding dim as the flow
-            Nembed_dim=hidden_dim 
+            if Nembed_dim>0: Nembed_dim=hidden_dim 
             self.cond_embed = nn.Sequential(nn.Linear(c_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim))
             self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim)
 
@@ -596,19 +618,28 @@ class FlowMatching(nn.Module):
         if Nembed_dim>0:
             self.n_emb = nn.Embedding(n_max + 1, Nembed_dim)
 
+    def _get_conditions_kwargs(self, c, N, valid):
+        conds={}
+        if self.architecture == "mlp":
+            if self.c_dim>0 and self.Nembed_dim>0:
+                conds["c"]=torch.cat([c,self.n_emb(N)],dim=1)
+            elif self.Nembed_dim>0:
+                conds["c"]=self.n_emb(N)
+            elif self.c_dim>0:
+                conds["c"]=c
+        if self.architecture == "transformer":
+            if self.c_dim>0:
+                conds["c"]=self.cond_embed(c)
+            if self.Nembed_dim>0:
+                conds["N"]=self.n_emb(N)
+            conds["valid"]=valid.squeeze(-1).bool() # [B, n_max, 1] -> [B, n_max]
+
+        return conds
+
     def forward(self, x, t, c=None, N=None, valid=None):
 
         #Set conditions
-        conds={"c":c}
-        if self.architecture == "mlp":
-            if c is not None and N is not None:
-                conds["c"]=torch.cat([c,self.n_emb(N)],dim=1)
-            elif c is None and N is not None:
-                conds["c"]=self.n_emb(N)
-        if self.architecture == "transformer":
-            conds["c"]=self.cond_embed(c)
-            conds["N"]=self.n_emb(N)
-            conds["valid"]=valid.squeeze(-1).bool()
+        conds=self._get_conditions_kwargs(c,N,valid)
 
         #Get the vector field at this position, time, and condition
         p_xt=self.vf(x,t,**conds)
@@ -624,9 +655,9 @@ class FlowMatching(nn.Module):
 
         # probability path at time t
         if self.architecture == "transformer":
-            xt=(1-t[:,:,None])*x0+t[:,:,None]*x1
+            xt=(1-t[:,:,None])*x0+t[:,:,None]*x1 #everything of dimension [B, n_max, n_features]
         else:
-            xt=(1-t)*x0+t*x1
+            xt=(1-t)*x0+t*x1 #everything of dimension [B, n_max*n_features]
 
         #sigma=1e-4
         #eps=torch.randn_like(x1)
@@ -638,21 +669,13 @@ class FlowMatching(nn.Module):
         #Get the prediction at time t
         pred=self.forward(xt,t,c,N,valid)
 
-        '''
-        #MSE loss
-        if pad_mask == None:
-            loss = F.mse_loss(pred,u,reduction='none')
-        else:
-            loss = F.mse_loss(pred,u,reduction='none')
-            loss=loss.masked_fill(pad_mask, 0.0) #FM loss
-
-        return loss
-        '''
-
-        #FIXME, new and masking of valid above
+        #Get the loss term, masking the others to zero
         se = ((pred - u) ** 2) * valid
-        # mean over valid entries per jet, so jets with many constituents don't dominate
-        return se.sum(dim=-1) / valid.sum(dim=-1).clamp(min=1)
+
+        # mean over valid entries per jet (ignoring the masked zero), so jets with many constituents don't dominate
+        dims = tuple(range(1, se.ndim)) #smart way to decide whether is in [B, n_max*n_feat] or [B, n_max, n_feat] in two setups
+        n_valid = valid.expand_as(se).sum(dim=dims).clamp(min=1)
+        return se.sum(dim=dims) / n_valid
 
     @torch.no_grad()
     def generate(self, batch_size, c=None, valid=None, N=None):
@@ -668,16 +691,7 @@ class FlowMatching(nn.Module):
         t=self.time_grid.to(device)
 
         #make the condtions and embeddings
-        conds={"c":c}
-        if self.architecture == "mlp":
-            if c is not None and N is not None:
-                conds["c"]=torch.cat([c,self.n_emb(N)],dim=1)
-            elif c is None and N is not None:
-                conds["c"]=self.n_emb(N)
-        if self.architecture == "transformer":
-            conds["c"]=self.cond_embed(c)
-            conds["N"]=self.n_emb(N)
-            conds["valid"]=valid.squeeze(-1).bool()
+        conds=self._get_conditions_kwargs(c,N,valid)
 
         #push forward x_0 to x_1 via RK4 algorith and the learned velocity
         dt=1/self.steps
@@ -712,23 +726,13 @@ class model_FM(nn.Module):
         self.architecture=architecture
 
         if self.multi_loss:
+            #FIXME, might want to make this instead of a learned parameter, a MLP on the conditioning info. N should vary across class and pt
             self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater from N = 0 ... n_max
         else:
             Nembed_dim=0
 
+        #NOTE: in MLP setup input is dimension # [B, Nconst*Nfeat] while in transformer # [B, Nconst, Nfeat]
         self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=self.c_dim, hidden_dim=hidden_dim, time_dim=time_dim, Nembed_dim=Nembed_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim) # learn density estimation p(X|c) or p(x|N,c) depeding if Nembed_dim provided,
-
-    def forward(self, x, c=None, pad_mask=None):
-        if self.architecture=="mlp":
-            x=x.view(x.shape[0], -1)
-        t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
-
-        if self.multi_loss:
-            N = (~pad_mask).sum(dim=-1).long() #count number of non-pad entries
-        else: 
-            N = None
-
-        return self.fm(x, t, c, N, ~pad_mask)
 
     @torch.no_grad()
     def fit_count_prior(self, N_train, smoothing=0.0, freeze=False):
@@ -740,13 +744,13 @@ class model_FM(nn.Module):
         if freeze: self.count_logits.requires_grad_(False)
         self.fitted=True
 
-    def mse_loss(self, x, c=None, pad_mask=None, lambda_bce=1.0):
+    def forward(self, x, c=None, pad_mask=None):
         if self.architecture=="mlp":
             x=x.view(x.shape[0], -1)
+        t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
 
+        #Count mulitplicity and put mask in right size
         if self.multi_loss:
-
-            #Number of predictions loss p(N)
             valid = (~pad_mask).float() #[B, Nconst]
             N = valid.sum(dim=-1).long() #count number of non-pad entries
             #if not self.fitted: self.fit_count_prior(N)
@@ -754,13 +758,35 @@ class model_FM(nn.Module):
                 valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, Nconst*Nfeat]
             else:
                 valid=valid[:,:,None] #[B, Nconst, 1]
+        else: 
+            valid=torch.ones(x.shape, device=x.device)
+            N = None
+
+        return self.fm(x, t, c, N, valid)
+
+    def mse_loss(self, x, c=None, pad_mask=None, lambda_ce=1.0):
+        if self.architecture=="mlp":
+            x=x.view(x.shape[0], -1)
+
+        if self.multi_loss:
+
+            #Count mulitplicity and put mask in right size
+            valid = (~pad_mask).float() #[B, Nconst]
+            N = valid.sum(dim=-1).long() #count number of non-pad entries
+            #if not self.fitted: self.fit_count_prior(N)
+            if self.architecture=="mlp":
+                valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, Nconst*Nfeat]
+            else:
+                valid=valid[:,:,None] #[B, Nconst, 1]
+
+            #Number of predictions loss p(N)
             Npred=self.count_logits[None].expand(x.shape[0], -1)
-            count_loss = F.cross_entropy(Npred, N, reduction="none")  # [B]
+            count_loss = F.cross_entropy(Npred, N, reduction="none")  #Number of predictions loss p(N)
 
             #Flow matching loss p(x|c, N)
             FM_loss=self.fm.loss(x, c, valid, N) #[Nbatch, Nconst*Nfeat]
 
-            return FM_loss.sum()+lambda_bce*count_loss.sum()
+            return FM_loss.sum()+lambda_ce*count_loss.sum()
         else:
             valid=torch.ones(x.shape, device=x.device)
             return self.fm.loss(x, c, valid).sum()

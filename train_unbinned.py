@@ -168,16 +168,15 @@ if __name__ == "__main__":
     X_example, mask_example, jet_example=format_input(next(iter(train_loader)), args, device)
 
     #Shape for later
-    input_example=[X_example]
+    input_example={"x":X_example}
     X_shape=X_example.shape
-    mask_shape=mask_example.shape
     cond_shape=[0]
     if args.conditional:
         cond_shape=jet_example.shape
-    if args.conditional and args.multi_loss and args.architecture!="Transformer" and args.architecture!="MDN": 
-        input_example=[X_example,jet_example,mask_example]
-    elif args.conditional:
-        input_example=[X_example,jet_example]
+        input_example["c"]=jet_example
+    if args.multi_loss and args.architecture!="Transformer" and args.architecture!="MDN": 
+        input_example["pad_mask"]=mask_example
+        mask_shape=mask_example.shape
 
     # construct model
     if args.model_checkpoint:
@@ -197,12 +196,12 @@ if __name__ == "__main__":
     if args.multi_loss: 
         print("Mask shape,",mask_shape, flush=True)
     if args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
-      modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(*input_example).shape,flush=True)
+      modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"], mode="train")
+      print("Output shape,", model(**input_example).shape,flush=True)
     elif args.architecture=="Transformer" or args.architecture=="MDN":
       if args.conditional:
           modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-          output_example=model(*input_example)
+          output_example=model(**input_example)
           if args.multi_loss:
             print("Output shape,", output_example[0].shape,output_example[-1].shape, flush=True)
           else:
