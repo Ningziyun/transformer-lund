@@ -196,10 +196,7 @@ if __name__ == "__main__":
         print("Conditioning shape,", cond_shape, flush=True)
     if args.multi_loss: 
         print("Mask shape,",mask_shape, flush=True)
-    if args.architecture=="FM" and args.multi_loss:
-      modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-      print("Output shape,", model(*input_example).shape,flush=True)
-    elif args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
+    if args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
       modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       print("Output shape,", model(*input_example).shape,flush=True)
     elif args.architecture=="Transformer" or args.architecture=="MDN":

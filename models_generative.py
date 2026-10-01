@@ -71,10 +71,10 @@ class Sinusoidal_Time_Embedding(nn.Module):
 class VectorFieldTrans(nn.Module):
   """
   Conditional vector field: dz/dt = f(z, t, c)
-  z: [B, D]
-  c: [B, C] (context)
+  z: [B, C, F]
+  c: [B, E] (context embded from original size M to same embedding dimension [B, M] -> [B, E]
   """
-  def __init__(self, n_feat, n_max, c_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64):
+  def __init__(self, n_feat, n_max, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64):
     super().__init__()
 
     self.n_feat=n_feat
@@ -84,7 +84,6 @@ class VectorFieldTrans(nn.Module):
     self.num_heads=num_heads
     self.num_layers=num_layers
     self.time_dim=time_dim
-    self.c_dim=c_dim
 
     #Add the embedding layer
     self.embed = nn.Sequential(nn.Linear(self.n_feat, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
@@ -101,32 +100,34 @@ class VectorFieldTrans(nn.Module):
     self.time_emb = Sinusoidal_Time_Embedding(time_dim)
     self.time_proj = nn.Linear(time_dim, embed_dim)
 
-    self.n_proj = nn.Linear(c_dim, embed_dim)
-
-  def forward(self, z, t, c, N): #FIXME, there is a couple places where both the N, valid, and embedding c are provided redundatnly together. Might be a better interface somehow?
+  def forward(self, z, t, c, N, valid): #FIXME, there is a couple places where both the N, valid, and embedding c are provided redundatnly together. Might be a better interface somehow?
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
     tt=self.time_proj(tt)[:, None, :] #put into same embedding/dimension as input
 
     # Embed the input to the latent space
-    z=self.embed(z) # (batch, seq_len, embed_dim)
+    zct=self.embed(z) # (batch, seq_len, embed_dim)
 
-    if c is None:
-        zct = torch.cat([z, tt], dim=1)
-        n_extra=1
+    #Add the conditioning and time dimensions
+    n_extra=1
+    zct = torch.cat([zct, tt], dim=1)
+    if c is not None:
+        c = c[:, None, :]
+        zct = torch.cat([zct, c], dim=1)
+        n_extra+=1
+    if N is not None:
+        Nshaped = N[:, None, :]
+        zct = torch.cat([zct, Nshaped], dim=1)
+        n_extra+=1
+    if valid is None:
         valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
-    else:
-        c = self.n_proj(c)[:, None, :] #put into same embedding/dimension as input
-        zct = torch.cat([z, c, tt], dim=1)
-        n_extra=2
-        valid=torch.arange(self.n_max, device=z.device)[None, :] < N[:, None]
 
     #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
     pad = torch.cat([~valid, torch.zeros(z.shape[0], n_extra, dtype=torch.bool, device=z.device)], dim=1)
 
     #Go through encoder
-    if c is None: #FIXME not sure why the pad mask is causing a crash for the all ones case
+    if N is None and c is None: #FIXME not sure why the pad mask is causing a crash for the all ones case
         zct = self.encoder(zct)
     else:
         zct = self.encoder(zct, src_key_padding_mask=pad)
@@ -142,15 +143,14 @@ class VectorFieldNN(nn.Module):
   z: [B, D]
   c: [B, C] (context)
   """
-  def __init__(self, z_dim, c_dim, hidden_dim, time_dim=1, N_dim=0):
+  def __init__(self, z_dim, c_dim, hidden_dim, time_dim=1):
     super().__init__()
     self.time_dim=time_dim
     self.c_dim=c_dim
-    self.N_dim=N_dim
 
     if self.time_dim==1:
         self.net = nn.Sequential(
-          nn.Linear(z_dim + c_dim + 1 + N_dim, hidden_dim),  # +1 for time embedding (t)
+          nn.Linear(z_dim + c_dim + 1, hidden_dim),  # +1 for time embedding (t)
           nn.SiLU(),
           nn.Linear(hidden_dim, hidden_dim),
           nn.SiLU(),
@@ -159,7 +159,7 @@ class VectorFieldNN(nn.Module):
 
     else:
         self.net = nn.Sequential(
-          nn.Linear(z_dim + c_dim + time_dim + N_dim, hidden_dim),
+          nn.Linear(z_dim + c_dim + time_dim, hidden_dim),
           nn.SiLU(),
           nn.Linear(hidden_dim, hidden_dim),
           nn.SiLU(),
@@ -167,7 +167,7 @@ class VectorFieldNN(nn.Module):
         )
         self.time_emb = Sinusoidal_Time_Embedding(time_dim)
 
-  def forward(self, z, t, c=None, Nembed=None):
+  def forward(self, z, t, c=None):
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
@@ -175,8 +175,6 @@ class VectorFieldNN(nn.Module):
 
     if self.c_dim>0:
         zct = torch.cat([zct, c], dim=-1)
-    if self.N_dim>0:
-        zct = torch.cat([zct, Nembed], dim=-1)
 
     return self.net(zct)
 
@@ -583,9 +581,13 @@ class FlowMatching(nn.Module):
 
         #Get the vector field prediction v
         if self.architecture == "mlp":
-            self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim, N_dim=Nembed_dim)
+            self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim+Nembed_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+            #self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=hidden_dim+Nembed_dim, hidden_dim=hidden_dim, time_dim=time_dim)
         elif self.architecture == "transformer":
-            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim)
+            #Will put both the N and c condtioners into same embedding dim as the flow
+            Nembed_dim=hidden_dim 
+            self.cond_embed = nn.Sequential(nn.Linear(c_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim))
+            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim)
 
         #Set the timegrid
         self.register_buffer("time_grid", torch.linspace(0,1,steps+1))
@@ -594,18 +596,31 @@ class FlowMatching(nn.Module):
         if Nembed_dim>0:
             self.n_emb = nn.Embedding(n_max + 1, Nembed_dim)
 
-        #Add a embedding layer for the conditional info as well
-        if c_dim>0:
-            self.cond_embed = nn.Sequential(nn.Linear(c_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim))
+    def forward(self, x, t, c=None, N=None, valid=None):
+
+        #Set conditions
+        conds={"c":c}
+        if self.architecture == "mlp":
+            if c is not None and N is not None:
+                conds["c"]=torch.cat([c,self.n_emb(N)],dim=1)
+            elif c is None and N is not None:
+                conds["c"]=self.n_emb(N)
+        if self.architecture == "transformer":
+            conds["c"]=self.cond_embed(c)
+            conds["N"]=self.n_emb(N)
+            conds["valid"]=valid.squeeze(-1).bool()
+
+        #Get the vector field at this position, time, and condition
+        p_xt=self.vf(x,t,**conds)
+        return p_xt
 
     def loss(self, x1, c=None, valid=None, N=None):
-        B=x1.shape[0]
         device=x1.device
 
         #sample the original gaussian and a random time
         x1 = x1 * valid
         x0=torch.randn_like(x1)* valid 
-        t=torch.rand(B,1,device=device)
+        t=torch.rand(x1.shape[0],1,device=device)
 
         # probability path at time t
         if self.architecture == "transformer":
@@ -621,12 +636,7 @@ class FlowMatching(nn.Module):
         u=x1-x0
 
         #Get the prediction at time t
-        if N is not None:
-            Nembed=self.n_emb(N)
-        else:
-            Nembed=None
-
-        pred=self.vf(xt,t,c,Nembed)
+        pred=self.forward(xt,t,c,N,valid)
 
         '''
         #MSE loss
@@ -657,19 +667,25 @@ class FlowMatching(nn.Module):
         #make the time grid
         t=self.time_grid.to(device)
 
-        #make the multiplicity embedding
-        if N is not None:
-            Nembed=self.n_emb(N)
-        else:
-            Nembed=None
+        #make the condtions and embeddings
+        conds={"c":c}
+        if self.architecture == "mlp":
+            if c is not None and N is not None:
+                conds["c"]=torch.cat([c,self.n_emb(N)],dim=1)
+            elif c is None and N is not None:
+                conds["c"]=self.n_emb(N)
+        if self.architecture == "transformer":
+            conds["c"]=self.cond_embed(c)
+            conds["N"]=self.n_emb(N)
+            conds["valid"]=valid.squeeze(-1).bool()
 
         #push forward x_0 to x_1 via RK4 algorith and the learned velocity
         dt=1/self.steps
         for k in range(len(t)-1):
-            k1=self.vf(x, t[k], c, Nembed) * valid
-            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, c, Nembed) * valid
-            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, c, Nembed) * valid
-            k4=self.vf(x+dt*k3, t[k]+dt, c, Nembed) * valid
+            k1=self.vf(x, t[k], **conds) * valid
+            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, **conds) * valid
+            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, **conds) * valid
+            k4=self.vf(x+dt*k3, t[k]+dt, **conds) * valid
 
             x=x+dt*(k1+2*k2+2*k3+k4)/6
 
@@ -709,11 +725,10 @@ class model_FM(nn.Module):
 
         if self.multi_loss:
             N = (~pad_mask).sum(dim=-1).long() #count number of non-pad entries
-            Nembed = self.fm.n_emb(N)
         else: 
-            Nembed=None
+            N = None
 
-        return self.fm.vf(x,t,c,Nembed)
+        return self.fm(x, t, c, N, ~pad_mask)
 
     @torch.no_grad()
     def fit_count_prior(self, N_train, smoothing=0.0, freeze=False):
@@ -751,7 +766,7 @@ class model_FM(nn.Module):
             return self.fm.loss(x, c, valid).sum()
 
     @torch.no_grad()
-    def generate(self,out_dimensions, c=None):
+    def generate(self, out_dimensions, c=None):
 
         if self.multi_loss:
 
