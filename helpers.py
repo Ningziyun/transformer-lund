@@ -54,7 +54,7 @@ def make_lundplane(input_vec, pad_length=20):
 # ---------------------------------------------------------------------
 # Convert relative const vectors to absolute ones
 # ---------------------------------------------------------------------
-def make_absolute_constituents(relative_vec, jet_vec, pad_length=20):
+def make_absolute_constituents(relative_vec, jet_vec):
 
     # Jet quantities
     jet_pt = jet_vec[:, 0]
@@ -71,7 +71,7 @@ def make_absolute_constituents(relative_vec, jet_vec, pad_length=20):
     const_phi = delta_phi + jet_phi[:, None]
     const_eta = delta_eta + jet_eta[:, None]
 
-    # 4-vectro asumming massless
+    # 4-vector asumming massless
     E = const_pt * np.cosh(const_eta)
     px = const_pt * np.cos(const_phi)
     py = const_pt * np.sin(const_phi)
@@ -84,7 +84,7 @@ def make_absolute_constituents(relative_vec, jet_vec, pad_length=20):
     py[mask]=-1
     pz[mask]=-1
 
-    return np.stack( [E, px, py, pz], axis=-1)
+    return np.stack([E, px, py, pz], axis=-1)
 
 # ---------------------------------------------------------------------
 # Macros to help with training
@@ -115,6 +115,32 @@ def preprocess_mean_std(input_format):
         py_mean,py_std=0.011, 30.174
         pz_mean,pz_std=-0.001, 49.941
         return [[e_mean,e_std],[px_mean,px_std],[py_mean,py_std],[pz_mean,pz_std]]
+
+    elif input_format=="relvec":
+        ptfrac_mean,ptfrac_std=0.029, 0.061
+        deta_mean,deta_std=0.000, 0.200
+        dphi_mean,dphi_std=0.000, 0.202
+        return [[ptfrac_mean,ptfrac_std],[deta_mean,deta_std],[dphi_mean,dphi_std]]
+
+        #ptfrac_mean,ptfrac_std=4.531,1.298
+    return None
+
+
+def preprocess_log_mean_std(input_format):
+    #Predefined feature for standardizing
+    if input_format=="4vec":
+        e_mean,e_std=2.417,1.173
+        px_mean,px_std=0.000,2.019
+        py_mean,py_std=0.000,2.021
+        pz_mean,pz_std=0.000,2.213
+        return [[e_mean,e_std],[px_mean,px_std],[py_mean,py_std],[pz_mean,pz_std]]
+
+    elif input_format=="relvec":
+        #ptfrac_mean,ptfrac_std=4.531,1.298 #-log(x)
+        ptfrac_mean,ptfrac_std=0.027,0.052
+        deta_mean,deta_std=0.000, 0.200
+        dphi_mean,dphi_std=0.000, 0.202
+        return [[ptfrac_mean,ptfrac_std],[deta_mean,deta_std],[dphi_mean,dphi_std]]
     return None
 
 def preprocess_min_max(input_format):
@@ -129,6 +155,12 @@ def preprocess_min_max(input_format):
         py_min,py_max=-971.391, 895.821
         pz_min,pz_max=-2699.067, 2506.768
         return [[e_min,e_max],[px_min,px_max],[py_min,py_max],[pz_min,pz_max]]
+
+    elif input_format=="4vec":
+        ptfrac_min,ptfrac_max=0.000, 1.000
+        deta_min,deta_max=-0.880, 0.880
+        dphi_min,dphi_max=-0.845, 0.845
+        return [[ptfrac_min,ptfrac_max],[deta_min,deta_max],[dphi_min,dphi_max]]
     return None
 
 def preprocess(X,input_format,method="log"):
@@ -144,13 +176,32 @@ def preprocess(X,input_format,method="log"):
         min_max=preprocess_min_max(input_format)
         for ii in range(X.shape[-1]):
             X[:,ii]=(X[:,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
-        X[mask]=-1 #shift padding
+        X[mask]=-1 #keep padding
+
+    elif method=="log" and input_format=="relvec":
+        X[...,0]=-torch.log(X[...,0]) #-log(x)
+        X[mask]=-1 #keep padding
 
     elif method=="log":
         X[...] = torch.sign(X) * torch.log1p(torch.abs(X)) #sgn(x)*log(|x|+1)
-        X[mask]=-10 #restore padding
+        X[mask]=-10 #shift padding
 
-    elif method=="shiftnan":
+    elif method=="logstd" and input_format=="relvec":
+        mean_std=preprocess_log_mean_std(input_format)
+        #X[...,0]=-torch.log(X[...,0]) #-log(x)
+        X[...,0]=torch.log1p(X[...,0])
+        for ii in range(0,X.shape[-1]):
+            X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
+        X[mask]=-10 #shift padding
+
+    elif method=="logstd":
+        mean_std=preprocess_log_mean_std(input_format)
+        X[...] = torch.sign(X) * torch.log1p(torch.abs(X)) #sgn(x)*log(|x|+1)
+        for ii in range(X.shape[-1]):
+            X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
+        X[mask]=-10 #shift padding
+
+    elif method=="shiftpad":
         X[mask]=-3e3 #shift padding
 
     else:
@@ -167,7 +218,7 @@ def undo_preprocess(X,input_format,method="log"):
         mean_std=preprocess_mean_std(input_format)
         for ii in range(X_new.shape[-1]):
             X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
-        X_new[mask] = -1
+        X_new[mask] = -1 #restore padding
 
     elif method=="linear":
         if input_format=="ktdr":
@@ -177,17 +228,44 @@ def undo_preprocess(X,input_format,method="log"):
         min_max=preprocess_min_max(input_format)
         for ii in range(X_new.shape[-1]):
             X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
-        X_new[mask] = -1
+        X_new[mask] = -1 #restore padding
+
+    elif method=="log" and input_format=="relvec":
+        mask = X[:,:,0] < 0
+        X_new=X
+        X_new[...,0]=torch.exp(-X[...,0])
+        X_new[mask]=-1 #restore padding
 
     elif method=="log":
         if input_format=="ktdr":
             mask = X[:,:,-1] < 0
         else:
-            mask = X[:,:,-0] < 0
+            mask = X[:,:,0] < 0
         X_new = torch.sign(X) * torch.expm1(torch.abs(X))
-        X_new[mask] = -1
+        X_new[mask] = -1 #restore padding
 
-    elif method=="shiftnan":
+    elif method=="logstd" and input_format=="relvec":
+        mean_std=preprocess_log_mean_std(input_format)
+        mask = X[:,:,0] < -9
+
+        for ii in range(X_new.shape[-1]):
+            X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+        #X_new[...,0]=torch.exp(-X_new[...,0])
+        X_new[...,0]=torch.expm1(X_new[...,0])
+
+        X_new[mask]=-1 #restore padding
+
+    elif method=="logstd":
+        mean_std=preprocess_log_mean_std(input_format)
+        mask = X[:,:,0] < -9
+
+        for ii in range(X_new.shape[-1]):
+            X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+        X_new = torch.sign(X_new) * torch.expm1(torch.abs(X_new))
+
+        X_new[mask] = -1 #restore padding
+
+    elif method=="shiftpad":
         return X
 
     return X_new

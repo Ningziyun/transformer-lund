@@ -166,16 +166,55 @@ def _symmetric_limit(values, fallback=1.0):
     vmax = max(vmax, np.max(merged) if vmax == 0 else vmax)
     return vmax if vmax > 0 else fallback
 
-def fix_badjets(plot_inputs, do_update=False, results=None):
+def fix_badjets(args, plot_inputs, results=None):
     #Check for bad values:
     for ii, jets in enumerate(plot_inputs[1:]):
+
+        #Mask clearly nan-like jet
         mask_badconst= ~np.all(np.isfinite(jets), axis=-1) | (np.max(np.abs(jets), axis=-1) > 2e3)
+
+        #Other weird jets
+        if args.input_format=="4vec":
+            eps=1e-12
+            mask=jets[..., 0] > -1
+            E  = np.where(mask, jets[..., 0], 0.0)
+            px = np.where(mask, jets[..., 1], 0.0)
+            py = np.where(mask, jets[..., 2], 0.0)
+            pz = np.where(mask, jets[..., 3], 0.0)
+            const_pt = np.sqrt(px**2 + py**2)
+            const_eta = np.arcsinh(pz / np.maximum(const_pt, eps))
+            const_phi = np.arctan2(py, px)
+
+            jet_E  = E.sum(axis=1)
+            jet_px = px.sum(axis=1)
+            jet_py = py.sum(axis=1)
+            jet_pz = pz.sum(axis=1)
+            jet_pt = np.sqrt(jet_px**2 + jet_py**2)
+            jet_eta = np.arcsinh(jet_pz / np.maximum(jet_pt, eps))
+            jet_phi = np.arctan2(jet_py, jet_px)
+
+            # Delta R(constituent, jet)
+            deta = const_eta - jet_eta[:, None]
+            deta[~mask]=0
+            dphi = const_phi - jet_phi[:, None]
+            dphi = np.arctan2( np.sin(dphi), np.cos(dphi)) # Wrap Delta phi into (-pi, pi], remove padded_const
+            dphi[~mask]=0
+            constituent_dR = np.sqrt(deta**2 + dphi**2)
+            mask_badconst = mask_badconst | (constituent_dR > 0.8)
+
+        #Other weird jets
+        if args.input_format=="relvec":
+            mask_badconst = mask_badconst | (jets[:,:,0]>1) | (jets[:,:,0] <-1)
+
+        #Count them
         N_badconst = np.sum(mask_badconst)
         bad_jets = np.any(mask_badconst, axis=1)
         N_badjets = np.sum(bad_jets)
         if results: results["frac_bad"]=N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2])
-        print("frac_badconst",N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2]), "frac_badjet",N_badjets/(jets.shape[0]*jets.shape[1]))
-        if do_update:
+        print("frac_badconst %0.3e % 0.3e"%(N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2]),N_badjets/(jets.shape[0]*jets.shape[1])))
+
+        #mask if wanr
+        if args.mask_bad:
             jets[mask_badconst] = -1
 
 def hist_with_ratio(ax, rax, data_list, labels, linestyles, bin_range, xlabel, bins=20, ratio_ylim=(0.0, 2.0)):
@@ -226,8 +265,8 @@ def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="
     #Get ranges
     Ndim=inputs[0].shape[1]
     Nin=len(inputs)
-    mins=np.zeros(Ndim)
-    maxs=np.zeros(Ndim)
+    mins=np.full(Ndim, np.inf)
+    maxs=np.full(Ndim, -np.inf)
     for ii in range(Ndim):
         for jj in range(Nin):
             mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
@@ -870,15 +909,15 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
             tau21 = tau[:, 1] / tau[:, 0]
             tau32 = tau[:, 2] / tau[:, 1]
             log_mpt=np.log(jet_mass**2/jet_pt**2)
-        log_mpt=np.nan_to_num(log_mpt,nan=10,posinf=10,neginf=10)
+        log_mpt=np.nan_to_num(log_mpt,nan=1,posinf=1,neginf=1)
 
         plots[0].append(jet_pt)
         plots[1].append(jet_mass)
         plots[2].append(jet_eta)
-        plots[3].append(multiplicity)
-        plots[4].append(dphi[mask])
-        plots[5].append(deta[mask])
-        plots[6].append(constituent_dR[mask])
+        plots[3].append(dphi[mask])
+        plots[4].append(deta[mask])
+        plots[5].append(constituent_dR[mask])
+        plots[6].append(multiplicity)
         plots[7].append(tau21[np.isfinite(tau21)])
         plots[8].append(tau32[np.isfinite(tau32)])
         plots[9].append(d2[np.isfinite(d2)])
@@ -894,15 +933,18 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
             maxs[ii]=max(maxs[ii],np.max(plots[ii][jj]))
 
     #Plot stuff
-    for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"Multiplicity",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
-        hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel)
+    for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"Multiplicity",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
+        if xlabel==r"Multiplicity":
+            hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (0, maxs[ip]), xlabel, bins=int(np.round(maxs[ip])))
+        else:
+            hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel)
 
     name = "highlevel"
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir,name+".png"))
     fig.savefig(os.path.join(out_dir,name+".pdf"))
     plt.close(fig)
-    print(f"Plotting EEC to {out_dir}/{name}.pdf")
+    print(f"Plotting high-level to {out_dir}/{name}.pdf")
 
     return
 
@@ -990,7 +1032,10 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
           #Generate the image
           try:
-              generated_seq = model.generate(out_dimensions=X.shape)
+              if args.conditional:
+                  generated_seq = model.generate(out_dimensions=X.shape,c=jet)
+              else:
+                  generated_seq = model.generate(out_dimensions=X.shape)
 
           except RuntimeError as err:
             reason = f"generation failed: {err}"
@@ -1052,7 +1097,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       original_np = original.numpy() #numpy shares memory but can delete original if want
       generated_np = [g.numpy() for g in generated]
       plot_inputs = [original_np] + generated_np
-      if not args.preprocess: fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
+      if not args.preprocess: fix_badjets(args, plot_inputs, results) #if want to fix the badjets
       flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
       # ---------------------------------------------------------------------
@@ -1076,7 +1121,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
         generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
         plot_inputs = [original_np] + generated_np
-        fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
+        fix_badjets(args, plot_inputs, results) #if want to fix the badjets
         flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
         #make a quick dump
@@ -1101,8 +1146,8 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         #Clear memory and remake
         for p in plot_inputs: del p
 
-        original_np=helpers.make_absolute_constituents(original,jet_list)
-        generated_np = [helpers.make_absolute_constituents(g,jet_list) for g in generated]
+        original_np=helpers.make_absolute_constituents(original_np,jet_list.numpy())
+        generated_np = [helpers.make_absolute_constituents(g,jet_list.numpy()) for g in generated_np]
         plot_inputs = [original_np] + generated_np
         flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 

@@ -175,6 +175,9 @@ class constit_relative_dataset(torch.utils.data.Dataset):
         jet_Nconst= np.asarray(~self.mask[index]).sum(axis=-1)
         jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
+    if self.preprocess:
+        helpers.preprocess(self.data,"relvec",self.preprocess)
+
     if self.add_mask and self.add_conditional:
         return [self.data,jet_data,self.mask[index]]
     elif self.add_mask:
@@ -434,9 +437,10 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
 
     pad_value=-1
     if args_or_dict.input_format=="4vec":
-        if args_or_dict.preprocess=="standardize":
+        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="log" or args_or_dict.preprocess=="logstd":
             pad_value=-10
-        if args_or_dict.preprocess=="log":
+    elif args_or_dict.input_format=="relvec":
+        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="logstd":
             pad_value=-10
 
     if args_or_dict.architecture=="MDN":
@@ -809,7 +813,7 @@ def parse_input():
     parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     parser.add_argument("--input_format", type=str, choices=["ktdr","4vec","relvec"], default="ktdr", help="What format of inputs we are using")
-    parser.add_argument("--preprocess", type=str, default=None, help="Preprocess the output (default: lNone")
+    parser.add_argument("--preprocess", type=str, default=None, choices=["log","linear","standardize","logstd","shiftpad"], help="Preprocess the output (default: None")
     parser.add_argument("--flatten", action="store_true", default=False, help="Flatten the energy during training (default: False)")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
 
