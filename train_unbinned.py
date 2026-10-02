@@ -180,7 +180,7 @@ if __name__ == "__main__":
 
     # construct model
     if args.model_checkpoint:
-        model = load_checkpoint_model(args, X_shape, cond_shape, args, device, checkpoint_info)
+        model = load_checkpoint_model(args, X_shape, cond_shape, device, checkpoint_info)
     else:
         model = build_unbinned_model(args, X_shape, cond_shape)
     model.to(device)
@@ -193,19 +193,18 @@ if __name__ == "__main__":
     print("Input shape,",X_shape, flush=True)
     if args.conditional: 
         print("Conditioning shape,", cond_shape, flush=True)
-    if args.multi_loss: 
+    if args.multi_loss and args.architecture!="Transformer" and args.architecture!="MDN":
         print("Mask shape,",mask_shape, flush=True)
     if args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
       modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"], mode="train")
       print("Output shape,", model(**input_example).shape,flush=True)
     elif args.architecture=="Transformer" or args.architecture=="MDN":
-      if args.conditional:
-          modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
-          output_example=model(**input_example)
-          if args.multi_loss:
-            print("Output shape,", output_example[0].shape,output_example[-1].shape, flush=True)
-          else:
-            print("Output shape,", output_example.shape, flush=True)
+      modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
+      output_example=model(**input_example)
+      if args.multi_loss:
+        print("Output shape,", output_example[0].shape,output_example[-1].shape, flush=True)
+      else:
+        print("Output shape,", output_example.shape, flush=True)
 
     #Set the scheduler
     optimizer = make_optimizer(args, model)
