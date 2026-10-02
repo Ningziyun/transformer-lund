@@ -463,6 +463,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            n_register=_as_int(_config_get(args_or_dict,"registers")),
             multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
             max_range=max_value,
             pad_value=pad_value,
@@ -491,6 +492,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            n_register=_as_int(_config_get(args_or_dict,"registers")),
             pad_value=pad_value,
         )
     elif args_or_dict.architecture=="NF":
@@ -528,6 +530,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
             num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
             num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
             ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            n_register=_as_int(_config_get(args_or_dict,"registers")),
             multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
         )
 
@@ -821,6 +824,7 @@ def parse_input():
     parser.add_argument("--architecture","-a",type=str, choices=["Transformer","MDN","NF","CNF","Diffusion","SDE","FM"], help="Architecture to run")
     parser.add_argument("--multi-loss", action="store_true", default=False, help="Use multile objective loss (default: False)")
     parser.add_argument("--conditional", action="store_true", default=False, help="Add conditional information (default: False)")
+    parser.add_argument("--registers", type=int, default=0, help="Number of registers for transformers (default:0)")
 
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")

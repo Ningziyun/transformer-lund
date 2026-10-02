@@ -95,7 +95,7 @@ class VectorFieldTrans(nn.Module):
   z: [B, C, F]
   c: [B, E] (context embded from original size M to same embedding dimension [B, M] -> [B, E]
   """
-  def __init__(self, n_feat, n_max, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64):
+  def __init__(self, n_feat, n_max, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64, n_register=4,):
     super().__init__()
 
     self.n_feat=n_feat
@@ -105,6 +105,7 @@ class VectorFieldTrans(nn.Module):
     self.num_heads=num_heads
     self.num_layers=num_layers
     self.time_dim=time_dim
+    self.n_register=n_register
 
     #Add the embedding layer
     self.embed = nn.Sequential(nn.Linear(self.n_feat, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
@@ -121,28 +122,38 @@ class VectorFieldTrans(nn.Module):
     self.time_emb = Sinusoidal_Time_Embedding(time_dim)
     self.time_proj = nn.Linear(time_dim, embed_dim)
 
-  def forward(self, z, t, c, N, valid): #FIXME, there is a couple places where both the N, valid, and embedding c are provided redundatnly together. Might be a better interface somehow?
+    # learned register tokens
+    if n_register > 0:
+        self.registers = nn.Parameter(0.02 * torch.randn(1, n_register, embed_dim))
+
+  def forward(self, z, t, c=None, N=None, valid=None): #FIXME, there is a couple places where both the N, valid, and embedding c are provided redundatnly together. Might be a better interface somehow?
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
-    tt=self.time_proj(tt)[:, None, :] #put into same embedding/dimension as input
-
-    # Embed the input to the latent space
-    zct=self.embed(z) # (batch, seq_len, embed_dim)
+    conds=self.time_proj(tt)[:, None, :] #put into same embedding/dimension as input
 
     #Add conditiong via injection
     if c is not None:
         c = c[:, None, :]
-        zct = zct + c
+        conds = conds + c
     if N is not None:
         Nshaped = N[:, None, :]
-        zct = zct + Nshaped
+        conds = conds + Nshaped
     if valid is None:
         valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
 
+    zctr=self.embed(z) + conds # (batch, seq_len, embed_dim)
+
+    # prepend registers, which also receive g, so they are never masked
+    if self.n_register > 0:
+        reg = self.registers.expand(z.shape[0], -1, -1) + conds # [B, n_register, E]
+        zctr = torch.cat([reg, zctr], dim=1)
+
     #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
-    zct = self.encoder(zct, src_key_padding_mask=~valid)
-    zct=self.deembed(zct)
+    pad = torch.cat([torch.zeros(z.shape[0], self.n_register, dtype=torch.bool, device=z.device), ~valid], dim=1)
+
+    zctr = self.encoder(zctr, src_key_padding_mask=pad)
+    return self.deembed(zctr[:, self.n_register:])  # drop registers -> [B, n_max, n_feat]
 
     #Below instead adds conditioning as prefix token, not reccomended for low layers
     '''
@@ -223,7 +234,7 @@ class model_autoregressive_transformer(nn.Module):
   """
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
   """
-  def __init__(self, input_dim, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, pad_value=-1):
+  def __init__(self, input_dim, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, pad_value=-1):
       super(model_autoregressive_transformer, self).__init__()
 
       self.input_dim=input_dim
@@ -232,6 +243,7 @@ class model_autoregressive_transformer(nn.Module):
       self.ff_dim=ff_dim
       self.num_heads=num_heads
       self.num_layers=num_layers
+      self.n_register=n_register
       self.multi_loss=multi_loss
       self.pad_value=pad_value
 
@@ -256,6 +268,11 @@ class model_autoregressive_transformer(nn.Module):
       if self.multi_loss:
         self.stop_head = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, 1))
 
+      #Add register tokens
+      if self.n_register > 0:
+        self.registers = nn.Parameter(torch.zeros(1, self.n_register, self.embed_dim))
+        nn.init.trunc_normal_(self.registers, std=0.02)
+
   def forward(self, x, c=None):
 
       seq_len = x.shape[1] # (batch, seq_len, feature_dim)
@@ -270,12 +287,23 @@ class model_autoregressive_transformer(nn.Module):
           c = self.cond_embed(c).unsqueeze(1)  # (B, 1, E)
           h = torch.cat([c, h[:, 1:, :]], dim=1)  # replace start-token embedding with cond
 
+      if self.n_register > 0:
+        reg = self.registers.expand(x.shape[0], self.n_register, -1)       # (B, R, E)
+        h = torch.cat([h[:, :1], reg, h[:, 1:]], dim=1)  #Add register between start token and the rest (B, 1+R+seq_len-1, E)
+
       # Causal mask prevents looking ahead
-      causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
+      L = seq_len + self.n_register
+      causal_mask = torch.triu(torch.ones(L, L), diagonal=1).bool().to(x.device)
+      if self.n_register > 0:
+        causal_mask[:self.n_register + 1, :self.n_register + 1] = False  #Allows start token and registers to fully attend each other
 
       # Take the x[0:-1] embedded and learn the embedded x[1:]
       encoded = self.encoder(h, mask=causal_mask)  
       #encoded = self.norm(encoded)
+
+      # Drop the register outputs so shapes match the original model
+      if self.n_register > 0:
+        encoded = torch.cat([encoded[:, :1], encoded[:, 1 + self.n_register:]], dim=1)  #Remove registers which are between the start-token and the rest (B, seq_len, E)
 
       if self.multi_loss:
           return self.deembed(encoded), self.stop_head(encoded).squeeze(-1)  # (batch, seq_len, feature_dim), (batch, seq_len)
@@ -340,8 +368,8 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   """
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   """
-  def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, max_range=None, pad_value=-1):
-      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_loss=multi_loss, pad_value=pad_value)
+  def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, max_range=None, pad_value=-1):
+      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register, multi_loss=multi_loss, pad_value=pad_value)
 
       self.n_mix=n_mix
       self.max_range=max_range
@@ -612,7 +640,7 @@ class FlowMatching(nn.Module):
     """
     Code running the full flow mathing algorithm
     """
-    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, Nembed_dim, steps, architecture, num_heads, num_layers, ff_dim):
+    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, Nembed_dim, steps, architecture, num_heads, num_layers, ff_dim, n_register):
         super().__init__()
 
         self.n_feat=n_feat
@@ -630,7 +658,7 @@ class FlowMatching(nn.Module):
             #Will put both the N and c condtioners into same embedding dim as the flow
             if Nembed_dim>0: Nembed_dim=hidden_dim 
             self.cond_embed = nn.Sequential(nn.Linear(c_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim))
-            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim)
+            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim, n_register=n_register)
 
         #Set the timegrid
         self.register_buffer("time_grid", torch.linspace(0,1,steps+1))
@@ -736,7 +764,7 @@ class model_FM(nn.Module):
 
     Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
     """
-    def __init__(self, input_shape, cond_shape, hidden_dim=128, time_dim=64, Nembed_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512):
+    def __init__(self, input_shape, cond_shape, hidden_dim=128, time_dim=64, Nembed_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512, n_register=4):
         super().__init__()
 
         self.n_max=input_shape[1]
@@ -757,7 +785,7 @@ class model_FM(nn.Module):
             Nembed_dim=0
 
         #NOTE: in MLP setup input is dimension # [B, Nconst*Nfeat] while in transformer # [B, Nconst, Nfeat]
-        self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=self.c_dim, hidden_dim=hidden_dim, time_dim=time_dim, Nembed_dim=Nembed_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim) # learn density estimation p(X|c) or p(x|N,c) depeding if Nembed_dim provided,
+        self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=self.c_dim, hidden_dim=hidden_dim, time_dim=time_dim, Nembed_dim=Nembed_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register) # learn density estimation p(X|c) or p(x|N,c) depeding if Nembed_dim provided,
 
     def _count_logits(self, c, B):
         if self.c_dim > 0:
