@@ -2,7 +2,6 @@ import os,sys
 import time
 import numpy as np
 import h5py
-import math
 import csv
 import re
 import matplotlib.pyplot as plt
@@ -11,7 +10,6 @@ import argparse
 
 import torch
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 
 import models_generative
 
@@ -213,6 +211,112 @@ def get_loaders(args):
   return train_loader,test_loader
 
 # ---------------------------------------------------------------------
+# Load model
+# ---------------------------------------------------------------------
+def build_unbinned_model(args_or_dict, input_shape, cond_shape):
+
+    pad_value=-1
+    if args_or_dict.input_format=="4vec":
+        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="log" or args_or_dict.preprocess=="logstd":
+            pad_value=-10
+    elif args_or_dict.input_format=="relvec":
+        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="logstd":
+            pad_value=-10
+
+    if args_or_dict.architecture=="MDN":
+        max_value=10
+        if args_or_dict.input_format=="4vec":
+            if args_or_dict.preprocess is None:
+                max_value=3e3
+            elif args_or_dict.preprocess=="standardize":
+                max_value=50
+            elif args_or_dict.preprocess=="linearize":
+                max_value=1
+            elif args_or_dict.preprocess=="log":
+                max_value=11
+
+        return models_generative.model_autoregressive_transformer_MDN(
+            input_dim=input_shape[2],
+            cond_dim=cond_shape[-1],
+            n_mix=_as_int(_config_get(args_or_dict,"MDN_nmix")),
+            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            n_register=_as_int(_config_get(args_or_dict,"registers")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
+            max_range=max_value,
+            pad_value=pad_value,
+        )
+    elif args_or_dict.architecture=="CNF":
+        return models_generative.model_CNF(
+            input_dim=input_shape[1]*input_shape[2],
+            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            cnf_hidden=_as_int(_config_get(args_or_dict,"cnf_hidden")),
+            steps=_as_int(_config_get(args_or_dict,"cnf_steps")),
+            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+        )
+    elif args_or_dict.architecture=="FM":
+        return models_generative.model_FM(
+            input_shape=input_shape,
+            cond_shape=cond_shape,
+            hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+            Nembed_dim=_as_int(_config_get(args_or_dict,"fm_Nembed_dim")),
+            steps=_as_int(_config_get(args_or_dict,"fm_steps")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
+            architecture=_config_get(args_or_dict,"fm_architecture"),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            n_register=_as_int(_config_get(args_or_dict,"registers")),
+            pad_value=pad_value,
+        )
+    elif args_or_dict.architecture=="NF":
+        return models_generative.model_normalizing_flow(
+            input_dim=input_shape[1]*input_shape[2],
+            num_flows=_as_int(_config_get(args_or_dict,"nflows")),
+            latent_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            flow_type=args_or_dict.nflow_type,
+        )
+    elif args_or_dict.architecture=="Diffusion":
+        return models_generative.model_diffusion(
+                input_dim=input_shape[1]*input_shape[2],
+                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+                time_steps=_as_int(_config_get(args_or_dict,"diff_steps")),
+                beta_start=_as_float(_config_get(args_or_dict,"diff_beta_start")),
+                beta_end=_as_float(_config_get(args_or_dict,"diff_beta_end")),
+                mode=args_or_dict.diff_type,
+                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+                sample_time_steps=_as_int(_config_get(args_or_dict,"diff_steps_sample")),
+        )
+    elif args_or_dict.architecture=="SDE":
+        return models_generative.model_score_SDE(
+                input_dim=input_shape[1]*input_shape[2],
+                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+                beta_min=_as_float(_config_get(args_or_dict,"SDE_beta_min")),
+                beta_max=_as_float(_config_get(args_or_dict,"SDE_beta_max")),
+                mode=args_or_dict.SDE_type,
+        )
+    elif args_or_dict.architecture=="Transformer":
+        return models_generative.model_autoregressive_transformer(
+            input_dim=input_shape[2],
+            cond_dim=cond_shape[-1],
+            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
+            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
+            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
+            n_register=_as_int(_config_get(args_or_dict,"registers")),
+            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
+        )
+    else:
+        return None
+
+# ---------------------------------------------------------------------
 # Schedulers and optimizers
 # ---------------------------------------------------------------------
 def get_lin_scheduler(num_epochs, num_batches, lr_decay, optimizer):
@@ -258,8 +362,8 @@ def get_cos_damping_scheduler(
 
         progress = (epoch - start_epoch) / float(end_epoch - start_epoch)
         baseline = 1.0 + (final_ratio - 1.0) * progress
-        phase = 2.0 * math.pi * (epoch - start_epoch) / period_epochs
-        oscillation_factor = 1.0 + cos_damping_amplitude * math.cos(phase)
+        phase = (2.0 * np.pi * (epoch - start_epoch) / period_epochs).item()
+        oscillation_factor = 1.0 + cos_damping_amplitude * np.cos(phase).item()
         return max(baseline * oscillation_factor, 1e-12)
 
     return LambdaLR(optimizer, lr_lambda=lr_lambda)
@@ -303,7 +407,7 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_epochs, min
         else:
             progress = ( current_step - num_warmup_steps) / max( 1, num_epochs - num_warmup_steps,)
             progress = min(progress, 1.0)
-            cosine = 0.5 * ( 1.0 + math.cos(math.pi * progress)) # 0 -> 1
+            cosine = 0.5 * ( 1.0 + np.cos(np.pi * progress)).item() # 0 -> 1
             return (min_lr + (max_lr - min_lr) * cosine) / max_lr # Convert absolute LR range to a multiplier.
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
@@ -430,110 +534,6 @@ def _config_get(args_or_dict, key, default=None):
         return args_or_dict.get(key, default)
     return getattr(args_or_dict, key, default)
 
-# ---------------------------------------------------------------------
-# Load model
-# ---------------------------------------------------------------------
-def build_unbinned_model(args_or_dict, input_shape, cond_shape):
-
-    pad_value=-1
-    if args_or_dict.input_format=="4vec":
-        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="log" or args_or_dict.preprocess=="logstd":
-            pad_value=-10
-    elif args_or_dict.input_format=="relvec":
-        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="logstd":
-            pad_value=-10
-
-    if args_or_dict.architecture=="MDN":
-        max_value=10
-        if args_or_dict.input_format=="4vec":
-            if args_or_dict.preprocess is None:
-                max_value=3e3
-            elif args_or_dict.preprocess=="standardize":
-                max_value=50
-            elif args_or_dict.preprocess=="linearize":
-                max_value=1
-            elif args_or_dict.preprocess=="log":
-                max_value=11
-
-        return models_generative.model_autoregressive_transformer_MDN(
-            input_dim=input_shape[2],
-            cond_dim=cond_shape[-1],
-            n_mix=_as_int(_config_get(args_or_dict,"MDN_nmix")),
-            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            n_register=_as_int(_config_get(args_or_dict,"registers")),
-            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
-            max_range=max_value,
-            pad_value=pad_value,
-        )
-    elif args_or_dict.architecture=="CNF":
-        return models_generative.model_CNF(
-            input_dim=input_shape[1]*input_shape[2],
-            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            cnf_hidden=_as_int(_config_get(args_or_dict,"cnf_hidden")),
-            steps=_as_int(_config_get(args_or_dict,"cnf_steps")),
-            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-        )
-    elif args_or_dict.architecture=="FM":
-        return models_generative.model_FM(
-            input_shape=input_shape,
-            cond_shape=cond_shape,
-            hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-            Nembed_dim=_as_int(_config_get(args_or_dict,"fm_Nembed_dim")),
-            steps=_as_int(_config_get(args_or_dict,"fm_steps")),
-            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
-            architecture=_config_get(args_or_dict,"fm_architecture"),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            n_register=_as_int(_config_get(args_or_dict,"registers")),
-            pad_value=pad_value,
-        )
-    elif args_or_dict.architecture=="NF":
-        return models_generative.model_normalizing_flow(
-            input_dim=input_shape[1]*input_shape[2],
-            num_flows=_as_int(_config_get(args_or_dict,"nflows")),
-            latent_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            flow_type=args_or_dict.nflow_type,
-        )
-    elif args_or_dict.architecture=="Diffusion":
-        return models_generative.model_diffusion(
-                input_dim=input_shape[1]*input_shape[2], 
-                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-                time_steps=_as_int(_config_get(args_or_dict,"diff_steps")),
-                beta_start=_as_float(_config_get(args_or_dict,"diff_beta_start")),
-                beta_end=_as_float(_config_get(args_or_dict,"diff_beta_end")),
-                mode=args_or_dict.diff_type,
-                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-                sample_time_steps=_as_int(_config_get(args_or_dict,"diff_steps_sample")),
-        )
-    elif args_or_dict.architecture=="SDE":
-        return models_generative.model_score_SDE(
-                input_dim=input_shape[1]*input_shape[2],
-                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-                beta_min=_as_float(_config_get(args_or_dict,"SDE_beta_min")),
-                beta_max=_as_float(_config_get(args_or_dict,"SDE_beta_max")),
-                mode=args_or_dict.SDE_type,
-        )
-    elif args_or_dict.architecture=="Transformer":
-        return models_generative.model_autoregressive_transformer(
-            input_dim=input_shape[2],
-            cond_dim=cond_shape[-1],
-            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            n_register=_as_int(_config_get(args_or_dict,"registers")),
-            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
-        )
-
 def save_torchpickle(model, model_path):
     torch.save(model, model_path)
     return
@@ -549,20 +549,14 @@ def load_torchpickle(model_path, map_location="cpu"):
 # Checkpoint
 # ---------------------------------------------------------------------
 def save_checkpoint(
-    model,
-    optimizer,
-    epoch,
-    loss,
     args,
-    is_best=False,
-    ckpt_name=None,
-    train_losses=None,
-    test_losses=None,
-    lr_history=None,
+    model,
+    epoch,
+    is_best,
+    optimizer=None,
     scheduler=None,
-    best_epoch=None,
-    best_loss=None,
-    current_lr=None,
+    training_info=None,
+    ckpt_name=None,
 ):
 
     #From args figure out how much to save
@@ -584,10 +578,6 @@ def save_checkpoint(
     checkpoint_info = {
         "save_mode": save_mode,
         "epoch": epoch,
-        "loss": loss,
-        "best_epoch": best_epoch,
-        "best_loss": best_loss,
-        "args": args_dict,
         "model_state_dict": model.state_dict(),
     }
 
@@ -595,14 +585,12 @@ def save_checkpoint(
     if save_mode == "full":
         checkpoint_info.update(
             {
+                "args": args_dict,
                 "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
                 "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-                "current_lr": current_lr if current_lr is not None else (optimizer.param_groups[0]["lr"] if optimizer is not None else None),
-                "train_losses": train_losses if train_losses is not None else [],
-                "test_losses": test_losses if test_losses is not None else [],
-                "lr_history": lr_history if lr_history is not None else [],
             }
         )
+        checkpoint_info.update(training_info)
 
     #Actually save it
     torch.save(checkpoint_info, ckpt_path)
@@ -622,7 +610,14 @@ def load_checkpoint(args):
 
     return checkpoint_info
 
-def load_checkpoint_args(args, ignore_args=[], checkpoint_model=None):
+def load_checkpoint_args(args, argvs, checkpoint_model=None):
+    #Ignore things which are over-written by command-line
+    ignore_args=[]
+    for argv in argvs:
+        if "--" in argv:
+            ignore_args.append(argv.replace("--","").replace("-","_"))
+
+    #Load checkpoint
     if checkpoint_model is None:
         checkpoint_info = load_checkpoint(args)
 
@@ -634,15 +629,32 @@ def load_checkpoint_args(args, ignore_args=[], checkpoint_model=None):
 
     return checkpoint_info
 
-def load_checkpoint_model(args, shape, cond_shape=[0], device="cpu", checkpoint_info=None):
-    if checkpoint_info is None:
-        checkpoint_info = load_checkpoint(args)
+def load_checkpoint_model(args, shape, cond_shape=[0], checkpoint_info=None):
+     if checkpoint_info is None:
+         checkpoint_info = load_checkpoint(args)
 
-    model = build_unbinned_model(args, shape, cond_shape)
-    model.load_state_dict(checkpoint_info["model_state_dict"])
-    model.to(device)
+     model = build_unbinned_model(args, shape, cond_shape)
+     model.load_state_dict(checkpoint_info["model_state_dict"])
 
-    return model
+     return model
+
+def load_checkpoint_scheduler_optimizer(args, checkpoint_info, start_epoch, optimizer, scheduler):
+    if checkpoint_info.get("optimizer_state_dict", None) is not None:
+        optimizer.load_state_dict(checkpoint_info["optimizer_state_dict"])
+    if scheduler is not None and checkpoint_info.get("scheduler_state_dict", None) is not None:
+        scheduler.load_state_dict(checkpoint_info["scheduler_state_dict"])
+    start_epoch = int(checkpoint_info.get("epoch", -1)) + 1
+    print(f"Resuming after epoch {start_epoch}", flush=True)
+
+def load_checkpoint_losses_lr(args, checkpoint_info, training_info):
+    training_info["best_loss"] = checkpoint_info.get("best_loss", None)
+    if training_info["best_loss"] is None:
+        training_info["best_loss"] = float("inf")
+    training_info["best_epoch"] = checkpoint_info.get("best_epoch", None)
+    training_info["patience_counter"] = checkpoint_info.get("patience_counter", 0)
+    training_info["test_losses"] = list(checkpoint_info.get("test_losses", []))
+    training_info["train_losses"] = list(checkpoint_info.get("train_losses", []))
+    training_info["lr_history"] = list(checkpoint_info.get("lr_history", []))
 
 # ---------------------------------------------------------------------
 # Save/load loss and learning rates
@@ -682,47 +694,6 @@ def save_loss_csv(epoch_losses=None, loss_curves=None, out_dir=""):
                 row.append(value)
             writer.writerow(row)
     print(f"Saved loss CSV to {csv_path}", flush=True)
-
-def load_loss_csv(csv_path):
-    if not os.path.exists(csv_path):
-        return {}
-    curves = {}
-    with open(csv_path, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        for name in reader.fieldnames or []:
-            if name != "epoch":
-                curves[name] = []
-        for row in reader:
-            for name in curves:
-                value = row.get(name, "")
-                curves[name].append(np.nan if value in (None, "") else float(value))
-    return curves
-
-def save_lr_csv(lr_history, out_dir=""):
-    if lr_history is None or len(lr_history) == 0:
-        return
-    os.makedirs(out_dir, exist_ok=True)
-    csv_path = os.path.join(out_dir, "lr_history.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "lr"])
-        for i, lr in enumerate(lr_history):
-            writer.writerow([i + 1, lr])
-    print(f"Saved LR CSV to {csv_path}", flush=True)
-
-def save_lr_plot(lr_history, out_dir=""):
-    if lr_history is None or len(lr_history) == 0:
-        return
-    fig = plt.figure(figsize=(6.0, 4.0))
-    plt.plot(range(1, len(lr_history) + 1), lr_history, marker="o")
-    plt.xlabel("Epoch")
-    plt.ylabel("Learning Rate")
-    plt.title("Learning Rate vs Epoch")
-    plt.grid(True)
-    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.png"))
-    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.pdf"))
-    plt.close(fig)
-    print(f"Plotting learning rate to {out_dir}/lr_vs_epoch.pdf")
 
 def loss_plot(loss_train,loss_test,out_dir="./Plots/"):
 
@@ -773,6 +744,33 @@ def loss_plot(loss_train,loss_test,out_dir="./Plots/"):
   print(f"Plotting loss to {out_dir}/loss_vs_epoch.pdf")
   save_loss_csv( epoch_losses=loss_train, loss_curves={"test_loss": loss_test}, out_dir=out_dir,)
 
+def save_lr_csv(lr_history, out_dir=""):
+    if lr_history is None or len(lr_history) == 0:
+        return
+    os.makedirs(out_dir, exist_ok=True)
+    csv_path = os.path.join(out_dir, "lr_history.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "lr"])
+        for i, lr in enumerate(lr_history):
+            writer.writerow([i + 1, lr])
+    print(f"Saved LR CSV to {csv_path}", flush=True)
+
+def lr_plot(lr_history, out_dir=""):
+    if lr_history is None or len(lr_history) == 0:
+        return
+    fig = plt.figure(figsize=(6.0, 4.0))
+    plt.plot(range(1, len(lr_history) + 1), lr_history, marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate vs Epoch")
+    plt.grid(True)
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.png"))
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.pdf"))
+    plt.close(fig)
+    print(f"Plotting learning rate to {out_dir}/lr_vs_epoch.pdf")
+    save_lr_csv(lr_history, out_dir)
+
 # ---------------------------------------------------------------------
 # Arguments and metadata saving
 # ---------------------------------------------------------------------
@@ -811,6 +809,7 @@ def parse_input():
     # data / io
     parser.add_argument("--train-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_train.h5", help="Path to training .h5")
     parser.add_argument("--val-file", default="inputFiles/discretized/qcd_lund_cut_lundTree_kt_deltaR_val.h5", help="Path to validation .h5 (unused yet)")
+    parser.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--num-workers", type=int, default=1, help="DataLoader workers")
     parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
@@ -825,6 +824,12 @@ def parse_input():
     parser.add_argument("--multi-loss", action="store_true", default=False, help="Use multile objective loss (default: False)")
     parser.add_argument("--conditional", action="store_true", default=False, help="Add conditional information (default: False)")
     parser.add_argument("--registers", type=int, default=0, help="Number of registers for transformers (default:0)")
+
+     # logging / checkpointing
+    parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
+    parser.add_argument("--plot-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
+    parser.add_argument("--save-mode", type=str, default="full", choices=["full", "model", "none"], help="Saved training artifact: full info, model-state only, or none")
+    parser.add_argument("--model-checkpoint", "--checkpoint", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
 
     # training
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
@@ -862,7 +867,7 @@ def parse_input():
     parser.add_argument("--cnf-steps", type=int, default=25, help="CNF Euler steps for integration")
 
     # FM parameters
-    parser.add_argument("--fm-architecture", default="mlp", choices=["mlp","transformer"], help="Type of model for the flow prediction")
+    parser.add_argument("--fm-architecture", default="transformer", choices=["mlp","transformer"], help="Type of model for the flow prediction")
     parser.add_argument("--fm-steps", type=int, default=25, help="FM Euler steps for integration")
     parser.add_argument("--fm-Nembed-dim", type=int, default=16, help="Size of mulitplicity embedding dimenson")
 
@@ -883,16 +888,9 @@ def parse_input():
     parser.add_argument("--SDE-type", type=str, default="sde", choices=["sde","ode"], help="Algorithm for the SDE")
 
     # misc
-    parser.add_argument("--device", default=None, choices=[None, "cpu", "cuda"], help="Force device; default auto")
     parser.add_argument("--multi-loss-plot", action="store_true", default=False, help="Log multiple loss definitions without affecting main training")
     parser.add_argument("--mask-bad", action="store_true", default=False, help="Mask bad generated consitiuents")
 
-    # logging / checkpointing
-    parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")
-    parser.add_argument("--plot-dir", dest="plot_dir", type=str, default=None, help="Output directory for plots. Default: use --log-dir / inferred checkpoint log directory",)
-    parser.add_argument("--save-mode", type=str, default="full", choices=["full", "model", "none"], help="Saved training artifact: full info, model-state only, or none")
-    parser.add_argument("--model-checkpoint", "--checkpoint", type=str, nargs="+",default=[],help="Path(s) to model/checkpoint to load")
-    
     # plotting options
     parser.add_argument("--validation-size",type=int, default=100000, help="How many images to generate and make plots for")
     parser.add_argument("--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)

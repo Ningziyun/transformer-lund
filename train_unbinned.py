@@ -155,12 +155,9 @@ if __name__ == "__main__":
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}", flush=True)
 
-    #If continuning
+    #If continuing
     if args.model_checkpoint:
-        ignore_list=[]
-        for argv in sys.argv[1:]:
-            if "--" in argv: ignore_list.append(argv.replace("--","").replace("-","_"))
-        checkpoint_info = load_checkpoint_args(args, ignore_args=ignore_list)
+        checkpoint_info = load_checkpoint_args(args, sys.argv[1:])
 
     # load and preprocess data
     print(f"Loading training set", flush=True)
@@ -180,7 +177,7 @@ if __name__ == "__main__":
 
     # construct model
     if args.model_checkpoint:
-        model = load_checkpoint_model(args, X_shape, cond_shape, device, checkpoint_info)
+        model = load_checkpoint_model(args, X_shape, cond_shape, checkpoint_info)
     else:
         model = build_unbinned_model(args, X_shape, cond_shape)
     model.to(device)
@@ -211,69 +208,56 @@ if __name__ == "__main__":
     scheduler = make_scheduler(args, optimizer)
     start_epoch = 0
     if args.model_checkpoint:
-      if checkpoint_info.get("optimizer_state_dict", None) is not None:
-        optimizer.load_state_dict(checkpoint_info["optimizer_state_dict"])
-      if scheduler is not None and checkpoint_info.get("scheduler_state_dict", None) is not None:
-        scheduler.load_state_dict(checkpoint_info["scheduler_state_dict"])
-      start_epoch = int(checkpoint_info.get("epoch", -1)) + 1
-      print(f"Resuming after epoch {start_epoch}", flush=True)
+        load_checkpoint_scheduler_optimizer(args, checkpoint_info, start_epoch, optimizer, scheduler)
 
     #Store loss and etc for per-epoch loop
-    best_loss=float("inf")
-    best_epoch=-1
-    patience_counter=0
-    patience = args.patience
-    test_losses=[]
-    train_losses=[]
-    lr_history=[]
-    stopped_nonfinite = False
+    training_info={
+        "best_loss":float("inf"),
+        "best_epoch":-1,
+        "patience_counter":0,
+        "test_losses":[],
+        "train_losses":[],
+        "lr_history":[],
+        "stopped_nonfinite":False,
+    }
     if args.model_checkpoint:
-      best_loss = checkpoint_info.get("best_loss", best_loss)
-      if best_loss is None:
-        best_loss = float("inf")
-      else:
-        best_loss = float(best_loss)
-      best_epoch = checkpoint_info.get("best_epoch", best_epoch)
-      test_losses = list(checkpoint_info.get("test_losses", []))
-      train_losses = list(checkpoint_info.get("train_losses", []))
-      lr_history = list(checkpoint_info.get("lr_history", []))
-    epochs=args.epochs 
+        load_checkpoint_losses_lr(args, checkpoint_info, training_info)
 
     # ---------------------------------------------------------------------
     # Training loop
     # ---------------------------------------------------------------------
     #Loop over epochs
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(start_epoch, args.epochs):
       print(f"\nEpoch {epoch+1}\n-------------------------------", flush=True)
       starttime=time.time()
 
       current_lr = optimizer.param_groups[0]["lr"]
-      lr_history.append(current_lr)
+      training_info["lr_history"].append(current_lr)
 
       #Run the training loop and check for errors
       try:
         starttime=time.time()
         train_loss = train(model,train_loader,args)
-        train_losses.append(train_loss)
+        training_info["train_losses"].append(train_loss)
         train_time=(time.time()-starttime)/60
 
         starttime=time.time()
         test_loss = test(model,test_loader,args)
-        test_losses.append(test_loss)
+        training_info["test_losses"].append(test_loss)
         test_time=(time.time()-starttime)/60
 
       except NonFiniteLossError as err:
         print(f"Stopping due to non-finite value: {err}", flush=True)
-        stopped_nonfinite = True
+        training_info["stopped_nonfinite"] = True
         break
       print("Took %.2f(%.2f) minutes to run training(testing)"%(train_time,test_time), flush=True)
 
       #Save some best values
       best_metric = test_loss if test_loss is not None else train_loss
-      improved = best_metric<best_loss
+      improved = best_metric<training_info["best_loss"]
       if improved:
-        best_loss=best_metric
-        best_epoch=epoch
+        training_info["best_loss"]=best_metric
+        training_info["best_epoch"]=epoch
         patience_counter=0
       else:
         patience_counter+=1
@@ -282,24 +266,10 @@ if __name__ == "__main__":
       step_scheduler(scheduler, args, metric=best_metric)
 
       #Checkpoint info
-      save_checkpoint(
-        model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        epoch=epoch,
-        loss=best_metric,
-        args=args,
-        is_best=improved,
-        train_losses=train_losses,
-        test_losses=test_losses,
-        lr_history=lr_history,
-        best_epoch=best_epoch,
-        best_loss=best_loss,
-        current_lr=current_lr,
-      )
+      save_checkpoint(args, model, epoch, improved, optimizer=optimizer, scheduler=scheduler, training_info=training_info)
 
       #early stopping
-      if patience_counter>=patience:
+      if patience_counter>=args.patience:
         print("Early stopping", flush=True)
         break
 
@@ -307,26 +277,25 @@ if __name__ == "__main__":
     # Save info
     # ---------------------------------------------------------------------
     #Make loss plots and scheduler plots
-    loss_plot(train_losses,test_losses,out_dir=args.log_dir)
-    save_lr_csv(lr_history, out_dir=args.log_dir)
-    save_lr_plot(lr_history, out_dir=args.log_dir)
+    loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
+    lr_plot(training_info["lr_history"], out_dir=args.log_dir)
 
     #Store some results in a dictionary
     results={}
     results["model_paramaters"]=modelstats.total_params
-    results["best_epoch"]=best_epoch
-    results["best_loss"]=best_loss
+    results["best_epoch"]=training_info["best_epoch"]
+    results["best_loss"]=training_info["best_loss"]
     results["checkpoint"]="checkpoints/best.pt"
     results["train_time"]=train_time
     results["test_time"]=test_time
     results["train_N"]=len(train_loader.dataset)
     results["test_N"]=len(test_loader.dataset)
-    results["train_losses"]=train_losses
-    results["test_losses"]=test_losses
-    results["lr_history"]=lr_history
+    results["train_losses"]=training_info["train_losses"]
+    results["test_losses"]=training_info["test_losses"]
+    results["lr_history"]=training_info["lr_history"]
 
     #Make validation plots
-    if stopped_nonfinite:
+    if training_info["stopped_nonfinite"]:
       print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
       validate_unbinned_models( [model], test_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
     else:
