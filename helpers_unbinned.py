@@ -630,21 +630,22 @@ def load_checkpoint_args(args, argvs, checkpoint_model=None):
     return checkpoint_info
 
 def load_checkpoint_model(args, shape, cond_shape=[0], checkpoint_info=None):
-     if checkpoint_info is None:
-         checkpoint_info = load_checkpoint(args)
+    if checkpoint_info is None:
+        checkpoint_info = load_checkpoint(args)
 
-     model = build_unbinned_model(args, shape, cond_shape)
-     model.load_state_dict(checkpoint_info["model_state_dict"])
+    model = build_unbinned_model(args, shape, cond_shape)
+    model.load_state_dict(checkpoint_info["model_state_dict"])
 
-     return model
+    return model
 
-def load_checkpoint_scheduler_optimizer(args, checkpoint_info, start_epoch, optimizer, scheduler):
+def load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler):
     if checkpoint_info.get("optimizer_state_dict", None) is not None:
         optimizer.load_state_dict(checkpoint_info["optimizer_state_dict"])
     if scheduler is not None and checkpoint_info.get("scheduler_state_dict", None) is not None:
         scheduler.load_state_dict(checkpoint_info["scheduler_state_dict"])
     start_epoch = int(checkpoint_info.get("epoch", -1)) + 1
     print(f"Resuming after epoch {start_epoch}", flush=True)
+    return start_epoch
 
 def load_checkpoint_losses_lr(args, checkpoint_info, training_info):
     training_info["best_loss"] = checkpoint_info.get("best_loss", None)
@@ -892,7 +893,7 @@ def parse_input():
     parser.add_argument("--mask-bad", action="store_true", default=False, help="Mask bad generated consitiuents")
 
     # plotting options
-    parser.add_argument("--validation-size",type=int, default=100000, help="How many images to generate and make plots for")
+    parser.add_argument("--validation-size",type=int, default=10000, help="How many images to generate and make plots for")
     parser.add_argument("--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
     parser.add_argument("--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
     parser.add_argument("--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)

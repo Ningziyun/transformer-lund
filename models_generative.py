@@ -141,18 +141,23 @@ class VectorFieldTrans(nn.Module):
         conds = conds + Nshaped
     if valid is None:
         valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
-
     zctr=self.embed(z) + conds # (batch, seq_len, embed_dim)
 
     # prepend registers, which also receive g, so they are never masked
     if self.n_register > 0:
-        reg = self.registers.expand(z.shape[0], -1, -1) + conds # [B, n_register, E]
+        reg = self.registers.expand(z.shape[0], self.n_register, -1) + conds # [B, n_register, E]
         zctr = torch.cat([reg, zctr], dim=1)
 
     #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
-    pad = torch.cat([torch.zeros(z.shape[0], self.n_register, dtype=torch.bool, device=z.device), ~valid], dim=1)
+    if self.n_register>0:
+        pad = torch.cat([torch.zeros(z.shape[0], self.n_register, dtype=torch.bool, device=z.device), ~valid], dim=1)
+    else:
+        pad=~valid
 
-    zctr = self.encoder(zctr, src_key_padding_mask=pad)
+    if N is None: #FIXME torchsummary causes an error here with all-zero srk_key_padding_mask
+        zctr = self.encoder(zctr)
+    else:
+        zctr = self.encoder(zctr, src_key_padding_mask=pad)
     return self.deembed(zctr[:, self.n_register:])  # drop registers -> [B, n_max, n_feat]
 
     #Below instead adds conditioning as prefix token, not reccomended for low layers
@@ -695,7 +700,7 @@ class FlowMatching(nn.Module):
         p_xt=self.vf(x,t,**conds)
         return p_xt
 
-    def loss(self, x1, c=None, valid=None, N=None):
+    def loss(self, x1, c=None, N=None, valid=None):
         device=x1.device
 
         #sample the original gaussian and a random time
@@ -792,6 +797,13 @@ class model_FM(nn.Module):
             return self.count_head(c)                 # [B, n_max+1]
         return self.count_logits[None].expand(B, -1)  # same as before
 
+    def _empty_valid(self, shape, device):
+        if self.architecture=="mlp":
+            valid=torch.ones([shape[0],shape[1]*shape[2]], device=device)
+        else:
+            valid=torch.ones([shape[0],shape[1]], device=device)
+        return valid
+
     def _expand_valid(self, valid_c):
         """valid_c: [B, n_max] float (1 = real constituent). Returns the architecture-specific shape."""
         if self.architecture == "mlp":
@@ -817,10 +829,10 @@ class model_FM(nn.Module):
         if self.multi_loss:
             valid = (~pad_mask).float() #[B, Nconst]
             N = valid.sum(dim=-1).long() #count number of non-pad entries
-            valid = self._expand_valid(valid)
         else: 
-            valid=torch.ones(x.shape, device=x.device)
+            valid=self._empty_valid(x.shape,x.device)
             N = None
+        valid = self._expand_valid(valid)
 
         return self.fm(x, t, c, N, valid)
 
@@ -841,12 +853,14 @@ class model_FM(nn.Module):
             count_loss = F.cross_entropy(Npred, N, reduction="none")  #Number of predictions loss p(N)
 
             #Flow matching loss p(x|c, N)
-            FM_loss=self.fm.loss(x, c, valid, N) #[Nbatch, Nconst*Nfeat]
+            FM_loss=self.fm.loss(x, c, N, valid) #[Nbatch, Nconst*Nfeat]
 
             return FM_loss.sum()+lambda_ce*count_loss.sum()
         else:
-            valid=torch.ones(x.shape, device=x.device)
-            return self.fm.loss(x, c, valid).sum()
+            valid=self._empty_valid(x.shape,x.device)
+            valid = self._expand_valid(valid)
+            N=None
+            return self.fm.loss(x, c, N, valid).sum()
 
     @torch.no_grad()
     def generate(self, out_dimensions, c=None):
@@ -868,10 +882,8 @@ class model_FM(nn.Module):
         else:
             #Generate the samples, all points are valid
             device = next(self.parameters()).device
-            if self.architecture=="mlp":
-                valid=torch.ones([out_dimensions[0],out_dimensions[1]*out_dimensions[2]], device=device)
-            else:
-                valid=torch.ones([out_dimensions[0],out_dimensions[1],out_dimensions[2]], device=device)
+            valid=self._empty_valid(out_dimensions,device)
+            valid = self._expand_valid(valid).int()
             samples=self.fm.generate(out_dimensions[0], c, valid)
             return samples.view(out_dimensions)
 

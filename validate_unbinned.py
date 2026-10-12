@@ -25,7 +25,7 @@ if __name__ == "__main__":
 
     #load model
     print(f"Loading model", flush=True)
-    model=load_checkpoint_model(args,X_example.shape,cond_shape,device)
+    model=load_checkpoint_model(args,X_example.shape,cond_shape,checkpoint_info)
 
     '''
     if args.architecture=="MDN":
@@ -63,5 +63,10 @@ if __name__ == "__main__":
 
     #Make validation plots
     validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"])
+
+    #Remake loss plots
+    load_checkpoint_losses_lr(args, checkpoint_info, training_info)
+    loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
+    lr_plot(training_info["lr_history"], out_dir=args.log_dir)
 
     print("Done")

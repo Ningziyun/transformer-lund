@@ -208,7 +208,7 @@ if __name__ == "__main__":
     scheduler = make_scheduler(args, optimizer)
     start_epoch = 0
     if args.model_checkpoint:
-        load_checkpoint_scheduler_optimizer(args, checkpoint_info, start_epoch, optimizer, scheduler)
+        start_epoch=load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler)
 
     #Store loss and etc for per-epoch loop
     training_info={
