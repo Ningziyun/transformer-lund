@@ -4,6 +4,8 @@ from helpers import *
 from helpers_unbinned import *
 from helpers_plotting import *
 
+import torch.nn.functional as F
+
 from torchinfo import summary
 
 class NonFiniteLossError(RuntimeError):

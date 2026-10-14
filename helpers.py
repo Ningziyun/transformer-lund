@@ -156,7 +156,7 @@ def preprocess_min_max(input_format):
         pz_min,pz_max=-2699.067, 2506.768
         return [[e_min,e_max],[px_min,px_max],[py_min,py_max],[pz_min,pz_max]]
 
-    elif input_format=="4vec":
+    elif input_format=="relvec":
         ptfrac_min,ptfrac_max=0.000, 1.000
         deta_min,deta_max=-0.880, 0.880
         dphi_min,dphi_max=-0.845, 0.845
@@ -169,36 +169,42 @@ def preprocess(X,input_format,method="log"):
     if method=="standardize":
         mean_std=preprocess_mean_std(input_format)
         for ii in range(X.shape[-1]):
-            X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
+            X[...,ii]=(X[...,ii]-mean_std[ii][0])/mean_std[ii][1]
         X[mask]=-50 #shift padding
 
     elif method=="linear":
         min_max=preprocess_min_max(input_format)
         for ii in range(X.shape[-1]):
-            X[:,ii]=(X[:,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
+            X[...,ii]=(X[...,ii]-min_max[ii][0])/(min_max[ii][1]-min_max[ii][0])
+        X[mask]=-1 #keep padding
+
+    elif method=="logit":
+        min_max=preprocess_min_max(input_format)
+        for ii in range(X.shape[-1]):
+            X[...,ii]=np.log((X[...,ii]-min_max[ii][0])/(min_max[ii][1]-X[...,ii])) #log((x−a)/(b−x)) , linearize then logit
         X[mask]=-1 #keep padding
 
     elif method=="log" and input_format=="relvec":
-        X[...,0]=-torch.log(X[...,0]) #-log(x)
+        X[...,0]=-np.log(X[...,0]) #-log(x)
         X[mask]=-1 #keep padding
 
     elif method=="log":
-        X[...] = torch.sign(X) * torch.log1p(torch.abs(X)) #sgn(x)*log(|x|+1)
+        X = np.sign(X) * np.log1p(np.abs(X)) #sgn(x)*log(|x|+1)
         X[mask]=-10 #shift padding
 
     elif method=="logstd" and input_format=="relvec":
         mean_std=preprocess_log_mean_std(input_format)
-        #X[...,0]=-torch.log(X[...,0]) #-log(x)
-        X[...,0]=torch.log1p(X[...,0])
+        #X[...,0]=-np.log(X[...,0]) #-log(x)
+        X[...,0]=np.log1p(X[...,0])
         for ii in range(0,X.shape[-1]):
-            X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
+            X[...,ii]=(X[...,ii]-mean_std[ii][0])/mean_std[ii][1]
         X[mask]=-10 #shift padding
 
     elif method=="logstd":
         mean_std=preprocess_log_mean_std(input_format)
-        X[...] = torch.sign(X) * torch.log1p(torch.abs(X)) #sgn(x)*log(|x|+1)
+        X = np.sign(X) * np.log1p(np.abs(X)) #sgn(x)*log(|x|+1)
         for ii in range(X.shape[-1]):
-            X[:,ii]=(X[:,ii]-mean_std[ii][0])/mean_std[ii][1]
+            X[...,ii]=(X[...,ii]-mean_std[ii][0])/mean_std[ii][1]
         X[mask]=-10 #shift padding
 
     elif method=="shiftpad":
@@ -207,49 +213,61 @@ def preprocess(X,input_format,method="log"):
     else:
         ValueError(f"Unknown pre-processing method: {method}")
 
+    return X
+
 def undo_preprocess(X,input_format,method="log"):
     X_new=torch.zeros(X.shape)
 
     if method=="standardize":
         if input_format=="ktdr":
-            mask = X[:,:,-1] < -49
+            mask = X[...,-1] < -49
         else:
-            mask = X[:,:,0] < -49
+            mask = X[...,0] < -49
         mean_std=preprocess_mean_std(input_format)
         for ii in range(X_new.shape[-1]):
-            X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+            X_new[...,ii]=X[...,ii]*mean_std[ii][1]+mean_std[ii][0]
         X_new[mask] = -1 #restore padding
 
     elif method=="linear":
         if input_format=="ktdr":
-            mask = X[:,:,-1] < 0
+            mask = X[...,-1] < 0
         else:
-            mask = X[:,:,0] < 0
+            mask = X[...,0] < 0
         min_max=preprocess_min_max(input_format)
         for ii in range(X_new.shape[-1]):
-            X_new[:,:,ii]=(min_max[ii][1]-min_max[ii][0])*X[:,:,ii] + min_max[ii][0]
+            X_new[...,ii]=(min_max[ii][1]-min_max[ii][0])*X[...,ii] + min_max[ii][0]
+        X_new[mask] = -1 #restore padding
+
+    elif method=="logit":
+        if input_format=="ktdr":
+            mask = X[...,-1] < 0
+        else:
+            mask = X[...,0] < 0
+        min_max=preprocess_min_max(input_format)
+        for ii in range(X_new.shape[-1]):
+            X_new[...,ii]=(min_max[ii][1]-min_max[ii][0])*(1./(1.+np.exp(-X[...,ii]))) + min_max[ii][0] #a + (b−a)·sigmoid(x), logistic then linearize
         X_new[mask] = -1 #restore padding
 
     elif method=="log" and input_format=="relvec":
-        mask = X[:,:,0] < 0
+        mask = X[...,0] < 0
         X_new=X
         X_new[...,0]=torch.exp(-X[...,0])
         X_new[mask]=-1 #restore padding
 
     elif method=="log":
         if input_format=="ktdr":
-            mask = X[:,:,-1] < 0
+            mask = X[...,-1] < 0
         else:
-            mask = X[:,:,0] < 0
+            mask = X[...,0] < 0
         X_new = torch.sign(X) * torch.expm1(torch.abs(X))
         X_new[mask] = -1 #restore padding
 
     elif method=="logstd" and input_format=="relvec":
         mean_std=preprocess_log_mean_std(input_format)
-        mask = X[:,:,0] < -9
+        mask = X[...,0] < -9
 
         for ii in range(X_new.shape[-1]):
-            X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+            X_new[...,ii]=X[...,ii]*mean_std[ii][1]+mean_std[ii][0]
         #X_new[...,0]=torch.exp(-X_new[...,0])
         X_new[...,0]=torch.expm1(X_new[...,0])
 
@@ -257,10 +275,10 @@ def undo_preprocess(X,input_format,method="log"):
 
     elif method=="logstd":
         mean_std=preprocess_log_mean_std(input_format)
-        mask = X[:,:,0] < -9
+        mask = X[...,0] < -9
 
         for ii in range(X_new.shape[-1]):
-            X_new[:,:,ii]=X[:,:,ii]*mean_std[ii][1]+mean_std[ii][0]
+            X_new[...,ii]=X[...,ii]*mean_std[ii][1]+mean_std[ii][0]
         X_new = torch.sign(X_new) * torch.expm1(torch.abs(X_new))
 
         X_new[mask] = -1 #restore padding

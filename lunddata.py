@@ -9,9 +9,9 @@ import numpy as np
 import random
 import h5py
 
-from helpers import make_lundplane
+import helpers
 
-def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", train_test_split=0.8, seed=0, file_format="topbenchmark"):
+def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", train_test_split=0.8, seed=0, file_format="topbenchmark", preprocess=False):
 
     #make the output file
     if not os.path.exists(outdir):
@@ -86,7 +86,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
             constituents[0,jj,:]=[E[jj],px[jj],py[jj],pz[jj]]
 
           #Make the lund-jet place
-          ljp=make_lundplane(constituents, Npad_ljp)
+          ljp=helpers.make_lundplane(constituents, Npad_ljp)
           constituents[constituents==0]=-1 #set pad to -1
 
           #train/test split
@@ -243,27 +243,39 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           const_dphi = np.arctan2(np.sin(const_dphi), np.cos(const_dphi)) # Wrap Delta phi into [-pi, pi]
 
           #Remove out the weird deta issues for sure via the mask and sort to end
-          E[~const_mask]=-1
-          px[~const_mask]=-1
-          py[~const_mask]=-1
-          pz[~const_mask]=-1
+          #E[~const_mask]=-1
+          #px[~const_mask]=-1
+          #py[~const_mask]=-1
+          #pz[~const_mask]=-1
           const_ptfrac[~const_mask]=-1
           const_dphi[~const_mask]=-1
           const_deta[~const_mask]=-1
           const_m[~const_mask]=-1
+          constituents[~const_mask]=0
 
-          E          = np.take_along_axis(E,          sort_idx, axis=1)
-          px         = np.take_along_axis(px,         sort_idx, axis=1)
-          py         = np.take_along_axis(py,         sort_idx, axis=1)
-          pz         = np.take_along_axis(pz,         sort_idx, axis=1)
+          #E          = np.take_along_axis(E,          sort_idx, axis=1)
+          #px         = np.take_along_axis(px,         sort_idx, axis=1)
+          #py         = np.take_along_axis(py,         sort_idx, axis=1)
+          #pz         = np.take_along_axis(pz,         sort_idx, axis=1)
           const_ptfrac   = np.take_along_axis(const_ptfrac,   sort_idx, axis=1)
           const_deta  = np.take_along_axis(const_deta,  sort_idx, axis=1)
           const_dphi  = np.take_along_axis(const_dphi,  sort_idx, axis=1)
           const_m  = np.take_along_axis(const_m,  sort_idx, axis=1)
 
           #Make the lund-jet place
-          ljp=make_lundplane(constituents, Npad_ljp)
-          constituents[constituents==0]=-1 #set pad to -1
+          ljp=helpers.make_lundplane(constituents, Npad_ljp)
+          constituents[~const_mask]=-1 #apply the masking
+          constituents = np.take_along_axis(constituents,  sort_idx[..., None], axis=1) #sort it like above
+
+          #Preprocess
+          if preprocess:
+              constituents=helpers.preprocess(constituents,"4vec","logstd")
+              #helpers.preprocess(ljp,"ktdr","logstd")
+              tmp=np.concatenate([const_ptfrac[:,:,None],const_deta[:,:,None],const_dphi[:,:,None]],axis=2)
+              tmp=helpers.preprocess(tmp,"relvec","logstd")
+              const_ptfrac=tmp[...,0]
+              const_deta=tmp[...,1]
+              const_dphi=tmp[...,2]
 
           #train/test split
           if random.random()<train_test_split:
@@ -331,10 +343,14 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_jetPY[old_size:new_size] = jet_py
           dset_jetPZ[old_size:new_size] = jet_pz
 
-          dset_E[old_size:new_size,:] = constituents[:,:,0]
-          dset_PX[old_size:new_size,:] = constituents[:,:,1]
-          dset_PY[old_size:new_size,:] = constituents[:,:,2]
-          dset_PZ[old_size:new_size,:] = constituents[:,:,3]
+          #dset_E[old_size:new_size,:] = E
+          #dset_PX[old_size:new_size,:] = px
+          #dset_PY[old_size:new_size,:] = py
+          #dset_PZ[old_size:new_size,:] = pz
+          dset_E[old_size:new_size,:] = constituents[...,0]
+          dset_PX[old_size:new_size,:] = constituents[...,1]
+          dset_PY[old_size:new_size,:] = constituents[...,2]
+          dset_PZ[old_size:new_size,:] = constituents[...,3]
 
           dset_ptfrac[old_size:new_size,:] = const_ptfrac
           dset_dphi[old_size:new_size,:] = const_dphi
@@ -361,11 +377,12 @@ if __name__ == "__main__":
     parser.add_argument("--treename", help="", default="tree")
     parser.add_argument("--split",type=float, default=0.8, help="Train/test split fraction")
     parser.add_argument("--seed",type=float, default=99, help="Train/test split fraction")
+    parser.add_argument("--preprocess", action="store_true", default=False, help="Apply some preprocessing to the inputs")
     args = parser.parse_args()
 
     print(args.filepaths)
 
     #try:
-    load_and_lundplane(args.filepaths, args.treename, outdir=args.outdir, outname=args.outname, train_test_split=args.split, seed=args.seed, file_format=args.format)
+    load_and_lundplane(args.filepaths, args.treename, outdir=args.outdir, outname=args.outname, train_test_split=args.split, seed=args.seed, file_format=args.format, preprocess=args.preprocess)
     #except Exception as e:
     #    print(f"Failed to read file {args.filename}: \n{e}")

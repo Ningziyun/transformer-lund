@@ -44,7 +44,7 @@ class ktdr_dataset(torch.utils.data.Dataset):
 
   def __getitem__(self, index):
     inputs=np.array([self.kt[index],self.DR[index]])
-    self.data=torch.transpose(torch.tensor(inputs),0,1)
+    self.data=np.transpose(inputs,[1,0])
 
     if self.add_conditional:
         eps=1e-12
@@ -56,8 +56,9 @@ class ktdr_dataset(torch.utils.data.Dataset):
         jet_Nconst= np.asarray(~self.mask[index]).sum(axis=-1)
         jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
-    if self.preprocess:
-        helpers.preprocess(self.data,"ktdr",self.preprocess)
+    #if self.preprocess:
+    #    self.data=helpers.preprocess(self.data,"ktdr",self.preprocess)
+    self.data=torch.from_numpy(self.data)
 
     if self.add_mask and self.add_conditional:
         return [self.data,jet_data,self.mask[index]]
@@ -101,7 +102,7 @@ class constit_dataset(torch.utils.data.Dataset):
 
   def __getitem__(self, index):
     inputs=np.array([self.e[index],self.px[index],self.py[index],self.pz[index]])
-    self.data=torch.transpose(torch.tensor(inputs),0,1)
+    self.data=np.transpose(inputs,[1,0])
 
     if self.add_conditional:
         eps=1e-12
@@ -110,13 +111,12 @@ class constit_dataset(torch.utils.data.Dataset):
         jet_eta = np.arcsinh(self.jet_pz[index] / np.maximum(jet_pt, eps))
         jet_phi = np.arctan2(self.jet_py[index], self.jet_px[index])
         jet_m = np.sqrt(np.maximum(self.jet_E[index]**2 - jet_p**2, 0.0))
-        #print(self.e[0])
-        #print(self.mask[0])
         jet_Nconst= np.asarray(~self.mask[index]).sum(axis=-1)
         jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
-    if self.preprocess:
-        helpers.preprocess(self.data,"4vec",self.preprocess)
+    #if self.preprocess:
+    #    self.data=helpers.preprocess(self.data,"4vec",self.preprocess)
+    self.data=torch.from_numpy(self.data)
 
     if self.add_mask and self.add_conditional:
         return [self.data,jet_data,self.mask[index]]
@@ -159,9 +159,8 @@ class constit_relative_dataset(torch.utils.data.Dataset):
       self.mask=self.ptfrac == -1
 
   def __getitem__(self, index):
-
     inputs=np.array([self.ptfrac[index],self.deta[index],self.dphi[index]])
-    self.data=torch.transpose(torch.tensor(inputs),0,1)
+    self.data=np.transpose(inputs,[1,0])
 
     if self.add_conditional:
         eps=1e-12
@@ -173,8 +172,9 @@ class constit_relative_dataset(torch.utils.data.Dataset):
         jet_Nconst= np.asarray(~self.mask[index]).sum(axis=-1)
         jet_data=torch.tensor([jet_pt,jet_eta,jet_phi,jet_m,jet_Nconst])
 
-    if self.preprocess:
-        helpers.preprocess(self.data,"relvec",self.preprocess)
+    #if self.preprocess:
+    #    self.data=helpers.preprocess(self.data,"relvec",self.preprocess)
+    self.data=torch.from_numpy(self.data)
 
     if self.add_mask and self.add_conditional:
         return [self.data,jet_data,self.mask[index]]
@@ -907,5 +907,9 @@ def parse_input():
     args=parser.parse_args()
     if args.plot_dir is None:
         args.plot_dir = args.log_dir
+
+    #NOTE preprocessing is applied in the lunddata script now
+    if args.input_format=="4vec" or args.input_format=="relvec":
+        args.preprocess="logstd"
 
     return args
