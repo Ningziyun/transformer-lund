@@ -98,7 +98,7 @@ class constit_dataset(torch.utils.data.Dataset):
 
     #Mask which stores if padded. True/False=Padded/unpadded
     if add_mask or self.add_conditional:
-      self.mask=self.e < 0
+      self.mask=self.e == -10
 
   def __getitem__(self, index):
     inputs=np.array([self.e[index],self.px[index],self.py[index],self.pz[index]])
@@ -156,7 +156,7 @@ class constit_relative_dataset(torch.utils.data.Dataset):
 
     #Mask which stores if padded. True/False=Padded/unpadded
     if add_mask or self.add_conditional:
-      self.mask=self.ptfrac == -1
+      self.mask=self.ptfrac == -10
 
   def __getitem__(self, index):
     inputs=np.array([self.ptfrac[index],self.deta[index],self.dphi[index]])
@@ -800,7 +800,6 @@ def save_argument_metadata(args):
         arg_dict = vars(args)
         for k, v in arg_dict.items():
             f.write(f"{k:20s} {v}\n")
-
     return
 
 def parse_input():
