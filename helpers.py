@@ -63,8 +63,8 @@ def make_absolute_constituents(relative_vec, jet_vec):
 
     # Relative constituent quantities
     pt_frac = relative_vec[:, :, 0]
-    delta_phi = relative_vec[:, :, 1]
-    delta_eta = relative_vec[:, :, 2]
+    delta_eta = relative_vec[:, :, 1]
+    delta_phi = relative_vec[:, :, 2]
 
     # Recover constituent lab-frame coordinates
     const_pt = pt_frac * jet_pt[:, None]
@@ -310,8 +310,19 @@ def flatten_weight(X):
 
     return w
 
-def format_input(X, args, device):
+def store_what(args):
+    store_mask=False
+    store_jet=False
+    if (input_format=="relvec" and args.multi_loss) or (args.conditional and args.multi_loss):
+        store_mask=True
+        store_jet=True
+    elif input_format=="relvec" or args.conditional:
+        store_jet=True
+    elif args.multi_loss:
+        store_mask=True
+    return store_mask, store_jet
 
+def format_input(X, args, device):
     #Format the output for each case
     if (args.input_format=="relvec" and args.multi_loss) or (args.conditional and args.multi_loss):
         X, jet, mask = X
@@ -324,6 +335,27 @@ def format_input(X, args, device):
     else:
         jet=None
         mask=None
+    #Set to devices
+    X = X.to(device)
+    if mask is not None: mask=mask.to(device)
+    if jet is not None: jet=jet.to(device)
+
+    return X, mask, jet
+
+def format_input2(X, store_mask, store_jet, device):
+
+    #Format the output for each case
+    if store_mask and store_jet:
+        X, jet, mask = X
+    elif store_mask:
+        X, mask = X
+        jet=None
+    elif store_jet:
+        X, jet = X
+        mask=None
+    else:
+        mask=None
+        jet=None
 
     #Set to devices
     X = X.to(device)
@@ -331,3 +363,48 @@ def format_input(X, args, device):
     if jet is not None: jet=jet.to(device)
 
     return X, mask, jet
+
+# ---------------------------------------------------------------------
+# Functions to help with loading in/out config data
+# ---------------------------------------------------------------------
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "y", "on")
+    return bool(value)
+
+def _as_int(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() in ("none", "null", ""):
+            return default
+        match = re.search(r"-?\d+", text)
+        if match is None:
+            return default
+        return int(match.group(0))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+def _as_float(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip()
+        if text.lower() in ("none", "null", ""):
+            return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def _config_get(args_or_dict, key, default=None):
+    if isinstance(args_or_dict, dict):
+        return args_or_dict.get(key, default)
+    return getattr(args_or_dict, key, default)

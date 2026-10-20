@@ -1472,3 +1472,184 @@ class model_score_SDE(nn.Module):
                 x = (x + drift * dt )
 
         return x.view(out_dimensions)
+
+# ---------------------------------------------------------------------
+# GPT style next-token-prediction transformer
+# ---------------------------------------------------------------------
+class model_gpt_transformer(nn.Module):
+
+    def __init__(self, tokenizer, n_const, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=0, temperature=1.0, top_k=None):
+        super(model_gpt_transformer, self).__init__()
+
+        self.K, self.Q, self.N, self.n_feat = tokenizer.K, tokenizer.Q, n_const, tokenizer.F
+        self.pad_value = tokenizer.pad_value
+        self.cond_dim = cond_dim
+        self.embed_dim = embed_dim
+        self.n_register = n_register
+        self.temperature = temperature
+        self.top_k = top_k
+
+        # Frozen tokenizer: only used to decode generated codes (its weights are stored in the checkpoint too)
+        self.tokenizer = tokenizer
+        for p in self.tokenizer.parameters():
+            p.requires_grad_(False)
+        self.tokenizer.eval()
+
+        # Vocabulary
+        self.n_code_tokens = self.K * self.Q
+        self.EOS, self.PAD, self.BOS = self.n_code_tokens, self.n_code_tokens + 1, self.n_code_tokens + 2
+        self.seq_len = 1 + self.N * self.Q  # model input length (start token + body); targets add the EOS
+
+        # Token + position embedding (positions matter: they carry the constituent index and RVQ level)
+        self.embed = nn.Embedding(self.n_code_tokens + 3, embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.seq_len, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        # Transformer block, same as model_autoregressive_transformer
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=0.1, batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers, enable_nested_tensor=False)
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # Classification head over codes + EOS
+        self.head = nn.Linear(embed_dim, self.n_code_tokens + 1)
+
+        # Conditional embedding, the vector [pt, eta, phi, m, N] is log-transformed and standardised first
+        if cond_dim > 0:
+            self.cond_embed = nn.Sequential(nn.Linear(cond_dim, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
+            self.register_buffer("cond_mean", torch.zeros(cond_dim))
+            self.register_buffer("cond_std", torch.ones(cond_dim))
+
+        # Register tokens
+        if self.n_register > 0:
+            self.registers = nn.Parameter(torch.zeros(1, self.n_register, embed_dim))
+            nn.init.trunc_normal_(self.registers, std=0.02)
+
+    # never update the tokenizer (EMA codebook) or use dropout in it
+    def train(self, mode=True):
+        super().train(mode)
+        self.tokenizer.eval()
+        return self
+
+    # Conditioning
+    @staticmethod
+    def _cond_transform(c):
+        c = c.float().clone()
+        c[:, 0] = torch.log(c[:, 0].clamp_min(1e-8))   # pt
+        if c.shape[1] > 3:
+            c[:, 3] = torch.log1p(c[:, 3].clamp_min(0))  # mass
+        return c
+
+    @torch.no_grad()
+    def fit_cond_normalisation(self, cond):
+        c = self._cond_transform(torch.as_tensor(cond))
+        self.cond_mean.copy_(c.mean(0).to(self.cond_mean.device))
+        self.cond_std.copy_(c.std(0).clamp_min(1e-6).to(self.cond_std.device))
+
+    # Sequences
+    def encode_sequence(self, codes):
+        """codes (B, N, Q) long, -1 = padded -> token ids (B, seq_len + 1)."""
+        B, N = codes.shape[0], codes.shape[1]
+        offset = torch.arange(self.Q, device=codes.device) * self.K
+        tok = torch.where(codes >= 0, codes + offset, torch.full_like(codes, self.PAD)).reshape(B, -1)
+        seq = torch.full((B, 1 + N * self.Q + 1), self.PAD, dtype=torch.long, device=codes.device)
+        seq[:, 0] = self.BOS
+        seq[:, 1:1 + N * self.Q] = tok
+        n_real = (codes[..., 0] >= 0).sum(1)
+        seq[torch.arange(B, device=codes.device), 1 + n_real * self.Q] = self.EOS
+        return seq
+
+    def forward(self, x, c=None):
+        B, L = x.shape  # (batch, seq_len) token ids
+
+        h = self.embed(x) + self.pos_embed[:, :L]
+        if self.cond_dim > 0:
+            # Prefix conditioning, replace the start-token embedding with the conditioned token
+            ce = self.cond_embed((self._cond_transform(c) - self.cond_mean) / self.cond_std).unsqueeze(1)
+            h = torch.cat([ce + self.pos_embed[:, :1], h[:, 1:]], dim=1)
+
+        if self.n_register > 0:
+            reg = self.registers.expand(B, self.n_register, -1)
+            h = torch.cat([h[:, :1], reg, h[:, 1:]], dim=1)  # (B, 1+R+L-1, E)
+
+        # Causal mask; start token and registers fully attend each other
+        Lr = L + self.n_register
+        causal_mask = torch.triu(torch.ones(Lr, Lr, device=x.device), diagonal=1).bool()
+        if self.n_register > 0:
+            causal_mask[:self.n_register + 1, :self.n_register + 1] = False
+
+        encoded = self.encoder(h, mask=causal_mask)
+        if self.n_register > 0:
+            encoded = torch.cat([encoded[:, :1], encoded[:, 1 + self.n_register:]], dim=1)  # drop registers
+        return self.head(self.norm(encoded))  # (B, L, K*Q + 1)
+
+    def ce_loss(self, logits, targets):
+        """Per-token cross-entropy (B, L), zero where the target is PAD."""
+        return F.cross_entropy(logits.transpose(1, 2), targets, ignore_index=self.PAD, reduction="none")
+
+    # Generation
+    def _allowed(self, pos, device):
+        """Allowed output tokens when predicting body position pos (0-based)."""
+        allowed = torch.zeros(self.n_code_tokens + 1, dtype=torch.bool, device=device)
+        if pos == self.N * self.Q:
+            allowed[self.EOS] = True
+            return allowed
+        q = pos % self.Q
+        allowed[q * self.K:(q + 1) * self.K] = True  # right RVQ level for this position
+        if q == 0:
+            allowed[self.EOS] = True  # can only stop at a constituent boundary
+        return allowed
+
+    @torch.no_grad()
+    def generate_codes(self, n, c=None, n_max=None, temperature=None, top_k=None, min_const=1):
+        """Sample n jets -> codes (n, n_max, Q), -1 where padded."""
+        device = next(self.parameters()).device
+        n_max = self.N if n_max is None else min(n_max, self.N)
+        temperature = self.temperature if temperature is None else temperature
+        top_k = self.top_k if top_k is None else top_k
+        if c is not None:
+            c = c.to(device)
+
+        seq = torch.full((n, 1), self.BOS, dtype=torch.long, device=device)
+        done = torch.zeros(n, dtype=torch.bool, device=device)
+        last = n_max * self.Q
+        for pos in range(last + 1):
+            logits = self.forward(seq, c)[:, -1] / max(temperature, 1e-6)
+            allowed = self._allowed(pos, device)
+            if pos == last:
+                allowed[:] = False
+                allowed[self.EOS] = True
+            if pos < min_const * self.Q:
+                allowed[self.EOS] = False
+            logits = logits.masked_fill(~allowed, float("-inf"))
+            if top_k:
+                kth = torch.topk(logits, top_k, dim=-1).values[:, -1:]
+                logits = logits.masked_fill(logits < kth, float("-inf"))
+            nxt = torch.multinomial(F.softmax(logits, -1), 1).squeeze(-1)
+            done = done | (nxt == self.EOS)
+            if pos == last or done.all():
+                break
+            nxt = torch.where(done, torch.full_like(nxt, self.PAD), nxt)
+            seq = torch.cat([seq, nxt[:, None]], 1)
+
+        body = seq[:, 1:]
+        body = torch.cat([body, torch.full((n, last - body.shape[1]), self.PAD, device=device)], 1)
+        codes = body.reshape(n, n_max, self.Q)
+        offset = torch.arange(self.Q, device=device) * self.K
+        codes = torch.where(codes < self.n_code_tokens, codes - offset, torch.full_like(codes, -1))
+        incomplete = (codes < 0).any(-1, keepdim=True)  # a constituent counts only if all its levels exist
+        return torch.where(incomplete, torch.full_like(codes, -1), codes)
+
+    @torch.no_grad()
+    def generate(self, out_dimensions, c=None):
+        """out_dimensions (B, N, F) -> (B, N, F) pre-processed features, pad_value where padded."""
+        B, N_out, F_out = int(out_dimensions[0]), int(out_dimensions[1]), int(out_dimensions[2])
+        if F_out != self.n_feat:
+            raise ValueError(f"requested {F_out} features, tokenizer decodes {self.n_feat}")
+        if self.cond_dim > 0 and c is None:
+            raise ValueError("conditional VQGPT model: generate() needs the jet conditioning c")
+        codes = self.generate_codes(B, c, n_max=N_out)
+        X = self.tokenizer.decode(codes)  # (B, n, F), pad_value in padded slots
+        if X.shape[1] < N_out:
+            X = torch.cat([X, torch.full((B, N_out - X.shape[1], F_out), float(self.pad_value), device=X.device)], 1)
+        return X
+

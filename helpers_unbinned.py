@@ -238,80 +238,80 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_shape[2],
             cond_dim=cond_shape[-1],
-            n_mix=_as_int(_config_get(args_or_dict,"MDN_nmix")),
-            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            n_register=_as_int(_config_get(args_or_dict,"registers")),
-            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
+            n_mix=helpers._as_int(helpers._config_get(args_or_dict,"MDN_nmix")),
+            embed_dim=helpers._as_int(helpers._config_get(args_or_dict,"embed_dim")),
+            num_heads=helpers._as_int(helpers._config_get(args_or_dict,"num_heads")),
+            num_layers=helpers._as_int(helpers._config_get(args_or_dict,"num_layers")),
+            ff_dim=helpers._as_int(helpers._config_get(args_or_dict,"ff_dim")),
+            n_register=helpers._as_int(helpers._config_get(args_or_dict,"registers")),
+            multi_loss=helpers._as_bool(helpers._config_get(args_or_dict,"multi_loss")),
             max_range=max_value,
             pad_value=pad_value,
         )
     elif args_or_dict.architecture=="CNF":
         return models_generative.model_CNF(
             input_dim=input_shape[1]*input_shape[2],
-            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            cnf_hidden=_as_int(_config_get(args_or_dict,"cnf_hidden")),
-            steps=_as_int(_config_get(args_or_dict,"cnf_steps")),
-            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
+            embed_dim=helpers._as_int(helpers._config_get(args_or_dict,"embed_dim")),
+            num_heads=helpers._as_int(helpers._config_get(args_or_dict,"num_heads")),
+            num_layers=helpers._as_int(helpers._config_get(args_or_dict,"num_layers")),
+            ff_dim=helpers._as_int(helpers._config_get(args_or_dict,"ff_dim")),
+            cnf_hidden=helpers._as_int(helpers._config_get(args_or_dict,"cnf_hidden")),
+            steps=helpers._as_int(helpers._config_get(args_or_dict,"cnf_steps")),
+            time_dim=helpers._as_int(helpers._config_get(args_or_dict,"time_dim")),
         )
     elif args_or_dict.architecture=="FM":
         return models_generative.model_FM(
             input_shape=input_shape,
             cond_shape=cond_shape,
-            hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-            Nembed_dim=_as_int(_config_get(args_or_dict,"fm_Nembed_dim")),
-            steps=_as_int(_config_get(args_or_dict,"fm_steps")),
-            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
-            architecture=_config_get(args_or_dict,"fm_architecture"),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            n_register=_as_int(_config_get(args_or_dict,"registers")),
+            hidden_dim=helpers._as_int(helpers._config_get(args_or_dict,"embed_dim")),
+            time_dim=helpers._as_int(helpers._config_get(args_or_dict,"time_dim")),
+            Nembed_dim=helpers._as_int(helpers._config_get(args_or_dict,"fm_Nembed_dim")),
+            steps=helpers._as_int(helpers._config_get(args_or_dict,"fm_steps")),
+            multi_loss=helpers._as_bool(helpers._config_get(args_or_dict,"multi_loss")),
+            architecture=helpers._config_get(args_or_dict,"fm_architecture"),
+            num_heads=helpers._as_int(helpers._config_get(args_or_dict,"num_heads")),
+            num_layers=helpers._as_int(helpers._config_get(args_or_dict,"num_layers")),
+            ff_dim=helpers._as_int(helpers._config_get(args_or_dict,"ff_dim")),
+            n_register=helpers._as_int(helpers._config_get(args_or_dict,"registers")),
             pad_value=pad_value,
         )
     elif args_or_dict.architecture=="NF":
         return models_generative.model_normalizing_flow(
             input_dim=input_shape[1]*input_shape[2],
-            num_flows=_as_int(_config_get(args_or_dict,"nflows")),
-            latent_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
+            num_flows=helpers._as_int(helpers._config_get(args_or_dict,"nflows")),
+            latent_dim=helpers._as_int(helpers._config_get(args_or_dict,"embed_dim")),
             flow_type=args_or_dict.nflow_type,
         )
     elif args_or_dict.architecture=="Diffusion":
         return models_generative.model_diffusion(
                 input_dim=input_shape[1]*input_shape[2],
-                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-                time_steps=_as_int(_config_get(args_or_dict,"diff_steps")),
-                beta_start=_as_float(_config_get(args_or_dict,"diff_beta_start")),
-                beta_end=_as_float(_config_get(args_or_dict,"diff_beta_end")),
+                hidden_dim=helpers._as_int(helpers._config_get(args_or_dict,"embed_dim")),
+                time_steps=helpers._as_int(helpers._config_get(args_or_dict,"diff_steps")),
+                beta_start=helpers._as_float(helpers._config_get(args_or_dict,"diff_beta_start")),
+                beta_end=helpers._as_float(helpers._config_get(args_or_dict,"diff_beta_end")),
                 mode=args_or_dict.diff_type,
-                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-                sample_time_steps=_as_int(_config_get(args_or_dict,"diff_steps_sample")),
+                time_dim=helpers._as_int(helpers._config_get(args_or_dict,"time_dim")),
+                sample_time_steps=helpers._as_int(helpers._config_get(args_or_dict,"diff_steps_sample")),
         )
     elif args_or_dict.architecture=="SDE":
         return models_generative.model_score_SDE(
                 input_dim=input_shape[1]*input_shape[2],
-                hidden_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-                time_dim=_as_int(_config_get(args_or_dict,"time_dim")),
-                beta_min=_as_float(_config_get(args_or_dict,"SDE_beta_min")),
-                beta_max=_as_float(_config_get(args_or_dict,"SDE_beta_max")),
+                hidden_dim=helpers._as_int(helpers._config_get(args_or_dict,"embed_dim")),
+                time_dim=helpers._as_int(helpers._config_get(args_or_dict,"time_dim")),
+                beta_min=helpers._as_float(helpers._config_get(args_or_dict,"SDE_beta_min")),
+                beta_max=helpers._as_float(helpers._config_get(args_or_dict,"SDE_beta_max")),
                 mode=args_or_dict.SDE_type,
         )
     elif args_or_dict.architecture=="Transformer":
         return models_generative.model_autoregressive_transformer(
             input_dim=input_shape[2],
             cond_dim=cond_shape[-1],
-            embed_dim=_as_int(_config_get(args_or_dict,"embed_dim")),
-            num_heads=_as_int(_config_get(args_or_dict,"num_heads")),
-            num_layers=_as_int(_config_get(args_or_dict,"num_layers")),
-            ff_dim=_as_int(_config_get(args_or_dict,"ff_dim")),
-            n_register=_as_int(_config_get(args_or_dict,"registers")),
-            multi_loss=_as_bool(_config_get(args_or_dict,"multi_loss")),
+            embed_dim=helpers._as_int(helpers._config_get(args_or_dict,"embed_dim")),
+            num_heads=helpers._as_int(helpers._config_get(args_or_dict,"num_heads")),
+            num_layers=helpers._as_int(helpers._config_get(args_or_dict,"num_layers")),
+            ff_dim=helpers._as_int(helpers._config_get(args_or_dict,"ff_dim")),
+            n_register=helpers._as_int(helpers._config_get(args_or_dict,"registers")),
+            multi_loss=helpers._as_bool(helpers._config_get(args_or_dict,"multi_loss")),
         )
     else:
         return None
@@ -473,77 +473,21 @@ def step_scheduler(scheduler, args, metric=None):
 def make_optimizer(args, model):
     optimizer_name = getattr(args, "optimizer", "adam")
     if optimizer_name == "adamw":
-        if args.multi_loss: #Gradient descent on a plain categorical converges slowly and can be biased to zero in AdamW weight decay. Turn off weight-decay and give reasonable LR
-            return torch.optim.AdamW([
-                    {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
-                    {"params": [p for n, p in model.named_parameters() if n == "count_logits"], "lr": 1e-2, "weight_decay": 0.0},
-            ])
-        else:
+        if args.architecture=="VQGPT" or not args.multi_loss:
             return torch.optim.AdamW(model.parameters(),
                 lr=args.lr,
                 weight_decay=args.weight_decay,
             )
+        else: #Gradient descent on a plain categorical converges slowly and can be biased to zero in AdamW weight decay. Turn off weight-decay and give reasonable LR
+            return torch.optim.AdamW([
+                    {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
+                    {"params": [p for n, p in model.named_parameters() if n == "count_logits"], "lr": 1e-2, "weight_decay": 0.0},
+            ])
     else:
         return torch.optim.Adam([
                 {"params": [p for n, p in model.named_parameters() if n != "count_logits"], "lr": args.lr, "weight_decay": args.weight_decay},
                 {"params": [model.count_logits], "lr": 1e-2, "weight_decay": 0.0},
         ])
-
-# ---------------------------------------------------------------------
-# Functions to help with loading in/out config data
-# ---------------------------------------------------------------------
-def _as_bool(value):
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "y", "on")
-    return bool(value)
-
-def _as_int(value, default=None):
-    if value is None:
-        return default
-    if isinstance(value, str):
-        text = value.strip()
-        if text.lower() in ("none", "null", ""):
-            return default
-        match = re.search(r"-?\d+", text)
-        if match is None:
-            return default
-        return int(match.group(0))
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-def _as_float(value, default=None):
-    if value is None:
-        return default
-    if isinstance(value, str):
-        text = value.strip()
-        if text.lower() in ("none", "null", ""):
-            return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-def _config_get(args_or_dict, key, default=None):
-    if isinstance(args_or_dict, dict):
-        return args_or_dict.get(key, default)
-    return getattr(args_or_dict, key, default)
-
-def save_torchpickle(model, model_path):
-    torch.save(model, model_path)
-    return
-
-def load_torchpickle(model_path, map_location="cpu"):
-    #Note that torch load just unpickles a dictionary, which can be our checkpoint. The "model_state_dict" key holds the weights
-    try:
-        return torch.load(model_path, map_location=map_location, weights_only=False)
-    except TypeError:
-        return torch.load(model_path, map_location=map_location)
 
 # ---------------------------------------------------------------------
 # Checkpoint
@@ -560,14 +504,14 @@ def save_checkpoint(
 ):
 
     #From args figure out how much to save
-    save_mode = _config_get(args, "save_mode", "full")
+    save_mode = helpers._config_get(args, "save_mode", "full")
     if save_mode == "none":
         return None
     if save_mode not in ("full", "model"):
         raise ValueError("--save-mode must be one of: optimizer, model, none")
 
     #Get the path
-    ckpt_dir = os.path.join(_config_get(args, "log_dir"), "checkpoints")
+    ckpt_dir = os.path.join(helpers._config_get(args, "log_dir"), "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
     if ckpt_name is None:
         ckpt_name = f"epoch_{epoch:03d}.pt"
@@ -656,6 +600,17 @@ def load_checkpoint_losses_lr(args, checkpoint_info, training_info):
     training_info["test_losses"] = list(checkpoint_info.get("test_losses", []))
     training_info["train_losses"] = list(checkpoint_info.get("train_losses", []))
     training_info["lr_history"] = list(checkpoint_info.get("lr_history", []))
+
+def save_torchpickle(model, model_path):
+    torch.save(model, model_path)
+    return
+
+def load_torchpickle(model_path, map_location="cpu"):
+    #Note that torch load just unpickles a dictionary, which can be our checkpoint. The "model_state_dict" key holds the weights
+    try:
+        return torch.load(model_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(model_path, map_location=map_location)
 
 # ---------------------------------------------------------------------
 # Save/load loss and learning rates
@@ -772,6 +727,9 @@ def lr_plot(lr_history, out_dir=""):
     print(f"Plotting learning rate to {out_dir}/lr_vs_epoch.pdf")
     save_lr_csv(lr_history, out_dir)
 
+# ---------------------------------------------------------------------
+# Arguments and metadata saving
+# ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
 # Arguments and metadata saving
 # ---------------------------------------------------------------------

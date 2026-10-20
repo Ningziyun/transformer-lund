@@ -75,7 +75,7 @@ if __name__ == "__main__":
         "stopped_nonfinite":False,
     }
     load_checkpoint_losses_lr(args, checkpoint_info, training_info)
-    #loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
-    #lr_plot(training_info["lr_history"], out_dir=args.log_dir)
+    loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
+    lr_plot(training_info["lr_history"], out_dir=args.log_dir)
 
     print("Done")

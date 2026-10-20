@@ -1,5 +1,6 @@
 import os,sys
 import time
+import inspect
 #os.environ.setdefault("MPLCONFIGDIR", os.path.join("/tmp", f"matplotlib-{os.environ.get('USER', 'user')}"))
 #os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 import numpy as np
@@ -290,259 +291,6 @@ def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="
     fig.savefig(os.path.join(out_dir,name+".pdf"))
     plt.close(fig)
     print(f"Plotting projections to {out_dir}/{name}.pdf")
-
-def plot_combined_1dhist_ratio_diff(
-    inputs,
-    labels=None,
-    out_dir="./Plots/",
-    hist1d_ranges=None,
-    hist1d_bins=30,
-    logy=False,
-    out_name=None,
-    unavailable_notes=None,
-    min_reference_count=5,
-    max_abs_diff=1.0,
-):
-    if len(inputs) <= 1:
-        return
-
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    if labels is None:
-        labels = [f"sample_{i}" for i in range(len(inputs))]
-    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
-    comparison_labels = diff_labels if len(diff_labels) > 0 else labels[1:]
-
-    Ndim = inputs[0].shape[1]
-    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
-
-    if hist1d_ranges is None:
-        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
-
-    fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
-    if Ndim == 1:
-        axs = [axs]
-
-    axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
-    linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
-
-    for ii in range(Ndim):
-        feature_idx = display_order[ii] if ii < len(display_order) else ii
-        reference_counts, bin_edges = np.histogram(
-            inputs[0][:, feature_idx],
-            bins=hist1d_bins,
-            range=hist1d_ranges[ii],
-            density=False,
-        )
-        reference_total = np.sum(reference_counts)
-        reference_density = reference_counts / reference_total if reference_total > 0 else reference_counts
-        populated_reference = reference_counts >= max(1, int(min_reference_count))
-        centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        ratio_values = []
-
-        for jj, arr in enumerate(inputs[1:], start=1):
-            comparison_counts, _ = np.histogram(
-                arr[:, feature_idx],
-                bins=hist1d_bins,
-                range=hist1d_ranges[ii],
-                density=False,
-            )
-            comparison_total = np.sum(comparison_counts)
-            comparison_density = comparison_counts / comparison_total if comparison_total > 0 else comparison_counts
-            ratio = np.full_like(reference_density, np.nan, dtype=float)
-            np.divide(
-                reference_density - comparison_density,
-                reference_density,
-                out=ratio,
-                where=populated_reference & (reference_density > 0.0),
-            )
-            ratio_values.append(ratio)
-            label_idx = jj - 1
-            axs[ii].step(
-                centers,
-                ratio,
-                where="mid",
-                linestyle=linestyles[label_idx % len(linestyles)],
-                label=comparison_labels[label_idx] if label_idx < len(comparison_labels) else f"sample_{jj}",
-            )
-
-        axs[ii].axhline(0.0, color="black", linewidth=0.8, alpha=0.55)
-        axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
-        axs[ii].set_xlabel("value")
-        axs[ii].set_ylabel("Fractional diff" + (" (symlog)" if logy else ""))
-
-        ymax = _symmetric_limit(ratio_values, fallback=1.0) * 1.15
-        if max_abs_diff is not None and max_abs_diff > 0:
-            ymax = min(ymax, float(max_abs_diff))
-        if logy:
-            axs[ii].set_yscale("symlog", linthresh=1.0)
-            axs[ii].set_ylim(-ymax, ymax)
-        else:
-            axs[ii].set_ylim(-ymax, ymax)
-
-    handles, legend_labels = axs[0].get_legend_handles_labels()
-    note_lines = _plot_note_from_common(common_items, unavailable_notes)
-    note_lines.append(
-        f"Masked original bins with < {max(1, int(min_reference_count))} entries; y clipped at +/- {max_abs_diff:g}"
-        if max_abs_diff is not None and max_abs_diff > 0
-        else f"Masked original bins with < {max(1, int(min_reference_count))} entries"
-    )
-    bottom_edge = 0.20 if note_lines else 0.08
-    fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
-    if len(handles) > 0:
-        for ax in axs:
-            ax.legend(handles, legend_labels, loc="best", fontsize=8, framealpha=0.90)
-    if note_lines:
-        fig.text(
-            0.02,
-            0.02,
-            _wrapped_note(note_lines, width=145),
-            ha="left",
-            va="bottom",
-            fontsize=8,
-        )
-
-    if out_name is None:
-        out_name = "hist1d_ratio_diff"
-
-    fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
-    fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"Plotting projection diff to {out_dir}/{out_name}.pdf")
-
-def plot_combined_1dhist(
-    inputs,
-    labels=None,
-    out_dir="./Plots/",
-    hist1d_ranges=None,
-    hist1d_bins=30,
-    logy=False,
-    out_name=None,
-    logy_floor_mode="clamped",
-    unavailable_notes=None,
-):
-    """
-    Plot overlaid 1D histograms for Lund features.
-
-    Expected feature order:
-      inputs[:, 0] = log(kt)
-      inputs[:, 1] = log(1/deltaR)
-
-    The top panel is log(kt), and the bottom panel is log(1/deltaR).
-    This matches the plotting convention used in plot_ublund.py.
-    """
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    if labels is None:
-        labels = [f"sample_{i}" for i in range(len(inputs))]
-    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
-    plot_labels = ["original"]
-    plot_labels.extend(diff_labels)
-
-    linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
-    Ndim = inputs[0].shape[1]
-    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
-
-    if hist1d_ranges is None:
-        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
-
-    fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
-    if Ndim == 1:
-        axs = [axs]
-
-    axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
-
-    for ii in range(Ndim):
-        # For ktdr plots, keep the top panel aligned with the Lund y-axis:
-        # log(kt) first, then log(1/deltaR).
-        feature_idx = display_order[ii] if ii < len(display_order) else ii
-
-        all_hist_counts = []
-        positive_hist_counts = []
-
-        for jj, arr in enumerate(inputs):
-            values = arr[:, feature_idx]
-
-            hist_counts, _ = np.histogram(
-                values,
-                bins=hist1d_bins,
-                range=hist1d_ranges[ii],
-                density=True,
-            )
-
-            all_hist_counts.append(hist_counts)
-            positive_hist_counts.extend(hist_counts[hist_counts > 0.0])
-
-            axs[ii].hist(
-                values,
-                bins=hist1d_bins,
-                range=hist1d_ranges[ii],
-                histtype="step",
-                density=True,
-                linestyle=linestyles[jj % len(linestyles)],
-                label=plot_labels[jj] if jj < len(plot_labels) else f"sample_{jj}",
-            )
-
-        axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
-        axs[ii].set_xlabel("value")
-        axs[ii].set_ylabel("Density (log scale)" if logy else "Density")
-
-        ymax = max([np.max(h) for h in all_hist_counts if h.size > 0], default=1.0)
-
-        if logy:
-            axs[ii].set_yscale("log")
-            if len(positive_hist_counts) > 0:
-                min_positive = min(positive_hist_counts)
-                max_positive = max(positive_hist_counts)
-
-                if logy_floor_mode == "tail":
-                    y_min = min_positive / 3.0
-                else:
-                    y_min = max(min_positive / 3.0, 1e-4)
-
-                y_max = max_positive * 1.5
-                if y_max <= y_min:
-                    y_max = y_min * 10.0
-
-                axs[ii].set_ylim(y_min, y_max)
-            else:
-                axs[ii].set_ylim(1e-4, 1.0)
-        else:
-            axs[ii].set_ylim(0.0, ymax * 1.15 if ymax > 0 else 1.0)
-
-    handles, legend_labels = axs[0].get_legend_handles_labels()
-    note_lines = _plot_note_from_common(common_items, unavailable_notes)
-    has_caption = bool(note_lines)
-    bottom_edge = 0.20 if has_caption else 0.08
-    fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
-    if len(handles) > 0:
-        for ax in axs:
-            ax.legend(
-                handles,
-                legend_labels,
-                loc="best",
-                fontsize=8,
-                framealpha=0.90,
-            )
-    if note_lines:
-        fig.text(
-            0.02,
-            0.02,
-            _wrapped_note(note_lines, width=145),
-            ha="left",
-            va="bottom",
-            fontsize=8,
-        )
-
-    if out_name is None:
-        out_name = "hist1d_logy" if logy else "hist1d"
-
-    fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
-    fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"Plotting hist to {out_dir}/{out_name}.pdf")
 
 def lund_plot(
     inputs,
@@ -1002,7 +750,8 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       Nimages = 0
       for batch, X in enumerate(test_loader):
         #input data
-        X,mask,jet=helpers.format_input(X,args,device)
+        #X,mask,jet=helpers.format_input(X,args,device) #FIXME
+        X,mask,jet=helpers.format_input2(X,False,False,device)
 
         batch_size = X.shape[0]
         Nimages+=X.shape[0]
@@ -1037,7 +786,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
               else:
                   generated_seq = model.generate(out_dimensions=X.shape)
 
-          except RuntimeError as err:
+          except (RuntimeError, ValueError) as err: #ValueError: e.g. VQGPT feature/conditioning mismatch with the tokenizer
             reason = f"generation failed: {err}"
             print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)
             active_models[imodel] = False
@@ -1173,50 +922,6 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             labels=active_labels,
             out_dir=args.plot_dir,
                   )
-
-      '''
-      hist1d_ranges = None
-      if args.hist1d_ranges is not None:
-        if len(args.hist1d_ranges) != 4:
-          raise ValueError("--hist1d-ranges should be: kt_min kt_max dr_min dr_max")
-        hist1d_ranges = [ [args.hist1d_ranges[0], args.hist1d_ranges[1]], [args.hist1d_ranges[2], args.hist1d_ranges[3]], ]
-
-      plot_combined_1dhist(
-          flat_plot_inputs,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=False,
-          out_name="hist1d",
-          unavailable_notes=unavailable_notes,
-      )
-
-      plot_combined_1dhist(
-          flat_plot_inputs,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=True,
-          out_name="hist1d_logy",
-          unavailable_notes=unavailable_notes,
-      )
-
-      #Make plot
-      plot_combined_1dhist_ratio_diff(
-          flat_plot_inputs,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=False,
-          out_name="hist1d_ratio_diff",
-          unavailable_notes=unavailable_notes,
-          min_reference_count=args.hist_ratio_min_count,
-          max_abs_diff=args.hist_ratio_vmax,
-      )
-      '''
 
       #If 4-vec input recalculate the lund-plane
       if args.input_format == "ktdr":

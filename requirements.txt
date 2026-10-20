@@ -20,3 +20,4 @@ uproot
 fastjet
 normflows
 torchdiffeq
+umap-learn

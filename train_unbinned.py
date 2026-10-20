@@ -299,9 +299,9 @@ if __name__ == "__main__":
     #Make validation plots
     if training_info["stopped_nonfinite"]:
       print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
-      validate_unbinned_models( [model], test_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
+      validate_unbinned_models([model], test_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
     else:
-      validate_unbinned_models( [model], test_loader, args, results=results, labels=["original", "generated"])
+      validate_unbinned_models([model], test_loader, args, results=results, labels=["original", "generated"])
 
     #update metadata with some result ddinfo
     append_result_metadata(args,results)
