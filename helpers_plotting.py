@@ -6,7 +6,6 @@ import inspect
 import numpy as np
 import awkward as ak
 import math
-import csv
 import re
 import textwrap
 import matplotlib.pyplot as plt
@@ -251,6 +250,71 @@ def hist_with_ratio(ax, rax, data_list, labels, linestyles, bin_range, xlabel, b
     rax.set_xlim(edges[0], edges[-1])
     rax.yaxis.set_major_locator(ticker.MultipleLocator(0.5))
     rax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
+
+# ---------------------------------------------------------------------
+# Loss learning rate plots
+# ---------------------------------------------------------------------
+def loss_plot(loss_train,loss_test,out_dir="./Plots/"):
+
+  if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
+
+  train_arr = np.asarray(loss_train, dtype=float)
+  test_arr = np.asarray(loss_test, dtype=float)
+  n_epochs = min(len(train_arr), len(test_arr))
+  train_arr = train_arr[:n_epochs]
+  test_arr = test_arr[:n_epochs]
+  finite = np.isfinite(train_arr) & np.isfinite(test_arr)
+  truncated = False
+  if np.any(~finite):
+    first_bad = int(np.argmax(~finite))
+    train_arr = train_arr[:first_bad]
+    test_arr = test_arr[:first_bad]
+    n_epochs = first_bad
+    truncated = True
+
+  epochs=range(1, n_epochs + 1)
+
+  #Move to delta-loss if negative values
+  min_train=np.min(train_arr)
+  min_test=np.min(test_arr)
+  if min_train<0 or min_test<0:
+      min_total=min(min_train,min_test)-1
+      train_arr-=min_total
+      test_arr-=min_total
+
+  fig,ax = plt.subplots(figsize=(6.0, 4.0))
+  if n_epochs > 0:
+    ax.plot(epochs, train_arr, marker="o", label="Train")
+    ax.plot(epochs, test_arr, marker="o", label="Test")
+  if truncated:
+    ax.text( 0.5, 0.5, f"Loss history truncated at epoch {n_epochs}\nnext epoch contains nan/inf", ha="center", va="center", transform=ax.transAxes, fontsize=9,)
+  ax.legend()
+  ax.set_xlabel("Epoch")
+  ax.set_ylabel("Loss")
+  if min_train<0 or min_test<0:
+      ax.set_ylabel("Delta*Loss+1")
+  ax.set_yscale("log")
+  ax.grid(True)
+  fig.savefig(os.path.join(out_dir,"loss_vs_epoch.png"))
+  fig.savefig(os.path.join(out_dir,"loss_vs_epoch.pdf"))
+  plt.close(fig)
+
+  print(f"Plotting loss to {out_dir}/loss_vs_epoch.pdf")
+
+def lr_plot(lr_history, out_dir=""):
+    if lr_history is None or len(lr_history) == 0:
+        return
+    fig = plt.figure(figsize=(6.0, 4.0))
+    plt.plot(range(1, len(lr_history) + 1), lr_history, marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate vs Epoch")
+    plt.grid(True)
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.png"))
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.pdf"))
+    plt.close(fig)
+    print(f"Plotting learning rate to {out_dir}/lr_vs_epoch.pdf")
 
 # ---------------------------------------------------------------------
 # Main plots
@@ -750,8 +814,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       Nimages = 0
       for batch, X in enumerate(test_loader):
         #input data
-        #X,mask,jet=helpers.format_input(X,args,device) #FIXME
-        X,mask,jet=helpers.format_input2(X,False,False,device)
+        X, mask, jet=helpers.format_input(X, **helpers.format_input_args(args))
 
         batch_size = X.shape[0]
         Nimages+=X.shape[0]

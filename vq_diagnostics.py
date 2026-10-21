@@ -70,7 +70,6 @@ from cycler import cycler  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, TwoSlopeNorm  # noqa: E402
 from scipy.stats import wasserstein_distance  # noqa: E402
 
-import helpers_vqvae  # noqa: E402
 
 # ---------------------------------------------------------------------
 # Style: fixed categorical order, single-hue sequential, blue<->red diverging

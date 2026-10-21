@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
-from helpers import *
-from helpers_unbinned import *
-from helpers_plotting import *
+import os,sys,time
 
+import helpers
+import helpers_unbinned
+import helpers_plotting
+
+import torch
 import torch.nn.functional as F
 
 from torchinfo import summary
@@ -67,7 +70,7 @@ def train(model,train_loader,args):
   for batch, X in enumerate(train_loader):
 
       #input data
-      X, mask, jet=format_input(X, args, device)
+      X, mask, jet=helpers.format_input(X, **helpers.format_input_args(args))
 
       #calculate loss across the batch (summed and also seperate averaged value)
       optimizer.zero_grad()
@@ -123,7 +126,7 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
 
       #input data
-      X, mask, jet=format_input(X, args, device)
+      X, mask, jet=helpers.format_input(X, **helpers.format_input_args(args))
 
       #calculate loss across the batch (summed, not averaged)
       loss,sum_w = evaluate_loss(model, args, X, mask, jet)
@@ -152,19 +155,19 @@ if __name__ == "__main__":
     # Preamble 
     # ---------------------------------------------------------------------
     #Load arguments
-    args = parse_input()
-    set_seeds(args.seed)
+    args = helpers_unbinned.parse_input()
+    helpers.set_seeds(args.seed)
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}", flush=True)
 
     #If continuing
     if args.model_checkpoint:
-        checkpoint_info = load_checkpoint_args(args, sys.argv[1:])
+        checkpoint_info = helpers.load_checkpoint_args(args, sys.argv[1:])
 
     # load and preprocess data
     print(f"Loading training set", flush=True)
-    train_loader,test_loader=get_loaders(args)
-    X_example, mask_example, jet_example=format_input(next(iter(train_loader)), args, device)
+    train_loader,test_loader=helpers.get_loaders(args)
+    X_example, mask_example, jet_example=helpers.format_input(next(iter(train_loader)), **helpers.format_input_args(args))
 
     #Shape for later
     input_example={"x":X_example}
@@ -179,13 +182,13 @@ if __name__ == "__main__":
 
     # construct model
     if args.model_checkpoint:
-        model = load_checkpoint_model(args, X_shape, cond_shape, checkpoint_info)
+        model = helpers.load_checkpoint_model(args, X_shape, cond_shape, checkpoint_info)
     else:
-        model = build_unbinned_model(args, X_shape, cond_shape)
+        model = helpers_unbinned.build_unbinned_model(args, X_shape, cond_shape)
     model.to(device)
 
     #Make output directory and make metadata file to save arguments
-    save_argument_metadata(args)
+    helpers.save_argument_metadata(args)
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
@@ -206,11 +209,11 @@ if __name__ == "__main__":
         print("Output shape,", output_example.shape, flush=True)
 
     #Set the scheduler
-    optimizer = make_optimizer(args, model)
-    scheduler = make_scheduler(args, optimizer)
+    optimizer = helpers.make_optimizer(args, model)
+    scheduler = helpers.make_scheduler(args, optimizer)
     start_epoch = 0
     if args.model_checkpoint:
-        start_epoch=load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler)
+        start_epoch=helpers.load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler)
 
     #Store loss and etc for per-epoch loop
     training_info={
@@ -223,7 +226,7 @@ if __name__ == "__main__":
         "stopped_nonfinite":False,
     }
     if args.model_checkpoint:
-        load_checkpoint_losses_lr(args, checkpoint_info, training_info)
+        helpers.load_checkpoint_losses_lr(args, checkpoint_info, training_info)
 
     # ---------------------------------------------------------------------
     # Training loop
@@ -265,10 +268,10 @@ if __name__ == "__main__":
         patience_counter+=1
 
       #Step the scheduler
-      step_scheduler(scheduler, args, metric=best_metric)
+      helpers.step_scheduler(scheduler, args, metric=best_metric)
 
       #Checkpoint info
-      save_checkpoint(args, model, epoch, improved, optimizer=optimizer, scheduler=scheduler, training_info=training_info)
+      helpers.save_checkpoint(args, model, epoch, improved, optimizer=optimizer, scheduler=scheduler, training_info=training_info)
 
       #early stopping
       if patience_counter>=args.patience:
@@ -279,8 +282,8 @@ if __name__ == "__main__":
     # Save info
     # ---------------------------------------------------------------------
     #Make loss plots and scheduler plots
-    loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
-    lr_plot(training_info["lr_history"], out_dir=args.log_dir)
+    helpers_plotting.loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
+    helpers_plotting.lr_plot(training_info["lr_history"], out_dir=args.log_dir)
 
     #Store some results in a dictionary
     results={}
@@ -299,11 +302,11 @@ if __name__ == "__main__":
     #Make validation plots
     if training_info["stopped_nonfinite"]:
       print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
-      validate_unbinned_models([model], test_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
+      helpers_plotting.validate_unbinned_models([model], test_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
     else:
-      validate_unbinned_models([model], test_loader, args, results=results, labels=["original", "generated"])
+      helpers_plotting.validate_unbinned_models([model], test_loader, args, results=results, labels=["original", "generated"])
 
     #update metadata with some result ddinfo
-    append_result_metadata(args,results)
+    helpers.append_result_metadata(args,results)
 
     print("Done")

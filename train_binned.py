@@ -1,28 +1,12 @@
 #!/usr/bin/env python3
-"""
-Step 3: next-token prediction on VQ-VAE codes (architecture "VQGPT"), in the same format as
-train_unbinned.py so the results are directly comparable.
 
-  training/test loss   per-token cross-entropy on the codes files from encode_jets.py
-                       (--train-codes / --val-codes)
-  validation plots     validate_unbinned_models on the ORIGINAL --val-file, exactly as for the other
-                       architectures: model.generate() samples tokens and decodes them with the frozen
-                       tokenizer back to the pre-processed features of the file
+import os,sys,time
 
-    python train_generate_gpt.py --architecture VQGPT --input_format ktdr \
-        --tokenizer tokenizer.pt --train-codes codes_train.h5 --val-codes codes_val.h5 \
-        --train-file train.h5 --val-file val.h5 [--conditional] --log-dir models/vqgpt
+import helpers 
+import helpers_binned 
+import helpers_plotting
 
-Validation of a saved model works with the existing script:
-    python validate_unbinned.py --checkpoint models/vqgpt/checkpoints/best.pt
-"""
-
-from helpers import *
-from helpers_binned import *
-from helpers_plotting import *
-
-import helpers_unbinned 
-
+import torch
 import torch.nn.functional as F
 
 from torchinfo import summary
@@ -56,7 +40,7 @@ def train(model,train_loader,args):
   for batch, X in enumerate(train_loader):
 
       #input data
-      codes, jet=format_codes(X, args, device)
+      codes, jet=helpers_binned.format_codes(X, args, device)
 
       #calculate loss across the batch (summed and also seperate averaged value)
       optimizer.zero_grad()
@@ -111,7 +95,7 @@ def test(model, test_loader, args):
     for batch, X in enumerate(test_loader):
 
       #input data
-      codes, jet=format_codes(X, args, device)
+      codes, jet=helpers_binned.format_codes(X, args, device)
 
       #calculate loss across the batch (summed, not averaged)
       loss,sum_w = evaluate_loss(model, args, codes, jet)
@@ -140,24 +124,24 @@ if __name__ == "__main__":
     # Preamble
     # ---------------------------------------------------------------------
     #Load arguments
-    args = parse_input()
+    args = helpers_binned.parse_input()
     if args.architecture!="VQGPT":
         raise ValueError("train_binned.py trains --architecture VQGPT; use train_unbinned.py for the others")
-    set_seeds(args.seed)
+    helpers.set_seeds(args.seed)
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}", flush=True)
 
     #If continuing
     if args.model_checkpoint:
         checkpoint_info = load_checkpoint_args(args, sys.argv[1:])
-    for name in ("tokenizer", "train_codes", "val_codes"):
+    for name in ("tokenizer", "train_codes", "test_codes"):
         if getattr(args, name) is None:
             raise ValueError(f"--{name.replace('_', '-')} is required")
 
     # load the codes
     print(f"Loading training set", flush=True)
-    train_loader,test_loader=get_code_loaders(args)
-    codes_example, jet_example=format_codes(next(iter(train_loader)), args, device)
+    train_loader,test_loader=helpers_binned.get_code_loaders(args)
+    codes_example, jet_example=helpers_binned.format_codes(next(iter(train_loader)), args, device)
 
     #Number of constituents comes from the codes; the validation loader must use the same
     n_const=train_loader.dataset.n_const
@@ -175,7 +159,7 @@ if __name__ == "__main__":
     if args.model_checkpoint:
         model = load_checkpoint_model(args, X_shape, cond_shape, checkpoint_info)
     else:
-        model = build_binned_model(args, X_shape, cond_shape)
+        model = helpers_binned.build_binned_model(args, X_shape, cond_shape)
         if args.conditional:
             model.fit_cond_normalisation(train_loader.dataset.cond) #standardise the jet conditioning (stored in the state dict)
     model.to(device)
@@ -183,7 +167,7 @@ if __name__ == "__main__":
         raise ValueError(f"codes have {train_loader.dataset.n_levels} levels, tokenizer has {model.Q}")
 
     #Make output directory and make metadata file to save arguments
-    helpers_unbinned.save_argument_metadata(args)
+    helpers.save_argument_metadata(args)
     print(f"Logging to {args.log_dir}", flush=True)
 
     #Plot the model summary
@@ -198,8 +182,8 @@ if __name__ == "__main__":
     print("Output shape,", model(**input_example).shape, flush=True)
 
     #Set the scheduler
-    optimizer = helpers_unbinned.make_optimizer(args, model)
-    scheduler = helpers_unbinned.make_scheduler(args, optimizer)
+    optimizer = helpers.make_optimizer(args, model)
+    scheduler = helpers.make_scheduler(args, optimizer)
     start_epoch = 0
     if args.model_checkpoint:
         start_epoch=load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler)
@@ -215,7 +199,7 @@ if __name__ == "__main__":
         "stopped_nonfinite":False,
     }
     if args.model_checkpoint:
-        helpers_unbinned.load_checkpoint_losses_lr(args, checkpoint_info, training_info)
+        helpers.load_checkpoint_losses_lr(args, checkpoint_info, training_info)
 
     # ---------------------------------------------------------------------
     # Training loop
@@ -258,10 +242,10 @@ if __name__ == "__main__":
         training_info["patience_counter"]+=1
 
       #Step the scheduler
-      helpers_unbinned.step_scheduler(scheduler, args, metric=best_metric)
+      helpers.step_scheduler(scheduler, args, metric=best_metric)
 
       #Checkpoint info
-      helpers_unbinned.save_checkpoint(args, model, epoch, improved, optimizer=optimizer, scheduler=scheduler, training_info=training_info)
+      helpers.save_checkpoint(args, model, epoch, improved, optimizer=optimizer, scheduler=scheduler, training_info=training_info)
 
       #early stopping
       if training_info["patience_counter"]>=args.patience:
@@ -272,8 +256,8 @@ if __name__ == "__main__":
     # Save info
     # ---------------------------------------------------------------------
     #Make loss plots and scheduler plots
-    helpers_unbinned.loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
-    helpers_unbinned.lr_plot(training_info["lr_history"], out_dir=args.log_dir)
+    helpers_plotting.loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
+    helpers_plotting.lr_plot(training_info["lr_history"], out_dir=args.log_dir)
 
     #Store some results in a dictionary
     results={}
@@ -292,15 +276,14 @@ if __name__ == "__main__":
 
     #Make validation plots against the ORIGINAL validation file, same as for the other architectures
     print(f"Loading original-format validation set {args.val_file}", flush=True)
-    val_dataset = helpers_unbinned.constit_dataset(args.val_file, NConstituents=args.num_constituents, add_mask=False, add_conditional=False, preprocess=False)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=args.shuffle)
+    val_loader=helpers.get_loader(args.val_file,args)
     if training_info["stopped_nonfinite"]:
       print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
-      validate_unbinned_models([model], val_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
+      helpers_plotting.validate_unbinned_models([model], val_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)
     else:
-      validate_unbinned_models([model], val_loader, args, results=results, labels=["original", "generated"])
+      helpers_plotting.validate_unbinned_models([model], val_loader, args, results=results, labels=["original", "generated"])
 
     #update metadata with some result ddinfo
-    helpers_unbinned.append_result_metadata(args,results)
+    helpers.append_result_metadata(args,results)
 
     print("Done")
