@@ -154,11 +154,10 @@ def train(args):
     # ---------------------------------------------------------------------
     # diagnostics on the test file; the full reference (code usage + quantisation-error quantiles,
     # used by later shift / OOD checks) is stored in the checkpoint
-    col = vq_diagnostics.collect(model, test_loader.dataset.X, test_loader.dataset.mask, n_jets=args.diag_jets, device=args.device)
+    col = vq_diagnostics.collect(model, test_loader.dataset.X, test_loader.dataset.mask, jet=test_loader.dataset.jet_data, n_jets=args.diag_jets, device=args.device)
  
     vq_diagnostics.run_diagnostics(col, args.diag_dir, input_format=args.input_format, preprocess=args.preprocess,
-                                   feature_keys=args.feature_keys, history=training_history, plots=not args.no_plots,
-                                   projections=args.projections, max_points=args.max_points,
+                                   history=training_history, plots=not args.no_plots, projections=args.projections, max_points=args.max_points,
                                    )
 
 def main():
@@ -178,7 +177,7 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",help="")
     parser.add_argument("--seed", type=int, default=0,help="")
 
-    parser.add_argument("--output", default="tokenizer.pt")
+    parser.add_argument("--output", default="tokenizers/tokenizer.pt")
     parser.add_argument("--codebook-size", type=int, default=512)
     parser.add_argument("--levels", type=int, default=2, help="residual VQ depth = tokens per constituent")
     parser.add_argument("--code-dim", type=int, default=16)
@@ -188,10 +187,10 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
 
     d = parser.add_argument_group("diagnostics")
-    d.add_argument("--diag-dir", default="vqvae_debug", help="where to write plots + metrics.json (default <out>_diag)")
+    d.add_argument("--diag-dir", default="tokenizers", help="where to write plots + metrics.json (default <out>_diag)")
     d.add_argument("--diag-jets", type=int, default=10000, help="max validation jets used for diagnostics")
     d.add_argument("--no-plots", action="store_true", help="compute and print metrics only")
-    d.add_argument("--projections", nargs="*", default=["pca", "tsne"], choices=["pca", "tsne", "umap"])
+    d.add_argument("--projections", nargs="*", default=["pca", "tsne", "umap"], choices=["pca", "tsne", "umap"])
     d.add_argument("--max-points", type=int, default=5000, help="constituents in the latent projections")
     args = parser.parse_args()
 

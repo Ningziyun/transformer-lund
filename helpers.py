@@ -155,8 +155,8 @@ def config_get(args_or_dict, key, default=None):
 class ktdr_dataset(torch.utils.data.Dataset):
     def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None):
         super(ktdr_dataset, self).__init__()
-        self.n_features=4
-        self.pad_value=-10
+        self.n_features=2
+        self.pad_value=-1
 
         self.add_mask=add_mask
         self.preprocess=preprocess
