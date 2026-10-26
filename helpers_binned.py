@@ -65,7 +65,12 @@ def format_codes(X, args, device):
 # Load model
 # ---------------------------------------------------------------------
 def build_binned_model(args_or_dict, input_shape, cond_shape):
-    if args_or_dict.architecture=="VQGPT":
+    """
+    New model from the run arguments (argparse namespace or dict)
+    model.config stores the tokenizer config as well, so a checkpoint is self-contained.
+    """
+    architecture = helpers.config_get(args_or_dict, "architecture")
+    if architecture=="VQGPT":
         tokenizer, _ = models_vqvae.load_tokenizer_checkpoint(helpers.config_get(args_or_dict,"tokenizer"), "cpu")
         return models_generative.model_gpt_transformer(
             tokenizer,
@@ -79,7 +84,8 @@ def build_binned_model(args_or_dict, input_shape, cond_shape):
             temperature=helpers.as_float(helpers.config_get(args_or_dict,"temperature"), 1.0),
             top_k=helpers.as_int(helpers.config_get(args_or_dict,"top_k")),
         )
-
+    raise ValueError(f"Unknown binned architecture {architecture}")
+ 
 # ---------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------

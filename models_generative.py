@@ -11,6 +11,21 @@ from torchviz import make_dot
 import normflows as nf
 from torchdiffeq import odeint_adjoint as odeint
 
+import models_vqvae
+
+# ---------------------------------------------------------------------
+# Model configs: every model stores its constructor arguments in model.config, so a checkpoint
+# can rebuild it with build_model(architecture, config) without the original run arguments
+# ---------------------------------------------------------------------
+def _init_config(local_vars):
+    """Constructor arguments from locals() at the top of __init__ (shapes stored as plain lists)."""
+    config = {}
+    for key, value in local_vars.items():
+        if key in ("self", "__class__"):
+            continue
+        config[key] = list(value) if isinstance(value, (torch.Size, tuple)) else value
+    return config
+
 # ---------------------------------------------------------------------
 # Simple auto-regressive NN
 # ---------------------------------------------------------------------
@@ -240,7 +255,9 @@ class model_autoregressive_transformer(nn.Module):
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
   """
   def __init__(self, input_dim, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, pad_value=-1):
+      config = _init_config(locals())  # constructor arguments: rebuild with build_model()
       super(model_autoregressive_transformer, self).__init__()
+      self.config = config
 
       self.input_dim=input_dim
       self.cond_dim = cond_dim
@@ -374,7 +391,9 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   """
   def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, max_range=None, pad_value=-1):
+      config = _init_config(locals())  # constructor arguments: rebuild with build_model()
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register, multi_loss=multi_loss, pad_value=pad_value)
+      self.config = config
 
       self.n_mix=n_mix
       self.max_range=max_range
@@ -604,7 +623,9 @@ class model_CNF(nn.Module):
   This produces a likelihood-based model (harder constraints require bounded transforms; CNF itself is on R^D).
   """
   def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128, cnf_hidden=128, steps=25, time_dim=64):
+    config = _init_config(locals())  # constructor arguments: rebuild with build_model()
     super().__init__()
+    self.config = config
     self.input_dim = input_dim
     self.embed_dim = embed_dim
 
@@ -770,7 +791,9 @@ class model_FM(nn.Module):
     Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
     """
     def __init__(self, input_shape, cond_shape, hidden_dim=128, time_dim=64, Nembed_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512, n_register=4):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.n_max=input_shape[1]
         self.n_feat=input_shape[2]
@@ -991,7 +1014,9 @@ class FlowBatchNorm(nn.Module):
 
 class model_normalizing_flow_custom(nn.Module):
     def __init__(self, input_dim, num_flows=10, latent_dim=256, doMask=True, doBatchNorm=False):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.input_dim = input_dim
         self.doMask = doMask
@@ -1075,7 +1100,9 @@ class StableScaleNet(nn.Module): #just a clamped mlp
 class model_normalizing_flow(nn.Module): #Using normflows package
     #Normalizing flows, if have a invertible function x=f(z), and z~Gaus(z) then p(z)=p(f^{-1}(x)) |det J| (aka change of variables). Can compose multiple function together in a flow and the only thing to keep track is the composed final function f=f_1\cdotf_2... and the prod of the jacobian detetermints. Trick is then using neural networks to learn the functions, but make sure everything invertible
     def __init__(self, input_dim, num_flows=10, latent_dim=256, flow_type="neuralspline_coupling"):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.input_dim=input_dim
 
@@ -1201,7 +1228,9 @@ class model_diffusion(nn.Module):
         
     """
     def __init__(self, input_dim, hidden_dim=256, time_dim=64, time_steps=1000, beta_start=1e-4, beta_end=2e-2, mode="DDPM", sample_time_steps=100):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.input_dim = input_dim
         self.time_steps = time_steps
@@ -1369,7 +1398,9 @@ class model_score_SDE(nn.Module):
     """
 
     def __init__(self, input_dim, hidden_dim=256, time_dim=64, beta_min=0.1, beta_max=20.0, mode="sde"):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         #Will use linear beta scheduler
         self.beta_min = beta_min
@@ -1425,7 +1456,7 @@ class model_score_SDE(nn.Module):
         return loss
 
     def mse_loss(self, x0):
-        x0=x.view(x0.shape[0], -1)
+        x0=x0.view(x0.shape[0], -1)
         return self.forward(x0)
 
     @torch.no_grad()
@@ -1479,7 +1510,12 @@ class model_score_SDE(nn.Module):
 class model_gpt_transformer(nn.Module):
 
     def __init__(self, tokenizer, n_const, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=0, temperature=1.0, top_k=None):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super(model_gpt_transformer, self).__init__()
+        if isinstance(tokenizer, dict):  # rebuilt from a checkpoint config, weights come from the state dict
+            tokenizer = models_vqvae.ConstituentVQVAE(**tokenizer)
+        config["tokenizer"] = tokenizer.config
+        self.config = config
 
         self.K, self.Q, self.N, self.n_feat = tokenizer.K, tokenizer.Q, n_const, tokenizer.F
         self.pad_value = tokenizer.pad_value
@@ -1653,3 +1689,23 @@ class model_gpt_transformer(nn.Module):
             X = torch.cat([X, torch.full((B, N_out - X.shape[1], F_out), float(self.pad_value), device=X.device)], 1)
         return X
 
+# ---------------------------------------------------------------------
+# Build a model from its stored config (checkpoint loading / restarting)
+# ---------------------------------------------------------------------
+def build_model(architecture, config):
+    """
+    Build a model from its constructor arguments, e.g. a checkpoint's
+        build_model(checkpoint["architecture"], checkpoint["model_config"])
+    then load the weights with model.load_state_dict(checkpoint["model_state_dict"]).
+    """
+    architectures_dict = {
+        "Transformer": model_autoregressive_transformer,
+        "MDN": model_autoregressive_transformer_MDN,
+        "CNF": model_CNF,
+        "FM": model_FM,
+        "NF": model_normalizing_flow,
+        "Diffusion": model_diffusion,
+        "SDE": model_score_SDE,
+        "VQGPT": model_gpt_transformer,
+    }
+    return architectures_dict[architecture](**config)

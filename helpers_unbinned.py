@@ -9,25 +9,33 @@ import helpers
 # Load model
 # ---------------------------------------------------------------------
 def build_unbinned_model(args_or_dict, input_shape, cond_shape):
+    """
+    New model from the run arguments (argparse namespace or dict). The model stores its constructor
+    arguments in model.config, which save_checkpoint writes out, so restarting/validating only needs
+    load_unbinned_model / helpers.load_checkpoint_model.
+    """
+    input_format = helpers.config_get(args_or_dict, "input_format")
+    preprocess = helpers.config_get(args_or_dict, "preprocess")
+    architecture = helpers.config_get(args_or_dict, "architecture")
 
     pad_value=-1
-    if args_or_dict.input_format=="4vec":
-        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="log" or args_or_dict.preprocess=="logstd":
+    if input_format=="4vec":
+        if preprocess=="standardize" or preprocess=="log" or preprocess=="logstd":
             pad_value=-10
-    elif args_or_dict.input_format=="relvec":
-        if args_or_dict.preprocess=="standardize" or args_or_dict.preprocess=="logstd":
+    elif input_format=="relvec":
+        if preprocess=="standardize" or preprocess=="logstd":
             pad_value=-10
 
-    if args_or_dict.architecture=="MDN":
+    if architecture=="MDN":
         max_value=10
-        if args_or_dict.input_format=="4vec":
-            if args_or_dict.preprocess is None:
+        if input_format=="4vec":
+            if preprocess is None:
                 max_value=3e3
-            elif args_or_dict.preprocess=="standardize":
+            elif preprocess=="standardize":
                 max_value=50
-            elif args_or_dict.preprocess=="linearize":
+            elif preprocess=="linearize":
                 max_value=1
-            elif args_or_dict.preprocess=="log":
+            elif preprocess=="log":
                 max_value=11
 
         return models_generative.model_autoregressive_transformer_MDN(
@@ -43,7 +51,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
             max_range=max_value,
             pad_value=pad_value,
         )
-    elif args_or_dict.architecture=="CNF":
+    elif architecture=="CNF":
         return models_generative.model_CNF(
             input_dim=input_shape[1]*input_shape[2],
             embed_dim=helpers.as_int(helpers.config_get(args_or_dict,"embed_dim")),
@@ -54,7 +62,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
             steps=helpers.as_int(helpers.config_get(args_or_dict,"cnf_steps")),
             time_dim=helpers.as_int(helpers.config_get(args_or_dict,"time_dim")),
         )
-    elif args_or_dict.architecture=="FM":
+    elif architecture=="FM":
         return models_generative.model_FM(
             input_shape=input_shape,
             cond_shape=cond_shape,
@@ -70,34 +78,34 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
             n_register=helpers.as_int(helpers.config_get(args_or_dict,"registers")),
             pad_value=pad_value,
         )
-    elif args_or_dict.architecture=="NF":
+    elif architecture=="NF":
         return models_generative.model_normalizing_flow(
             input_dim=input_shape[1]*input_shape[2],
             num_flows=helpers.as_int(helpers.config_get(args_or_dict,"nflows")),
             latent_dim=helpers.as_int(helpers.config_get(args_or_dict,"embed_dim")),
-            flow_type=args_or_dict.nflow_type,
+            flow_type=helpers.config_get(args_or_dict,"nflow_type"),
         )
-    elif args_or_dict.architecture=="Diffusion":
+    elif architecture=="Diffusion":
         return models_generative.model_diffusion(
                 input_dim=input_shape[1]*input_shape[2],
                 hidden_dim=helpers.as_int(helpers.config_get(args_or_dict,"embed_dim")),
                 time_steps=helpers.as_int(helpers.config_get(args_or_dict,"diff_steps")),
                 beta_start=helpers.as_float(helpers.config_get(args_or_dict,"diff_beta_start")),
                 beta_end=helpers.as_float(helpers.config_get(args_or_dict,"diff_beta_end")),
-                mode=args_or_dict.diff_type,
+                mode=helpers.config_get(args_or_dict,"diff_type"),
                 time_dim=helpers.as_int(helpers.config_get(args_or_dict,"time_dim")),
                 sample_time_steps=helpers.as_int(helpers.config_get(args_or_dict,"diff_steps_sample")),
         )
-    elif args_or_dict.architecture=="SDE":
+    elif architecture=="SDE":
         return models_generative.model_score_SDE(
                 input_dim=input_shape[1]*input_shape[2],
                 hidden_dim=helpers.as_int(helpers.config_get(args_or_dict,"embed_dim")),
                 time_dim=helpers.as_int(helpers.config_get(args_or_dict,"time_dim")),
                 beta_min=helpers.as_float(helpers.config_get(args_or_dict,"SDE_beta_min")),
                 beta_max=helpers.as_float(helpers.config_get(args_or_dict,"SDE_beta_max")),
-                mode=args_or_dict.SDE_type,
+                mode=helpers.config_get(args_or_dict,"SDE_type"),
         )
-    elif args_or_dict.architecture=="Transformer":
+    elif architecture=="Transformer":
         return models_generative.model_autoregressive_transformer(
             input_dim=input_shape[2],
             cond_dim=cond_shape[-1],
@@ -109,7 +117,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
             multi_loss=helpers.as_bool(helpers.config_get(args_or_dict,"multi_loss")),
         )
     else:
-        return None
+        raise ValueError(f"Unknown unbinned architecture {architecture}")
 
 # ---------------------------------------------------------------------
 # Arguments

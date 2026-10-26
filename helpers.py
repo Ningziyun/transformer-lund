@@ -1,13 +1,17 @@
 import os,sys
+import re
 import numpy as np
 import math
 import h5py
 
 import torch
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import LambdaLR
 
 import fastjet
 import ljpHelpers
+
+import models_generative
 
 # ---------------------------------------------------------------------
 # Make the lundplane
@@ -796,6 +800,8 @@ def save_checkpoint(
         "save_mode": save_mode,
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
+        "architecture": config_get(args, "architecture"),
+        "model_config": getattr(model, "config", None),
     }
 
     #Add in the extra optimizer and learning info
@@ -827,16 +833,15 @@ def load_checkpoint(args):
 
     return checkpoint_info
 
-def load_checkpoint_args(args, argvs, checkpoint_model=None):
+def load_checkpoint_args(args, argvs, checkpoint_info=None):
     #Ignore things which are over-written by command-line
     ignore_args=[]
     for argv in argvs:
         if "--" in argv:
             ignore_args.append(argv.replace("--","").replace("-","_"))
 
-    #Load checkpoint
-    if checkpoint_model is None:
-        checkpoint_info = load_checkpoint(args)
+    #Load checkpoint (or use the one passed in)
+    checkpoint_info = load_checkpoint(args) if checkpoint_info is None else checkpoint_info
 
     #Load all the arguments
     checkpoint_info_args = checkpoint_info.get("args", {})
@@ -846,16 +851,20 @@ def load_checkpoint_args(args, argvs, checkpoint_model=None):
 
     return checkpoint_info
 
-def load_checkpoint_model(args, shape, cond_shape=[0], checkpoint_info=None):
+def load_checkpoint_model(args, checkpoint_info=None):
     if checkpoint_info is None:
         checkpoint_info = load_checkpoint(args)
 
-    model = build_unbinned_model(args, shape, cond_shape)
+    architecture = checkpoint_info.get("architecture") or config_get(args, "architecture")
+    model = models_generative.build_model(architecture, checkpoint_info["model_config"])
     model.load_state_dict(checkpoint_info["model_state_dict"])
 
     return model
 
 def load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler):
+    if checkpoint_info is None:
+        checkpoint_info = load_checkpoint(args)
+
     if checkpoint_info.get("optimizer_state_dict", None) is not None:
         optimizer.load_state_dict(checkpoint_info["optimizer_state_dict"])
     if scheduler is not None and checkpoint_info.get("scheduler_state_dict", None) is not None:
@@ -865,6 +874,9 @@ def load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, schedu
     return start_epoch
 
 def load_checkpoint_losses_lr(args, checkpoint_info, training_info):
+    if checkpoint_info is None:
+        checkpoint_info = load_checkpoint(args)
+
     training_info["best_loss"] = checkpoint_info.get("best_loss", None)
     if training_info["best_loss"] is None:
         training_info["best_loss"] = float("inf")

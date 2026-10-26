@@ -182,7 +182,7 @@ if __name__ == "__main__":
 
     # construct model
     if args.model_checkpoint:
-        model = helpers.load_checkpoint_model(args, X_shape, cond_shape, checkpoint_info)
+        model = helpers.load_checkpoint_model(args, checkpoint_info)
     else:
         model = helpers_unbinned.build_unbinned_model(args, X_shape, cond_shape)
     model.to(device)
