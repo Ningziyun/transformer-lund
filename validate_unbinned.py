@@ -9,9 +9,6 @@ if __name__ == "__main__":
 
     #Load arguments
     args = parse_input()
-    ignore_list=[]
-    for argv in sys.argv[1:]:
-        if "--" in argv: ignore_list.append(argv.replace("--","").replace("-","_"))
 
     #Remake the plots from saved samples, with their run arguments unless given on the command line
     if args.from_samples:
@@ -25,7 +22,7 @@ if __name__ == "__main__":
         print("Done")
         sys.exit(0)
 
-    load_checkpoint_args(args,ignore_args=ignore_list)
+    checkpoint_info = load_checkpoint_args(args, sys.argv[1:])
     set_seeds(args.seed)
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
     print(f"Running on device: {device}", flush=True)
@@ -33,7 +30,7 @@ if __name__ == "__main__":
     # load and preprocess data
     print(f"Loading training set", flush=True)
     train_loader,test_loader=get_loaders(args)
-    X_example, _, jet_example=format_input(next(iter(train_loader)), args, device)
+    X_example, _, jet_example=format_input(next(iter(train_loader)), **helpers.format_input_args(args))
 
     cond_shape=[0]
     if args.conditional:
@@ -41,7 +38,7 @@ if __name__ == "__main__":
 
     #load model
     print(f"Loading model", flush=True)
-    model=load_checkpoint_model(args,X_example.shape,cond_shape,device)
+    model=load_checkpoint_model(args,X_example.shape,cond_shape,checkpoint_info)
 
     '''
     if args.architecture=="MDN":
@@ -79,5 +76,19 @@ if __name__ == "__main__":
 
     #Make validation plots
     validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"])
+
+    #Remake loss plots
+    training_info={
+        "best_loss":float("inf"),
+        "best_epoch":-1,
+        "patience_counter":0,
+        "test_losses":[],
+        "train_losses":[],
+        "lr_history":[],
+        "stopped_nonfinite":False,
+    }
+    load_checkpoint_losses_lr(args, checkpoint_info, training_info)
+    loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
+    lr_plot(training_info["lr_history"], out_dir=args.log_dir)
 
     print("Done")
