@@ -1,11 +1,11 @@
 import os,sys
 import time
+import inspect
 #os.environ.setdefault("MPLCONFIGDIR", os.path.join("/tmp", f"matplotlib-{os.environ.get('USER', 'user')}"))
 #os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 import numpy as np
 import awkward as ak
 import math
-import csv
 import re
 import textwrap
 import matplotlib.pyplot as plt
@@ -166,16 +166,55 @@ def _symmetric_limit(values, fallback=1.0):
     vmax = max(vmax, np.max(merged) if vmax == 0 else vmax)
     return vmax if vmax > 0 else fallback
 
-def fix_badjets(plot_inputs, do_update=False, results=None):
+def fix_badjets(args, plot_inputs, results=None):
     #Check for bad values:
     for ii, jets in enumerate(plot_inputs[1:]):
+
+        #Mask clearly nan-like jet
         mask_badconst= ~np.all(np.isfinite(jets), axis=-1) | (np.max(np.abs(jets), axis=-1) > 2e3)
+
+        #Other weird jets
+        if args.input_format=="4vec":
+            eps=1e-12
+            mask=jets[..., 0] > -1
+            E  = np.where(mask, jets[..., 0], 0.0)
+            px = np.where(mask, jets[..., 1], 0.0)
+            py = np.where(mask, jets[..., 2], 0.0)
+            pz = np.where(mask, jets[..., 3], 0.0)
+            const_pt = np.sqrt(px**2 + py**2)
+            const_eta = np.arcsinh(pz / np.maximum(const_pt, eps))
+            const_phi = np.arctan2(py, px)
+
+            jet_E  = E.sum(axis=1)
+            jet_px = px.sum(axis=1)
+            jet_py = py.sum(axis=1)
+            jet_pz = pz.sum(axis=1)
+            jet_pt = np.sqrt(jet_px**2 + jet_py**2)
+            jet_eta = np.arcsinh(jet_pz / np.maximum(jet_pt, eps))
+            jet_phi = np.arctan2(jet_py, jet_px)
+
+            # Delta R(constituent, jet)
+            deta = const_eta - jet_eta[:, None]
+            deta[~mask]=0
+            dphi = const_phi - jet_phi[:, None]
+            dphi = np.arctan2( np.sin(dphi), np.cos(dphi)) # Wrap Delta phi into (-pi, pi], remove padded_const
+            dphi[~mask]=0
+            constituent_dR = np.sqrt(deta**2 + dphi**2)
+            mask_badconst = mask_badconst | (constituent_dR > 0.8)
+
+        #Other weird jets
+        if args.input_format=="relvec":
+            mask_badconst = mask_badconst | (jets[:,:,0]>1) | (jets[:,:,0] <-1)
+
+        #Count them
         N_badconst = np.sum(mask_badconst)
         bad_jets = np.any(mask_badconst, axis=1)
         N_badjets = np.sum(bad_jets)
         if results: results["frac_bad"]=N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2])
-        print("frac_badconst",N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2]), "frac_badjet",N_badjets/(jets.shape[0]*jets.shape[1]))
-        if do_update:
+        print("frac_badconst %0.3e % 0.3e"%(N_badconst/(jets.shape[0]*jets.shape[1]*jets.shape[2]),N_badjets/(jets.shape[0]*jets.shape[1])))
+
+        #mask if wanr
+        if args.mask_bad:
             jets[mask_badconst] = -1
 
 def hist_with_ratio(ax, rax, data_list, labels, linestyles, bin_range, xlabel, bins=20, ratio_ylim=(0.0, 2.0)):
@@ -213,6 +252,71 @@ def hist_with_ratio(ax, rax, data_list, labels, linestyles, bin_range, xlabel, b
     rax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
 
 # ---------------------------------------------------------------------
+# Loss learning rate plots
+# ---------------------------------------------------------------------
+def loss_plot(loss_train,loss_test,out_dir="./Plots/"):
+
+  if not os.path.exists(out_dir):
+    os.makedirs(out_dir)
+
+  train_arr = np.asarray(loss_train, dtype=float)
+  test_arr = np.asarray(loss_test, dtype=float)
+  n_epochs = min(len(train_arr), len(test_arr))
+  train_arr = train_arr[:n_epochs]
+  test_arr = test_arr[:n_epochs]
+  finite = np.isfinite(train_arr) & np.isfinite(test_arr)
+  truncated = False
+  if np.any(~finite):
+    first_bad = int(np.argmax(~finite))
+    train_arr = train_arr[:first_bad]
+    test_arr = test_arr[:first_bad]
+    n_epochs = first_bad
+    truncated = True
+
+  epochs=range(1, n_epochs + 1)
+
+  #Move to delta-loss if negative values
+  min_train=np.min(train_arr)
+  min_test=np.min(test_arr)
+  if min_train<0 or min_test<0:
+      min_total=min(min_train,min_test)-1
+      train_arr-=min_total
+      test_arr-=min_total
+
+  fig,ax = plt.subplots(figsize=(6.0, 4.0))
+  if n_epochs > 0:
+    ax.plot(epochs, train_arr, marker="o", label="Train")
+    ax.plot(epochs, test_arr, marker="o", label="Test")
+  if truncated:
+    ax.text( 0.5, 0.5, f"Loss history truncated at epoch {n_epochs}\nnext epoch contains nan/inf", ha="center", va="center", transform=ax.transAxes, fontsize=9,)
+  ax.legend()
+  ax.set_xlabel("Epoch")
+  ax.set_ylabel("Loss")
+  if min_train<0 or min_test<0:
+      ax.set_ylabel("Delta*Loss+1")
+  ax.set_yscale("log")
+  ax.grid(True)
+  fig.savefig(os.path.join(out_dir,"loss_vs_epoch.png"))
+  fig.savefig(os.path.join(out_dir,"loss_vs_epoch.pdf"))
+  plt.close(fig)
+
+  print(f"Plotting loss to {out_dir}/loss_vs_epoch.pdf")
+
+def lr_plot(lr_history, out_dir=""):
+    if lr_history is None or len(lr_history) == 0:
+        return
+    fig = plt.figure(figsize=(6.0, 4.0))
+    plt.plot(range(1, len(lr_history) + 1), lr_history, marker="o")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate vs Epoch")
+    plt.grid(True)
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.png"))
+    fig.savefig(os.path.join(out_dir, "lr_vs_epoch.pdf"))
+    plt.close(fig)
+    print(f"Plotting learning rate to {out_dir}/lr_vs_epoch.pdf")
+
+# ---------------------------------------------------------------------
 # Main plots
 # ---------------------------------------------------------------------
 def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="./Plots/", name="projection", unavailable_notes=None):
@@ -226,8 +330,8 @@ def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="
     #Get ranges
     Ndim=inputs[0].shape[1]
     Nin=len(inputs)
-    mins=np.zeros(Ndim)
-    maxs=np.zeros(Ndim)
+    mins=np.full(Ndim, np.inf)
+    maxs=np.full(Ndim, -np.inf)
     for ii in range(Ndim):
         for jj in range(Nin):
             mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
@@ -251,259 +355,6 @@ def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="
     fig.savefig(os.path.join(out_dir,name+".pdf"))
     plt.close(fig)
     print(f"Plotting projections to {out_dir}/{name}.pdf")
-
-def plot_combined_1dhist_ratio_diff(
-    inputs,
-    labels=None,
-    out_dir="./Plots/",
-    hist1d_ranges=None,
-    hist1d_bins=30,
-    logy=False,
-    out_name=None,
-    unavailable_notes=None,
-    min_reference_count=5,
-    max_abs_diff=1.0,
-):
-    if len(inputs) <= 1:
-        return
-
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    if labels is None:
-        labels = [f"sample_{i}" for i in range(len(inputs))]
-    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
-    comparison_labels = diff_labels if len(diff_labels) > 0 else labels[1:]
-
-    Ndim = inputs[0].shape[1]
-    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
-
-    if hist1d_ranges is None:
-        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
-
-    fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
-    if Ndim == 1:
-        axs = [axs]
-
-    axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
-    linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
-
-    for ii in range(Ndim):
-        feature_idx = display_order[ii] if ii < len(display_order) else ii
-        reference_counts, bin_edges = np.histogram(
-            inputs[0][:, feature_idx],
-            bins=hist1d_bins,
-            range=hist1d_ranges[ii],
-            density=False,
-        )
-        reference_total = np.sum(reference_counts)
-        reference_density = reference_counts / reference_total if reference_total > 0 else reference_counts
-        populated_reference = reference_counts >= max(1, int(min_reference_count))
-        centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-        ratio_values = []
-
-        for jj, arr in enumerate(inputs[1:], start=1):
-            comparison_counts, _ = np.histogram(
-                arr[:, feature_idx],
-                bins=hist1d_bins,
-                range=hist1d_ranges[ii],
-                density=False,
-            )
-            comparison_total = np.sum(comparison_counts)
-            comparison_density = comparison_counts / comparison_total if comparison_total > 0 else comparison_counts
-            ratio = np.full_like(reference_density, np.nan, dtype=float)
-            np.divide(
-                reference_density - comparison_density,
-                reference_density,
-                out=ratio,
-                where=populated_reference & (reference_density > 0.0),
-            )
-            ratio_values.append(ratio)
-            label_idx = jj - 1
-            axs[ii].step(
-                centers,
-                ratio,
-                where="mid",
-                linestyle=linestyles[label_idx % len(linestyles)],
-                label=comparison_labels[label_idx] if label_idx < len(comparison_labels) else f"sample_{jj}",
-            )
-
-        axs[ii].axhline(0.0, color="black", linewidth=0.8, alpha=0.55)
-        axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
-        axs[ii].set_xlabel("value")
-        axs[ii].set_ylabel("Fractional diff" + (" (symlog)" if logy else ""))
-
-        ymax = _symmetric_limit(ratio_values, fallback=1.0) * 1.15
-        if max_abs_diff is not None and max_abs_diff > 0:
-            ymax = min(ymax, float(max_abs_diff))
-        if logy:
-            axs[ii].set_yscale("symlog", linthresh=1.0)
-            axs[ii].set_ylim(-ymax, ymax)
-        else:
-            axs[ii].set_ylim(-ymax, ymax)
-
-    handles, legend_labels = axs[0].get_legend_handles_labels()
-    note_lines = _plot_note_from_common(common_items, unavailable_notes)
-    note_lines.append(
-        f"Masked original bins with < {max(1, int(min_reference_count))} entries; y clipped at +/- {max_abs_diff:g}"
-        if max_abs_diff is not None and max_abs_diff > 0
-        else f"Masked original bins with < {max(1, int(min_reference_count))} entries"
-    )
-    bottom_edge = 0.20 if note_lines else 0.08
-    fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
-    if len(handles) > 0:
-        for ax in axs:
-            ax.legend(handles, legend_labels, loc="best", fontsize=8, framealpha=0.90)
-    if note_lines:
-        fig.text(
-            0.02,
-            0.02,
-            _wrapped_note(note_lines, width=145),
-            ha="left",
-            va="bottom",
-            fontsize=8,
-        )
-
-    if out_name is None:
-        out_name = "hist1d_ratio_diff"
-
-    fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
-    fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"Plotting projection diff to {out_dir}/{out_name}.pdf")
-
-def plot_combined_1dhist(
-    inputs,
-    labels=None,
-    out_dir="./Plots/",
-    hist1d_ranges=None,
-    hist1d_bins=30,
-    logy=False,
-    out_name=None,
-    logy_floor_mode="clamped",
-    unavailable_notes=None,
-):
-    """
-    Plot overlaid 1D histograms for Lund features.
-
-    Expected feature order:
-      inputs[:, 0] = log(kt)
-      inputs[:, 1] = log(1/deltaR)
-
-    The top panel is log(kt), and the bottom panel is log(1/deltaR).
-    This matches the plotting convention used in plot_ublund.py.
-    """
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    if labels is None:
-        labels = [f"sample_{i}" for i in range(len(inputs))]
-    diff_labels, common_items = _caption_comparison(labels, first_run_idx=1)
-    plot_labels = ["original"]
-    plot_labels.extend(diff_labels)
-
-    linestyles = ["-", "--", "-.", ":", (0, (3, 1, 1, 1)), (0, (5, 1))]
-    Ndim = inputs[0].shape[1]
-    display_order = [0, 1] if Ndim >= 2 else list(range(Ndim))
-
-    if hist1d_ranges is None:
-        hist1d_ranges = _default_hist1d_ranges(inputs, display_order)
-
-    fig, axs = plt.subplots(Ndim, 1, figsize=(8.0, 8.0))
-    if Ndim == 1:
-        axs = [axs]
-
-    axis_titles = [r"$\log(k_t)$", r"$\log(1/\Delta R)$"]
-
-    for ii in range(Ndim):
-        # For ktdr plots, keep the top panel aligned with the Lund y-axis:
-        # log(kt) first, then log(1/deltaR).
-        feature_idx = display_order[ii] if ii < len(display_order) else ii
-
-        all_hist_counts = []
-        positive_hist_counts = []
-
-        for jj, arr in enumerate(inputs):
-            values = arr[:, feature_idx]
-
-            hist_counts, _ = np.histogram(
-                values,
-                bins=hist1d_bins,
-                range=hist1d_ranges[ii],
-                density=True,
-            )
-
-            all_hist_counts.append(hist_counts)
-            positive_hist_counts.extend(hist_counts[hist_counts > 0.0])
-
-            axs[ii].hist(
-                values,
-                bins=hist1d_bins,
-                range=hist1d_ranges[ii],
-                histtype="step",
-                density=True,
-                linestyle=linestyles[jj % len(linestyles)],
-                label=plot_labels[jj] if jj < len(plot_labels) else f"sample_{jj}",
-            )
-
-        axs[ii].set_title(axis_titles[ii] if ii < len(axis_titles) else f"feature_{ii}")
-        axs[ii].set_xlabel("value")
-        axs[ii].set_ylabel("Density (log scale)" if logy else "Density")
-
-        ymax = max([np.max(h) for h in all_hist_counts if h.size > 0], default=1.0)
-
-        if logy:
-            axs[ii].set_yscale("log")
-            if len(positive_hist_counts) > 0:
-                min_positive = min(positive_hist_counts)
-                max_positive = max(positive_hist_counts)
-
-                if logy_floor_mode == "tail":
-                    y_min = min_positive / 3.0
-                else:
-                    y_min = max(min_positive / 3.0, 1e-4)
-
-                y_max = max_positive * 1.5
-                if y_max <= y_min:
-                    y_max = y_min * 10.0
-
-                axs[ii].set_ylim(y_min, y_max)
-            else:
-                axs[ii].set_ylim(1e-4, 1.0)
-        else:
-            axs[ii].set_ylim(0.0, ymax * 1.15 if ymax > 0 else 1.0)
-
-    handles, legend_labels = axs[0].get_legend_handles_labels()
-    note_lines = _plot_note_from_common(common_items, unavailable_notes)
-    has_caption = bool(note_lines)
-    bottom_edge = 0.20 if has_caption else 0.08
-    fig.tight_layout(rect=[0.0, bottom_edge, 1.0, 1.0])
-    if len(handles) > 0:
-        for ax in axs:
-            ax.legend(
-                handles,
-                legend_labels,
-                loc="best",
-                fontsize=8,
-                framealpha=0.90,
-            )
-    if note_lines:
-        fig.text(
-            0.02,
-            0.02,
-            _wrapped_note(note_lines, width=145),
-            ha="left",
-            va="bottom",
-            fontsize=8,
-        )
-
-    if out_name is None:
-        out_name = "hist1d_logy" if logy else "hist1d"
-
-    fig.savefig(os.path.join(out_dir, out_name + ".png"), bbox_inches="tight")
-    fig.savefig(os.path.join(out_dir, out_name + ".pdf"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"Plotting hist to {out_dir}/{out_name}.pdf")
 
 def lund_plot(
     inputs,
@@ -870,15 +721,15 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
             tau21 = tau[:, 1] / tau[:, 0]
             tau32 = tau[:, 2] / tau[:, 1]
             log_mpt=np.log(jet_mass**2/jet_pt**2)
-        log_mpt=np.nan_to_num(log_mpt,nan=10,posinf=10,neginf=10)
+        log_mpt=np.nan_to_num(log_mpt,nan=1,posinf=1,neginf=1)
 
         plots[0].append(jet_pt)
         plots[1].append(jet_mass)
         plots[2].append(jet_eta)
-        plots[3].append(multiplicity)
-        plots[4].append(dphi[mask])
-        plots[5].append(deta[mask])
-        plots[6].append(constituent_dR[mask])
+        plots[3].append(dphi[mask])
+        plots[4].append(deta[mask])
+        plots[5].append(constituent_dR[mask])
+        plots[6].append(multiplicity)
         plots[7].append(tau21[np.isfinite(tau21)])
         plots[8].append(tau32[np.isfinite(tau32)])
         plots[9].append(d2[np.isfinite(d2)])
@@ -894,15 +745,18 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
             maxs[ii]=max(maxs[ii],np.max(plots[ii][jj]))
 
     #Plot stuff
-    for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"Multiplicity",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
-        hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel)
+    for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"Multiplicity",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
+        if xlabel==r"Multiplicity":
+            hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (0, maxs[ip]), xlabel, bins=int(np.round(maxs[ip])))
+        else:
+            hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel)
 
     name = "highlevel"
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir,name+".png"))
     fig.savefig(os.path.join(out_dir,name+".pdf"))
     plt.close(fig)
-    print(f"Plotting EEC to {out_dir}/{name}.pdf")
+    print(f"Plotting high-level to {out_dir}/{name}.pdf")
 
     return
 
@@ -960,7 +814,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       Nimages = 0
       for batch, X in enumerate(test_loader):
         #input data
-        X,mask,jet=helpers.format_input(X,args,device)
+        X, mask, jet=helpers.format_input(X, **helpers.format_input_args(args))
 
         batch_size = X.shape[0]
         Nimages+=X.shape[0]
@@ -990,9 +844,12 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
           #Generate the image
           try:
-              generated_seq = model.generate(out_dimensions=X.shape)
+              if args.conditional:
+                  generated_seq = model.generate(out_dimensions=X.shape,c=jet)
+              else:
+                  generated_seq = model.generate(out_dimensions=X.shape)
 
-          except RuntimeError as err:
+          except (RuntimeError, ValueError) as err: #ValueError: e.g. VQGPT feature/conditioning mismatch with the tokenizer
             reason = f"generation failed: {err}"
             print(f"Generated plot unavailable for model {imodel}: {reason}", flush=True)
             active_models[imodel] = False
@@ -1052,7 +909,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       original_np = original.numpy() #numpy shares memory but can delete original if want
       generated_np = [g.numpy() for g in generated]
       plot_inputs = [original_np] + generated_np
-      if not args.preprocess: fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
+      if not args.preprocess: fix_badjets(args, plot_inputs, results) #if want to fix the badjets
       flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
       # ---------------------------------------------------------------------
@@ -1076,7 +933,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
         generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
         plot_inputs = [original_np] + generated_np
-        fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
+        fix_badjets(args, plot_inputs, results) #if want to fix the badjets
         flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
         #make a quick dump
@@ -1101,8 +958,8 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
         #Clear memory and remake
         for p in plot_inputs: del p
 
-        original_np=helpers.make_absolute_constituents(original,jet_list)
-        generated_np = [helpers.make_absolute_constituents(g,jet_list) for g in generated]
+        original_np=helpers.make_absolute_constituents(original_np,jet_list.numpy())
+        generated_np = [helpers.make_absolute_constituents(g,jet_list.numpy()) for g in generated_np]
         plot_inputs = [original_np] + generated_np
         flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
@@ -1128,50 +985,6 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
             labels=active_labels,
             out_dir=args.plot_dir,
                   )
-
-      '''
-      hist1d_ranges = None
-      if args.hist1d_ranges is not None:
-        if len(args.hist1d_ranges) != 4:
-          raise ValueError("--hist1d-ranges should be: kt_min kt_max dr_min dr_max")
-        hist1d_ranges = [ [args.hist1d_ranges[0], args.hist1d_ranges[1]], [args.hist1d_ranges[2], args.hist1d_ranges[3]], ]
-
-      plot_combined_1dhist(
-          flat_plot_inputs,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=False,
-          out_name="hist1d",
-          unavailable_notes=unavailable_notes,
-      )
-
-      plot_combined_1dhist(
-          flat_plot_inputs,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=True,
-          out_name="hist1d_logy",
-          unavailable_notes=unavailable_notes,
-      )
-
-      #Make plot
-      plot_combined_1dhist_ratio_diff(
-          flat_plot_inputs,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist1d_ranges=hist1d_ranges,
-          hist1d_bins=args.hist1d_bins,
-          logy=False,
-          out_name="hist1d_ratio_diff",
-          unavailable_notes=unavailable_notes,
-          min_reference_count=args.hist_ratio_min_count,
-          max_abs_diff=args.hist_ratio_vmax,
-      )
-      '''
 
       #If 4-vec input recalculate the lund-plane
       if args.input_format == "ktdr":

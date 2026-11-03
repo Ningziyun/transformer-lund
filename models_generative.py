@@ -11,6 +11,21 @@ from torchviz import make_dot
 import normflows as nf
 from torchdiffeq import odeint_adjoint as odeint
 
+import models_vqvae
+
+# ---------------------------------------------------------------------
+# Model configs: every model stores its constructor arguments in model.config, so a checkpoint
+# can rebuild it with build_model(architecture, config) without the original run arguments
+# ---------------------------------------------------------------------
+def _init_config(local_vars):
+    """Constructor arguments from locals() at the top of __init__ (shapes stored as plain lists)."""
+    config = {}
+    for key, value in local_vars.items():
+        if key in ("self", "__class__"):
+            continue
+        config[key] = list(value) if isinstance(value, (torch.Size, tuple)) else value
+    return config
+
 # ---------------------------------------------------------------------
 # Simple auto-regressive NN
 # ---------------------------------------------------------------------
@@ -38,13 +53,34 @@ class model_DNN(nn.Module):
 # ---------------------------------------------------------------------
 # Re-used blocks
 # ---------------------------------------------------------------------
+class N_MLP_Embed(nn.Module):
+    """
+    As opposted to taking nn.Embedding which sends N=4 and N=5 to distinct vectors, apply a linear transform and an MLP on this
+    Either:
+    linear: N / n_max puts the input in [0,1]
+    log: log(1 + N) compresses the high end tails
+
+    """
+    def __init__(self, n_max, embed_dim, transform="linear"):
+        super().__init__()
+        self.n_max, self.transform = n_max, transform
+        self.net = nn.Sequential(nn.Linear(1, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
+
+    def forward(self, N): # N: [B] long
+        x = N.float()[:, None]
+        if self.transform=="log":
+            x = torch.log1p(x) / math.log1p(self.n_max)
+        elif self.transform=="linear":
+            x / self.n_max
+        return self.net(x) # [B, E]
+
 class Sinusoidal_Time_Embedding(nn.Module):
     """
-    Standard sinusoidal timestep embedding. Converts t -> [sin(w_0 t),cos(w_0 t),sin(w_1 t),cos(w_1 t), ...] (check what is w_i)
+    Standard sinusoidal timestep embedding. Converts t -> [sin(w_0 t),cos(w_0 t),sin(w_1 t),cos(w_1 t), ...] with w_i = max_period^(−i/half)
     Can also do a normal embedding?
     t: (B,)
     """
-    def __init__(self, dim, max_period=10000, unit_interval=True):
+    def __init__(self, dim, max_period=100, unit_interval=True):
         super().__init__()
         self.dim = dim
         self.max_period = float(max_period)
@@ -71,10 +107,10 @@ class Sinusoidal_Time_Embedding(nn.Module):
 class VectorFieldTrans(nn.Module):
   """
   Conditional vector field: dz/dt = f(z, t, c)
-  z: [B, D]
-  c: [B, C] (context)
+  z: [B, C, F]
+  c: [B, E] (context embded from original size M to same embedding dimension [B, M] -> [B, E]
   """
-  def __init__(self, n_feat, n_max, c_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64):
+  def __init__(self, n_feat, n_max, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, time_dim=64, n_register=4,):
     super().__init__()
 
     self.n_feat=n_feat
@@ -84,55 +120,89 @@ class VectorFieldTrans(nn.Module):
     self.num_heads=num_heads
     self.num_layers=num_layers
     self.time_dim=time_dim
-    self.c_dim=c_dim
+    self.n_register=n_register
 
     #Add the embedding layer
     self.embed = nn.Sequential(nn.Linear(self.n_feat, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
 
     #specify the transformer block and number of layers
-    encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.1, batch_first=True)
+    encoder_layer=nn.TransformerEncoderLayer(d_model=self.embed_dim, nhead=self.num_heads, dim_feedforward=self.ff_dim, dropout=0.0, batch_first=True)
     self.encoder = nn.TransformerEncoder(encoder_layer, self.num_layers)
 
     #Now de-embed back to original output
     self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.n_feat))
-    #nn.init.zeros_(self.deembed.weight)   # start near v = 0, like a fresh flow
-    #nn.init.zeros_(self.deembed.bias)
+    nn.init.zeros_(self.deembed[-1].weight)   # start near v = 0, like a fresh flow
+    nn.init.zeros_(self.deembed[-1].bias)
 
     self.time_emb = Sinusoidal_Time_Embedding(time_dim)
     self.time_proj = nn.Linear(time_dim, embed_dim)
 
-    self.n_proj = nn.Linear(c_dim, embed_dim)
+    # learned register tokens
+    if n_register > 0:
+        self.registers = nn.Parameter(0.02 * torch.randn(1, n_register, embed_dim))
 
-  def forward(self, z, t, c, N): #FIXME, there is a couple places where both the N, valid, and embedding c are provided redundatnly together. Might be a better interface somehow?
+  def forward(self, z, t, c=None, N=None, valid=None): #FIXME, there is a couple places where both the N, valid, and embedding c are provided redundatnly together. Might be a better interface somehow?
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
-    tt=self.time_proj(tt)[:, None, :] #put into same embedding/dimension as input
+    conds=self.time_proj(tt)[:, None, :] #put into same embedding/dimension as input
 
-    # Embed the input to the latent space
-    z=self.embed(z) # (batch, seq_len, embed_dim)
-
-    if c is None:
-        zct = torch.cat([z, tt], dim=1)
-        n_extra=1
+    #Add conditiong via injection
+    if c is not None:
+        c = c[:, None, :]
+        conds = conds + c
+    if N is not None:
+        Nshaped = N[:, None, :]
+        conds = conds + Nshaped
+    if valid is None:
         valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
-    else:
-        c = self.n_proj(c)[:, None, :] #put into same embedding/dimension as input
-        zct = torch.cat([z, c, tt], dim=1)
-        n_extra=2
-        valid=torch.arange(self.n_max, device=z.device)[None, :] < N[:, None]
+    zctr=self.embed(z) + conds # (batch, seq_len, embed_dim)
+
+    # prepend registers, which also receive g, so they are never masked
+    if self.n_register > 0:
+        reg = self.registers.expand(z.shape[0], self.n_register, -1) + conds # [B, n_register, E]
+        zctr = torch.cat([reg, zctr], dim=1)
 
     #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
-    pad = torch.cat([~valid, torch.zeros(z.shape[0], n_extra, dtype=torch.bool, device=z.device)], dim=1)
+    if self.n_register>0:
+        pad = torch.cat([torch.zeros(z.shape[0], self.n_register, dtype=torch.bool, device=z.device), ~valid], dim=1)
+    else:
+        pad=~valid
+
+    if N is None: #FIXME torchsummary causes an error here with all-zero srk_key_padding_mask
+        zctr = self.encoder(zctr)
+    else:
+        zctr = self.encoder(zctr, src_key_padding_mask=pad)
+    return self.deembed(zctr[:, self.n_register:])  # drop registers -> [B, n_max, n_feat]
+
+    #Below instead adds conditioning as prefix token, not reccomended for low layers
+    '''
+    #Add the conditioning and time dimensions
+    extras = [self.time_proj(tt)]
+    if c is not None:
+        c = c[:, None, :]
+        extras.append(c)
+    if N is not None:
+        N = N[:, None, :]
+        extras.append(N)
+    if valid is None:
+        valid = torch.ones(z.shape[0], self.n_max, dtype=torch.bool, device=z.device)
+    extras = torch.stack(extras, dim=1) # [B, n_extra, E]
+    n_extra = extras.shape[1]
+    h = torch.cat([extras, self.embed(z)], dim=1)
+
+    #key_pad mask to avoid looking at padded values. True=padded and has dim=[batch_size, seq_len]
+    pad = torch.cat([torch.zeros(z.shape[0], n_extra, dtype=torch.bool, device=z.device), ~valid], dim=1)
 
     #Go through encoder
-    if c is None: #FIXME not sure why the pad mask is causing a crash for the all ones case
+    if N is None and c is None: #FIXME not sure why the pad mask is causing a crash for the all ones case #FIXME: should be fixed
         zct = self.encoder(zct)
     else:
         zct = self.encoder(zct, src_key_padding_mask=pad)
 
     #De-embed, only get dimensions mathcing input
-    zct=self.deembed(zct[:,:-n_extra,:])
+    zct=self.deembed(zct[:,n_extra:,:])
+    '''
 
     return zct
 
@@ -142,9 +212,10 @@ class VectorFieldNN(nn.Module):
   z: [B, D]
   c: [B, C] (context)
   """
-  def __init__(self, z_dim, c_dim, hidden_dim, time_dim):
+  def __init__(self, z_dim, c_dim, hidden_dim, time_dim=1):
     super().__init__()
     self.time_dim=time_dim
+    self.c_dim=c_dim
 
     if self.time_dim==1:
         self.net = nn.Sequential(
@@ -165,14 +236,15 @@ class VectorFieldNN(nn.Module):
         )
         self.time_emb = Sinusoidal_Time_Embedding(time_dim)
 
-  def forward(self, z, t, c=None, N=None):
+  def forward(self, z, t, c=None):
     tt = t.expand(z.shape[0], 1) #should be on device
     if self.time_dim>1:
         tt = self.time_emb(tt)
-    if c is None:
-        zct = torch.cat([z, tt], dim=-1)
-    else:
-        zct = torch.cat([z, c, tt], dim=-1) 
+    zct = torch.cat([z, tt], dim=-1)
+
+    if self.c_dim>0:
+        zct = torch.cat([zct, c], dim=-1)
+
     return self.net(zct)
 
 # ---------------------------------------------------------------------
@@ -182,14 +254,18 @@ class model_autoregressive_transformer(nn.Module):
   """
   Auto-regressive trasnformer, learns next element prediction p(x_i|x_{<i}). During training takes x[0:-1] and learns to predict x[1:] via a transformer. For generation always needs a seed x[0], then can recursively generate the rest of the elements
   """
-  def __init__(self, input_dim, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, pad_value=-1):
+  def __init__(self, input_dim, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, pad_value=-1):
+      config = _init_config(locals())  # constructor arguments: rebuild with build_model()
       super(model_autoregressive_transformer, self).__init__()
+      self.config = config
 
       self.input_dim=input_dim
+      self.cond_dim = cond_dim
       self.embed_dim=embed_dim
       self.ff_dim=ff_dim
       self.num_heads=num_heads
       self.num_layers=num_layers
+      self.n_register=n_register
       self.multi_loss=multi_loss
       self.pad_value=pad_value
 
@@ -206,22 +282,50 @@ class model_autoregressive_transformer(nn.Module):
       #Now de-embed back to original output
       self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.input_dim))
 
+      #Add a embedding layer for the conditional info as well
+      if cond_dim>0:
+        self.cond_embed = nn.Sequential(nn.Linear(cond_dim, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
+
+      #Add a network to learn the BCE loss of next token being padded
       if self.multi_loss:
         self.stop_head = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, 1))
 
-  def forward(self, x):
+      #Add register tokens
+      if self.n_register > 0:
+        self.registers = nn.Parameter(torch.zeros(1, self.n_register, self.embed_dim))
+        nn.init.trunc_normal_(self.registers, std=0.02)
+
+  def forward(self, x, c=None):
 
       seq_len = x.shape[1] # (batch, seq_len, feature_dim)
 
       # Embed the N-dim vector into the embedded space
-      x=self.embed(x) # (batch, seq_len, embed_dim)
+      h = self.embed(x)
+      if self.cond_dim>0:
+          #Additive injection
+          #h = h + self.cond_embed(c).unsqueeze(1) # Add context embedding into const embedding
+
+          #Prefix conditioning, replace zero-start token with the conditioned token
+          c = self.cond_embed(c).unsqueeze(1)  # (B, 1, E)
+          h = torch.cat([c, h[:, 1:, :]], dim=1)  # replace start-token embedding with cond
+
+      if self.n_register > 0:
+        reg = self.registers.expand(x.shape[0], self.n_register, -1)       # (B, R, E)
+        h = torch.cat([h[:, :1], reg, h[:, 1:]], dim=1)  #Add register between start token and the rest (B, 1+R+seq_len-1, E)
 
       # Causal mask prevents looking ahead
-      causal_mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool().to(x.device)
+      L = seq_len + self.n_register
+      causal_mask = torch.triu(torch.ones(L, L), diagonal=1).bool().to(x.device)
+      if self.n_register > 0:
+        causal_mask[:self.n_register + 1, :self.n_register + 1] = False  #Allows start token and registers to fully attend each other
 
       # Take the x[0:-1] embedded and learn the embedded x[1:]
-      encoded = self.encoder(x, mask=causal_mask)  
+      encoded = self.encoder(h, mask=causal_mask)  
       #encoded = self.norm(encoded)
+
+      # Drop the register outputs so shapes match the original model
+      if self.n_register > 0:
+        encoded = torch.cat([encoded[:, :1], encoded[:, 1 + self.n_register:]], dim=1)  #Remove registers which are between the start-token and the rest (B, seq_len, E)
 
       if self.multi_loss:
           return self.deembed(encoded), self.stop_head(encoded).squeeze(-1)  # (batch, seq_len, feature_dim), (batch, seq_len)
@@ -258,14 +362,16 @@ class model_autoregressive_transformer(nn.Module):
           return loss_fn(pred,targets).sum(dim=-1) #Sum over all the training sample
 
   @torch.no_grad()
-  def generate(self, out_dimensions):
+  def generate(self, out_dimensions, c=None):
       device = next(self.parameters()).device
-      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device) #jet sequence to fill, start with 0-padded start jet
+      if c is not None:
+        c = c.to(device)
+      seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device) #jet sequence to fill, start with 0-padded start jet, conditional generation will replace this in forward
       active = torch.ones(out_dimensions[0], dtype=torch.bool, device=device) #which elements are active
 
       steps=out_dimensions[1]
       for _ in range(steps): #loop over length
-          pred = self.forward(seq) #get next element prediction, gives you N prediction for N inputs
+          pred = self.forward(seq, c) #get next element prediction, gives you N prediction for N inputs
 
           #if using the stop head
           if self.multi_loss:
@@ -284,8 +390,10 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   """
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   """
-  def __init__(self, input_dim, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, max_range=None, pad_value=-1):
-      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_loss=multi_loss, pad_value=pad_value)
+  def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, max_range=None, pad_value=-1):
+      config = _init_config(locals())  # constructor arguments: rebuild with build_model()
+      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register, multi_loss=multi_loss, pad_value=pad_value)
+      self.config = config
 
       self.n_mix=n_mix
       self.max_range=max_range
@@ -293,13 +401,13 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       #Final space is now a multi-D Gaussian mixture model: prod \alpha_i Gaus(\arrow\mu_i,\arrow\sigma_i) , where dimension=length of ouput (aka 4 for 4-vec)
       self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim,self.n_mix*(1+input_dim+input_dim)))
 
-  def forward(self, x):
+  def forward(self, x, c=None):
       #Get the usual network result, note we overloaded the original forward to give MDN values and not truly auto-regressive
 
       if self.multi_loss:
-          encoded,stop=super().forward(x)
+          encoded,stop=super().forward(x, c)
       else:
-          encoded=super().forward(x) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
+          encoded=super().forward(x, c) #[Nbatch,Nconst,Nmix*(1+2*Ninput)]
 
       # split into mixture components: here alpha=norm (logits will softmax later), mu=center, log_sigma2=log(variance)
       encoded=encoded.view(encoded.shape[0],encoded.shape[1],self.n_mix,(1+self.input_dim+self.input_dim)) #[Nbatch,Nconst,Nmix,(1+2*Ninput)]
@@ -370,8 +478,10 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       return -log_prob.sum() #Sum over all the training sample
 
   @torch.no_grad()
-  def generate(self, out_dimensions):
+  def generate(self, out_dimensions, c=None):
       device = next(self.parameters()).device
+      if c is not None:
+        c = c.to(device)
       seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device)
       steps=out_dimensions[1]
       ninputs=out_dimensions[-1]
@@ -379,7 +489,7 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       active = torch.ones(out_dimensions[0], dtype=torch.bool, device=device) #which elements are active
 
       for _ in range(steps):
-          pred = self.forward(seq) #get the alpha,mu,sigma values
+          pred = self.forward(seq, c) #get the alpha,mu,sigma values
 
           if self.multi_loss:
             pred,stop = pred
@@ -513,7 +623,9 @@ class model_CNF(nn.Module):
   This produces a likelihood-based model (harder constraints require bounded transforms; CNF itself is on R^D).
   """
   def __init__(self, input_dim, embed_dim=256, num_heads=1, num_layers=2, ff_dim=128, cnf_hidden=128, steps=25, time_dim=64):
+    config = _init_config(locals())  # constructor arguments: rebuild with build_model()
     super().__init__()
+    self.config = config
     self.input_dim = input_dim
     self.embed_dim = embed_dim
 
@@ -554,41 +666,74 @@ class FlowMatching(nn.Module):
     """
     Code running the full flow mathing algorithm
     """
-    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, steps, architecture, num_heads, num_layers, ff_dim):
+    def __init__(self, n_feat, n_max, c_dim, hidden_dim, time_dim, Nembed_dim, steps, architecture, num_heads, num_layers, ff_dim, n_register):
         super().__init__()
 
         self.n_feat=n_feat
         self.n_max=n_max
         self.steps=steps
         self.architecture = architecture
+        self.c_dim=c_dim
+        self.Nembed_dim=Nembed_dim
 
         #Get the vector field prediction v
         if self.architecture == "mlp":
-            self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+            self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=c_dim+Nembed_dim, hidden_dim=hidden_dim, time_dim=time_dim)
+            #self.vf=VectorFieldNN(z_dim=n_feat*n_max, c_dim=hidden_dim+Nembed_dim, hidden_dim=hidden_dim, time_dim=time_dim)
         elif self.architecture == "transformer":
-            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, c_dim=c_dim, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim)
+            #Will put both the N and c condtioners into same embedding dim as the flow
+            if Nembed_dim>0: Nembed_dim=hidden_dim 
+            self.cond_embed = nn.Sequential(nn.Linear(c_dim, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, hidden_dim))
+            self.vf=VectorFieldTrans(n_feat=n_feat, n_max=n_max, embed_dim=hidden_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, time_dim=time_dim, n_register=n_register)
 
         #Set the timegrid
         self.register_buffer("time_grid", torch.linspace(0,1,steps+1))
 
         #Set the multiplicity embedding
-        if c_dim>0:
-            self.n_emb = nn.Embedding(n_max + 1, c_dim)
+        if Nembed_dim>0:
+            #self.n_emb = nn.Embedding(n_max + 1, Nembed_dim)
+            self.n_emb = N_MLP_Embed(n_max, Nembed_dim)
 
-    def loss(self, x1, valid, N=None):
-        B=x1.shape[0]
+    def _get_conditions_kwargs(self, c, N, valid):
+        conds={}
+        if self.architecture == "mlp":
+            if self.c_dim>0 and self.Nembed_dim>0:
+                conds["c"]=torch.cat([c,self.n_emb(N)],dim=1)
+            elif self.Nembed_dim>0:
+                conds["c"]=self.n_emb(N)
+            elif self.c_dim>0:
+                conds["c"]=c
+        if self.architecture == "transformer":
+            if self.c_dim>0:
+                conds["c"]=self.cond_embed(c)
+            if self.Nembed_dim>0:
+                conds["N"]=self.n_emb(N)
+            conds["valid"]=valid.squeeze(-1).bool() # [B, n_max, 1] -> [B, n_max]
+
+        return conds
+
+    def forward(self, x, t, c=None, N=None, valid=None):
+
+        #Set conditions
+        conds=self._get_conditions_kwargs(c,N,valid)
+
+        #Get the vector field at this position, time, and condition
+        p_xt=self.vf(x,t,**conds)
+        return p_xt
+
+    def loss(self, x1, c=None, N=None, valid=None):
         device=x1.device
 
         #sample the original gaussian and a random time
         x1 = x1 * valid
         x0=torch.randn_like(x1)* valid 
-        t=torch.rand(B,1,device=device)
+        t=torch.rand(x1.shape[0],1,device=device)
 
         # probability path at time t
         if self.architecture == "transformer":
-            xt=(1-t[:,:,None])*x0+t[:,:,None]*x1
+            xt=(1-t[:,:,None])*x0+t[:,:,None]*x1 #everything of dimension [B, n_max, n_features]
         else:
-            xt=(1-t)*x0+t*x1
+            xt=(1-t)*x0+t*x1 #everything of dimension [B, n_max*n_features]
 
         #sigma=1e-4
         #eps=torch.randn_like(x1)
@@ -598,30 +743,18 @@ class FlowMatching(nn.Module):
         u=x1-x0
 
         #Get the prediction at time t
-        if N is not None:
-            c=self.n_emb(N)
-        else:
-            c=None
-        pred=self.vf(xt,t,c,N)
+        pred=self.forward(xt,t,c,N,valid)
 
-        '''
-        #MSE loss
-        if pad_mask == None:
-            loss = F.mse_loss(pred,u,reduction='none')
-        else:
-            loss = F.mse_loss(pred,u,reduction='none')
-            loss=loss.masked_fill(pad_mask, 0.0) #FM loss
-
-        return loss
-        '''
-
-        #FIXME, new and masking of valid above
+        #Get the loss term, masking the others to zero
         se = ((pred - u) ** 2) * valid
-        # mean over valid entries per jet, so jets with many constituents don't dominate
-        return se.sum(dim=-1) / valid.sum(dim=-1).clamp(min=1)
+
+        # mean over valid entries per jet (ignoring the masked zero), so jets with many constituents don't dominate
+        dims = tuple(range(1, se.ndim)) #smart way to decide whether is in [B, n_max*n_feat] or [B, n_max, n_feat] in two setups
+        n_valid = valid.expand_as(se).sum(dim=dims).clamp(min=1)
+        return se.sum(dim=dims) / n_valid
 
     @torch.no_grad()
-    def generate(self, batch_size, valid, N=None):
+    def generate(self, batch_size, c=None, valid=None, N=None):
         device=next(self.parameters()).device
 
         #Get the intial x_0 distribution
@@ -633,19 +766,16 @@ class FlowMatching(nn.Module):
         #make the time grid
         t=self.time_grid.to(device)
 
-        #make the multiplicity embedding
-        if N is not None:
-            c=self.n_emb(N)
-        else:
-            c=None
+        #make the condtions and embeddings
+        conds=self._get_conditions_kwargs(c,N,valid)
 
         #push forward x_0 to x_1 via RK4 algorith and the learned velocity
         dt=1/self.steps
         for k in range(len(t)-1):
-            k1=self.vf(x, t[k], c, N) * valid
-            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, c, N) * valid
-            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, c, N) * valid
-            k4=self.vf(x+dt*k3, t[k]+dt, c, N) * valid
+            k1=self.vf(x, t[k], **conds) * valid
+            k2=self.vf(x+0.5*dt*k1, t[k]+0.5*dt, **conds) * valid
+            k3=self.vf(x+0.5*dt*k2, t[k]+0.5*dt, **conds) * valid
+            k4=self.vf(x+dt*k3, t[k]+dt, **conds) * valid
 
             x=x+dt*(k1+2*k2+2*k3+k4)/6
 
@@ -660,35 +790,48 @@ class model_FM(nn.Module):
 
     Wrapper around the full FlowMatching class right now, layer of abstraction if want to add conditoning later
     """
-    def __init__(self, input_shape, hidden_dim=128, time_dim=64, cond_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512):
+    def __init__(self, input_shape, cond_shape, hidden_dim=128, time_dim=64, Nembed_dim=16, steps=50, multi_loss=False, pad_value=-1, architecture="mlp", num_heads=2, num_layers=2, ff_dim=512, n_register=4):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.n_max=input_shape[1]
         self.n_feat=input_shape[2]
+        self.c_dim=cond_shape[-1]
         self.pad_value=pad_value
         self.multi_loss=multi_loss
         self.fitted=False
         self.architecture=architecture
 
         if self.multi_loss:
-            self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1)) # p(N): learn multiplicity via a categorical paramater fromN = 0 ... n_max
+            # p(N): learn multiplicity via a categorical paramater from N = 0 ... n_max . Can also make it conditional p(N|c) if N vary across class and pt
+            if self.c_dim > 0:
+                self.count_head = nn.Sequential(nn.Linear(self.c_dim, 128), nn.SiLU(), nn.Linear(128, 128), nn.SiLU(), nn.Linear(128, self.n_max + 1),)
+            else:
+                self.count_logits = nn.Parameter(torch.zeros(self.n_max + 1))
         else:
-            cond_dim=0
+            Nembed_dim=0
 
-        self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=cond_dim, hidden_dim=hidden_dim, time_dim=time_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim) # learn density estimation p(x|N)
+        #NOTE: in MLP setup input is dimension # [B, Nconst*Nfeat] while in transformer # [B, Nconst, Nfeat]
+        self.fm=FlowMatching(n_feat=self.n_feat, n_max=self.n_max, c_dim=self.c_dim, hidden_dim=hidden_dim, time_dim=time_dim, Nembed_dim=Nembed_dim, steps=steps, architecture=self.architecture, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register) # learn density estimation p(X|c) or p(x|N,c) depeding if Nembed_dim provided,
 
-    def forward(self, x, pad_mask=None):
+    def _count_logits(self, c, B):
+        if self.c_dim > 0:
+            return self.count_head(c)                 # [B, n_max+1]
+        return self.count_logits[None].expand(B, -1)  # same as before
+
+    def _empty_valid(self, shape, device):
         if self.architecture=="mlp":
-            x=x.view(x.shape[0], -1)
-        t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+            valid=torch.ones([shape[0],shape[1]*shape[2]], device=device)
+        else:
+            valid=torch.ones([shape[0],shape[1]], device=device)
+        return valid
 
-        if self.multi_loss:
-            N = (~pad_mask).sum(dim=-1).long() #count number of non-pad entries
-            c=self.fm.n_emb(N)
-        else: 
-            N=None
-            c=None
-        return self.fm.vf(x,t,c,N)
+    def _expand_valid(self, valid_c):
+        """valid_c: [B, n_max] float (1 = real constituent). Returns the architecture-specific shape."""
+        if self.architecture == "mlp":
+            return valid_c.repeat_interleave(self.n_feat, dim=1)   # [B, n_max*n_feat]
+        return valid_c[:, :, None]                                  # [B, n_max, 1]
 
     @torch.no_grad()
     def fit_count_prior(self, N_train, smoothing=0.0, freeze=False):
@@ -700,46 +843,60 @@ class model_FM(nn.Module):
         if freeze: self.count_logits.requires_grad_(False)
         self.fitted=True
 
-    def mse_loss(self, x, pad_mask=None, lambda_bce=1.0):
+    def forward(self, x, c=None, pad_mask=None):
+        if self.architecture=="mlp":
+            x=x.view(x.shape[0], -1)
+        t=torch.zeros(x.shape[0], 1, device=x.device, dtype=x.dtype)
+
+        #Count mulitplicity and put mask in right size
+        if self.multi_loss:
+            valid = (~pad_mask).float() #[B, Nconst]
+            N = valid.sum(dim=-1).long() #count number of non-pad entries
+        else: 
+            valid=self._empty_valid(x.shape,x.device)
+            N = None
+        valid = self._expand_valid(valid)
+
+        return self.fm(x, t, c, N, valid)
+
+    def mse_loss(self, x, c=None, pad_mask=None, lambda_ce=1.0):
         if self.architecture=="mlp":
             x=x.view(x.shape[0], -1)
 
         if self.multi_loss:
 
-            #Number of predictions loss p(N)
+            #Count mulitplicity and put mask in right size
             valid = (~pad_mask).float() #[B, Nconst]
             N = valid.sum(dim=-1).long() #count number of non-pad entries
             #if not self.fitted: self.fit_count_prior(N)
-            if self.architecture=="mlp":
-                valid= valid.repeat_interleave(self.n_feat, dim=1).float()  # [B, Nconst*Nfeat]
-            else:
-                valid=valid[:,:,None] #[B, Nconst, 1]
-            Npred=self.count_logits[None].expand(x.shape[0], -1)
-            count_loss = F.cross_entropy(Npred, N, reduction="none")  # [B]
+            valid = self._expand_valid(valid)
 
-            #Flow matching loss p(x | N)
-            FM_loss=self.fm.loss(x, valid, N) #[Nbatch, Nconst*Nfeat]
+            #Number of predictions loss p(N)
+            Npred=self._count_logits(c, x.shape[0])
+            count_loss = F.cross_entropy(Npred, N, reduction="none")  #Number of predictions loss p(N)
 
-            return FM_loss.sum()+lambda_bce*count_loss.sum()
+            #Flow matching loss p(x|c, N)
+            FM_loss=self.fm.loss(x, c, N, valid) #[Nbatch, Nconst*Nfeat]
+
+            return FM_loss.sum()+lambda_ce*count_loss.sum()
         else:
-            valid=torch.ones(x.shape, device=x.device)
-            return self.fm.loss(x, valid).sum()
+            valid=self._empty_valid(x.shape,x.device)
+            valid = self._expand_valid(valid)
+            N=None
+            return self.fm.loss(x, c, N, valid).sum()
 
     @torch.no_grad()
-    def generate(self,out_dimensions):
+    def generate(self, out_dimensions, c=None):
 
         if self.multi_loss:
 
             #Generate the number of predictions
-            N = torch.distributions.Categorical(logits=self.count_logits).sample((out_dimensions[0],)) #sample the N
+            N = torch.distributions.Categorical(logits=self._count_logits(c,out_dimensions[0])).sample() #sample the N
             valid= torch.arange(self.n_max, device=N.device)[None, :] < N[:, None] #make mask which is true up to N and false after dim=[B, n_max]
-            if self.architecture=="mlp":
-                valid= valid.repeat_interleave(self.n_feat, dim=1).float() # Make it dim=[B, Nconst*nfeat]
-            else:
-                valid=valid.float()[:,:,None] #[B, Nconst, 1]
+            valid = self._expand_valid(valid).int()
 
             #Generate the samples
-            samples=self.fm.generate(out_dimensions[0], valid, N)
+            samples=self.fm.generate(out_dimensions[0], c, valid, N)
 
             #Return the samples masked 
             samples = samples + (1 - valid) * self.pad_value #mask the output
@@ -748,11 +905,9 @@ class model_FM(nn.Module):
         else:
             #Generate the samples, all points are valid
             device = next(self.parameters()).device
-            if self.architecture=="mlp":
-                valid=torch.ones([out_dimensions[0],out_dimensions[1]*out_dimensions[2]], device=device)
-            else:
-                valid=torch.ones([out_dimensions[0],out_dimensions[1],out_dimensions[2]], device=device)
-            samples=self.fm.generate(out_dimensions[0], valid)
+            valid=self._empty_valid(out_dimensions,device)
+            valid = self._expand_valid(valid).int()
+            samples=self.fm.generate(out_dimensions[0], c, valid)
             return samples.view(out_dimensions)
 
 # ---------------------------------------------------------------------
@@ -859,7 +1014,9 @@ class FlowBatchNorm(nn.Module):
 
 class model_normalizing_flow_custom(nn.Module):
     def __init__(self, input_dim, num_flows=10, latent_dim=256, doMask=True, doBatchNorm=False):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.input_dim = input_dim
         self.doMask = doMask
@@ -943,7 +1100,9 @@ class StableScaleNet(nn.Module): #just a clamped mlp
 class model_normalizing_flow(nn.Module): #Using normflows package
     #Normalizing flows, if have a invertible function x=f(z), and z~Gaus(z) then p(z)=p(f^{-1}(x)) |det J| (aka change of variables). Can compose multiple function together in a flow and the only thing to keep track is the composed final function f=f_1\cdotf_2... and the prod of the jacobian detetermints. Trick is then using neural networks to learn the functions, but make sure everything invertible
     def __init__(self, input_dim, num_flows=10, latent_dim=256, flow_type="neuralspline_coupling"):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.input_dim=input_dim
 
@@ -1069,7 +1228,9 @@ class model_diffusion(nn.Module):
         
     """
     def __init__(self, input_dim, hidden_dim=256, time_dim=64, time_steps=1000, beta_start=1e-4, beta_end=2e-2, mode="DDPM", sample_time_steps=100):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         self.input_dim = input_dim
         self.time_steps = time_steps
@@ -1237,7 +1398,9 @@ class model_score_SDE(nn.Module):
     """
 
     def __init__(self, input_dim, hidden_dim=256, time_dim=64, beta_min=0.1, beta_max=20.0, mode="sde"):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
         super().__init__()
+        self.config = config
 
         #Will use linear beta scheduler
         self.beta_min = beta_min
@@ -1293,7 +1456,7 @@ class model_score_SDE(nn.Module):
         return loss
 
     def mse_loss(self, x0):
-        x0=x.view(x0.shape[0], -1)
+        x0=x0.view(x0.shape[0], -1)
         return self.forward(x0)
 
     @torch.no_grad()
@@ -1340,3 +1503,209 @@ class model_score_SDE(nn.Module):
                 x = (x + drift * dt )
 
         return x.view(out_dimensions)
+
+# ---------------------------------------------------------------------
+# GPT style next-token-prediction transformer
+# ---------------------------------------------------------------------
+class model_gpt_transformer(nn.Module):
+
+    def __init__(self, tokenizer, n_const, cond_dim=0, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=0, temperature=1.0, top_k=None):
+        config = _init_config(locals())  # constructor arguments: rebuild with build_model()
+        super(model_gpt_transformer, self).__init__()
+        if isinstance(tokenizer, dict):  # rebuilt from a checkpoint config, weights come from the state dict
+            tokenizer = models_vqvae.ConstituentVQVAE(**tokenizer)
+        config["tokenizer"] = tokenizer.config
+        self.config = config
+
+        self.K, self.Q, self.N, self.n_feat = tokenizer.K, tokenizer.Q, n_const, tokenizer.F
+        self.pad_value = tokenizer.pad_value
+        self.cond_dim = cond_dim
+        self.embed_dim = embed_dim
+        self.n_register = n_register
+        self.temperature = temperature
+        self.top_k = top_k
+
+        # Frozen tokenizer: only used to decode generated codes (its weights are stored in the checkpoint too)
+        self.tokenizer = tokenizer
+        for p in self.tokenizer.parameters():
+            p.requires_grad_(False)
+        self.tokenizer.eval()
+
+        # Vocabulary
+        self.n_code_tokens = self.K * self.Q
+        self.EOS, self.PAD, self.BOS = self.n_code_tokens, self.n_code_tokens + 1, self.n_code_tokens + 2
+        self.seq_len = 1 + self.N * self.Q  # model input length (start token + body); targets add the EOS
+
+        # Token + position embedding (positions matter: they carry the constituent index and RVQ level)
+        self.embed = nn.Embedding(self.n_code_tokens + 3, embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.seq_len, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        # Transformer block, same as model_autoregressive_transformer
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=ff_dim, dropout=0.1, batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers, enable_nested_tensor=False)
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # Classification head over codes + EOS
+        self.head = nn.Linear(embed_dim, self.n_code_tokens + 1)
+
+        # Conditional embedding, the vector [pt, eta, phi, m, N] is log-transformed and standardised first
+        if cond_dim > 0:
+            self.cond_embed = nn.Sequential(nn.Linear(cond_dim, embed_dim), nn.SiLU(), nn.Linear(embed_dim, embed_dim))
+            self.register_buffer("cond_mean", torch.zeros(cond_dim))
+            self.register_buffer("cond_std", torch.ones(cond_dim))
+
+        # Register tokens
+        if self.n_register > 0:
+            self.registers = nn.Parameter(torch.zeros(1, self.n_register, embed_dim))
+            nn.init.trunc_normal_(self.registers, std=0.02)
+
+    # never update the tokenizer (EMA codebook) or use dropout in it
+    def train(self, mode=True):
+        super().train(mode)
+        self.tokenizer.eval()
+        return self
+
+    # Conditioning
+    @staticmethod
+    def _cond_transform(c):
+        c = c.float().clone()
+        c[:, 0] = torch.log(c[:, 0].clamp_min(1e-8))   # pt
+        if c.shape[1] > 3:
+            c[:, 3] = torch.log1p(c[:, 3].clamp_min(0))  # mass
+        return c
+
+    @torch.no_grad()
+    def fit_cond_normalisation(self, cond):
+        c = self._cond_transform(torch.as_tensor(cond))
+        self.cond_mean.copy_(c.mean(0).to(self.cond_mean.device))
+        self.cond_std.copy_(c.std(0).clamp_min(1e-6).to(self.cond_std.device))
+
+    # Sequences
+    def encode_sequence(self, codes):
+        """codes (B, N, Q) long, -1 = padded -> token ids (B, seq_len + 1)."""
+        B, N = codes.shape[0], codes.shape[1]
+        offset = torch.arange(self.Q, device=codes.device) * self.K
+        tok = torch.where(codes >= 0, codes + offset, torch.full_like(codes, self.PAD)).reshape(B, -1)
+        seq = torch.full((B, 1 + N * self.Q + 1), self.PAD, dtype=torch.long, device=codes.device)
+        seq[:, 0] = self.BOS
+        seq[:, 1:1 + N * self.Q] = tok
+        n_real = (codes[..., 0] >= 0).sum(1)
+        seq[torch.arange(B, device=codes.device), 1 + n_real * self.Q] = self.EOS
+        return seq
+
+    def forward(self, x, c=None):
+        B, L = x.shape  # (batch, seq_len) token ids
+
+        h = self.embed(x) + self.pos_embed[:, :L]
+        if self.cond_dim > 0:
+            # Prefix conditioning, replace the start-token embedding with the conditioned token
+            ce = self.cond_embed((self._cond_transform(c) - self.cond_mean) / self.cond_std).unsqueeze(1)
+            h = torch.cat([ce + self.pos_embed[:, :1], h[:, 1:]], dim=1)
+
+        if self.n_register > 0:
+            reg = self.registers.expand(B, self.n_register, -1)
+            h = torch.cat([h[:, :1], reg, h[:, 1:]], dim=1)  # (B, 1+R+L-1, E)
+
+        # Causal mask; start token and registers fully attend each other
+        Lr = L + self.n_register
+        causal_mask = torch.triu(torch.ones(Lr, Lr, device=x.device), diagonal=1).bool()
+        if self.n_register > 0:
+            causal_mask[:self.n_register + 1, :self.n_register + 1] = False
+
+        encoded = self.encoder(h, mask=causal_mask)
+        if self.n_register > 0:
+            encoded = torch.cat([encoded[:, :1], encoded[:, 1 + self.n_register:]], dim=1)  # drop registers
+        return self.head(self.norm(encoded))  # (B, L, K*Q + 1)
+
+    def ce_loss(self, logits, targets):
+        """Per-token cross-entropy (B, L), zero where the target is PAD."""
+        return F.cross_entropy(logits.transpose(1, 2), targets, ignore_index=self.PAD, reduction="none")
+
+    # Generation
+    def _allowed(self, pos, device):
+        """Allowed output tokens when predicting body position pos (0-based)."""
+        allowed = torch.zeros(self.n_code_tokens + 1, dtype=torch.bool, device=device)
+        if pos == self.N * self.Q:
+            allowed[self.EOS] = True
+            return allowed
+        q = pos % self.Q
+        allowed[q * self.K:(q + 1) * self.K] = True  # right RVQ level for this position
+        if q == 0:
+            allowed[self.EOS] = True  # can only stop at a constituent boundary
+        return allowed
+
+    @torch.no_grad()
+    def generate_codes(self, n, c=None, n_max=None, temperature=None, top_k=None, min_const=1):
+        """Sample n jets -> codes (n, n_max, Q), -1 where padded."""
+        device = next(self.parameters()).device
+        n_max = self.N if n_max is None else min(n_max, self.N)
+        temperature = self.temperature if temperature is None else temperature
+        top_k = self.top_k if top_k is None else top_k
+        if c is not None:
+            c = c.to(device)
+
+        seq = torch.full((n, 1), self.BOS, dtype=torch.long, device=device)
+        done = torch.zeros(n, dtype=torch.bool, device=device)
+        last = n_max * self.Q
+        for pos in range(last + 1):
+            logits = self.forward(seq, c)[:, -1] / max(temperature, 1e-6)
+            allowed = self._allowed(pos, device)
+            if pos == last:
+                allowed[:] = False
+                allowed[self.EOS] = True
+            if pos < min_const * self.Q:
+                allowed[self.EOS] = False
+            logits = logits.masked_fill(~allowed, float("-inf"))
+            if top_k:
+                kth = torch.topk(logits, top_k, dim=-1).values[:, -1:]
+                logits = logits.masked_fill(logits < kth, float("-inf"))
+            nxt = torch.multinomial(F.softmax(logits, -1), 1).squeeze(-1)
+            done = done | (nxt == self.EOS)
+            if pos == last or done.all():
+                break
+            nxt = torch.where(done, torch.full_like(nxt, self.PAD), nxt)
+            seq = torch.cat([seq, nxt[:, None]], 1)
+
+        body = seq[:, 1:]
+        body = torch.cat([body, torch.full((n, last - body.shape[1]), self.PAD, device=device)], 1)
+        codes = body.reshape(n, n_max, self.Q)
+        offset = torch.arange(self.Q, device=device) * self.K
+        codes = torch.where(codes < self.n_code_tokens, codes - offset, torch.full_like(codes, -1))
+        incomplete = (codes < 0).any(-1, keepdim=True)  # a constituent counts only if all its levels exist
+        return torch.where(incomplete, torch.full_like(codes, -1), codes)
+
+    @torch.no_grad()
+    def generate(self, out_dimensions, c=None):
+        """out_dimensions (B, N, F) -> (B, N, F) pre-processed features, pad_value where padded."""
+        B, N_out, F_out = int(out_dimensions[0]), int(out_dimensions[1]), int(out_dimensions[2])
+        if F_out != self.n_feat:
+            raise ValueError(f"requested {F_out} features, tokenizer decodes {self.n_feat}")
+        if self.cond_dim > 0 and c is None:
+            raise ValueError("conditional VQGPT model: generate() needs the jet conditioning c")
+        codes = self.generate_codes(B, c, n_max=N_out)
+        X = self.tokenizer.decode(codes)  # (B, n, F), pad_value in padded slots
+        if X.shape[1] < N_out:
+            X = torch.cat([X, torch.full((B, N_out - X.shape[1], F_out), float(self.pad_value), device=X.device)], 1)
+        return X
+
+# ---------------------------------------------------------------------
+# Build a model from its stored config (checkpoint loading / restarting)
+# ---------------------------------------------------------------------
+def build_model(architecture, config):
+    """
+    Build a model from its constructor arguments, e.g. a checkpoint's
+        build_model(checkpoint["architecture"], checkpoint["model_config"])
+    then load the weights with model.load_state_dict(checkpoint["model_state_dict"]).
+    """
+    architectures_dict = {
+        "Transformer": model_autoregressive_transformer,
+        "MDN": model_autoregressive_transformer_MDN,
+        "CNF": model_CNF,
+        "FM": model_FM,
+        "NF": model_normalizing_flow,
+        "Diffusion": model_diffusion,
+        "SDE": model_score_SDE,
+        "VQGPT": model_gpt_transformer,
+    }
+    return architectures_dict[architecture](**config)
