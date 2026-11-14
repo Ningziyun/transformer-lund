@@ -10,6 +10,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 import fastjet
 import ljpHelpers
+import lund_tree_encoding
 
 import models_generative
 
@@ -346,6 +347,7 @@ class lundtree_dataset(torch.utils.data.Dataset):
     return [torch.from_numpy(self.tokens[index]), torch.from_numpy(self.jet[index]), torch.from_numpy(self.mask[index])]
 
   def __len__(self):
+    return len(self.tokens)
 
 
 def get_loader(filename, args):
@@ -996,7 +998,7 @@ def save_argument_metadata(args):
 def common_training_args(parser):
 
     # data / io
-    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec","relvec"], default="relvec", help="What format of inputs we are using")
+    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec","relvec","lundtree"], default="relvec", help="What format of inputs we are using")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
     parser.add_argument("--preprocess", type=str, default=None, choices=["log","linear","standardize","logstd","shiftpad"], help="Preprocess the output (default: None")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",help="")
@@ -1036,6 +1038,7 @@ def common_training_args(parser):
 
     # plotting options
     parser.add_argument("--validation-size",type=int, default=10000, help="How many images to generate and make plots for")
+    parser.add_argument("--validation-samples", type=str, default=None, help="NPZ file to write/use that stores the numpy arrays for the validation")
     parser.add_argument("--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
     parser.add_argument("--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
     parser.add_argument("--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)

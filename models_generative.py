@@ -394,7 +394,6 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   """
   def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, multi_loss=False, max_range=None, pad_value=-1, circular_dims=None):
       config = _init_config(locals())  # constructor arguments: rebuild with build_model()
-      super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_loss=multi_loss, pad_value=pad_value)
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register, multi_loss=multi_loss, pad_value=pad_value)
       self.config = config
 
@@ -557,6 +556,7 @@ class model_autoregressive_tree_MDN(model_autoregressive_transformer_MDN):
   """
   def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, max_range=None, pad_value=-1, circular_dims=None):
       #The mixture models the node features, the stop head becomes the split head
+      config = _init_config(locals())  # constructor arguments: rebuild with build_model()
       n_context=len(lund_tree_encoding.CONTEXT_NAMES)
       super(model_autoregressive_tree_MDN, self).__init__(input_dim-1-n_context, cond_dim, n_mix=n_mix, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, multi_loss=True, max_range=max_range, pad_value=pad_value, circular_dims=circular_dims)
       self.n_context=n_context

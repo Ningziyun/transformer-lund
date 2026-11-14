@@ -896,9 +896,9 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
             maxs[ii]=max(maxs[ii],np.max(plots[ii][jj]))
 
     #Plot stuff
-    for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"Multiplicity",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
+    for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"Multiplicity",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
         #Integer multiplicity gets one bin per value, equal-width bins would alternately catch one and two values
-        bins = np.arange(mins[ip]-0.5, maxs[ip]+1.5) if ip==3 else 20
+        bins = np.arange(mins[ip]-0.5, maxs[ip]+1.5) if xlabel==r"Multiplicity" else 20
         hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel, bins=bins)
 
     name = "highlevel"
@@ -1057,13 +1057,15 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
   original, generated, jet_list, unavailable_reasons = generate_validation_samples(models, test_loader, args, results, unavailable_model_reasons)
 
   #Keep the samples, so the plots can be remade with validate_unbinned.py --from-samples without regenerating
-  save_validation_samples(os.path.join(args.plot_dir, "validation_samples.npz"), original, generated, jet_list, labels, unavailable_reasons, args)
+  if not args.validation_samples: args.validation_samples="validation_samples.npz"
+  save_validation_samples(os.path.join(args.plot_dir, args.validation_samples), original, generated, jet_list, labels, unavailable_reasons, args)
   plot_validation_samples(original, generated, jet_list, args, labels, unavailable_reasons, results)
 
 def save_validation_samples(path, original, generated, jet_list, labels, unavailable_reasons, args=None):
   """Store the validation inputs, generated samples and run arguments of validate_unbinned_models in a compressed .npz file."""
   os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-  arrays = {"original": original.numpy(), "labels": np.array(labels, dtype=object),
+  arrays = {"original": original.numpy(), 
+            "labels": np.array(labels, dtype=object),
             "args": np.array(json.dumps(vars(args) if args is not None else {}, default=str)),
             "unavailable_reasons": np.array([r if r is not None else "" for r in unavailable_reasons], dtype=object)}
   for imodel, g in enumerate(generated):
@@ -1125,7 +1127,7 @@ def plot_validation_samples(original, generated, jet_list, args, labels, unavail
       original_np = to_physical(original_np)
       generated_np = [to_physical(g) for g in generated_np]
     plot_inputs = [original_np] + generated_np
-    if not args.preprocess: fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
+    if not args.preprocess: fix_badjets(args, plot_inputs, results) #if want to fix the badjets
     flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
     # ---------------------------------------------------------------------
@@ -1150,7 +1152,7 @@ def plot_validation_samples(original, generated, jet_list, args, labels, unavail
       original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
       generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
       plot_inputs = [original_np] + generated_np
-      fix_badjets(plot_inputs,args.mask_bad,results) #if want to fix the badjets
+      fix_badjets(args, plot_inputs, results) #if want to fix the badjets
       flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
       #make a quick dump
@@ -1185,8 +1187,8 @@ def plot_validation_samples(original, generated, jet_list, args, labels, unavail
       #Clear memory and remake
       for p in plot_inputs: del p
 
-      original_np=helpers.make_absolute_constituents(original,jet_list)
-      generated_np = [helpers.make_absolute_constituents(g,jet_list) for g in generated]
+      original_np=helpers.make_absolute_constituents(original_np,jet_list.numpy())
+      generated_np = [helpers.make_absolute_constituents(g,jet_list.numpy()) for g in generated_np]
       plot_inputs = [original_np] + generated_np
       flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 

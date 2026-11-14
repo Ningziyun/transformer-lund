@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import sys
 
 from helpers import *
 from helpers_unbinned import *
@@ -11,84 +10,90 @@ if __name__ == "__main__":
     args = parse_input()
 
     #Remake the plots from saved samples, with their run arguments unless given on the command line
-    if args.from_samples:
-        samples = load_validation_samples(args.from_samples)
+    if args.validation_samples and os.path.isfile(args.validation_samples):
+        samples = load_validation_samples(args.validation_samples)
+
+        ignore_list=[]
+        for argv in sys.argv[1:]:
+            if "--" in argv: ignore_list.append(argv.replace("--","").replace("-","_"))
         for key, value in samples.pop("saved_args").items():
-            if hasattr(args, key) and key not in ignore_list and key != "from_samples":
+            if hasattr(args, key) and key not in ignore_list and key != "validation_samples":
                 setattr(args, key, value)
         if "plot_dir" not in ignore_list:
-            args.plot_dir = os.path.dirname(os.path.abspath(args.from_samples))
+            args.plot_dir = os.path.dirname(os.path.abspath(args.validation_samples))
+
         plot_validation_samples(args=args, **samples)
         print("Done")
-        sys.exit(0)
 
-    checkpoint_info = load_checkpoint_args(args, sys.argv[1:])
-    set_seeds(args.seed)
-    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
-    print(f"Running on device: {device}", flush=True)
+    #Otherwise re-run everything
+    else:
+        checkpoint_info = load_checkpoint_args(args, sys.argv[1:])
+        set_seeds(args.seed)
+        device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
+        print(f"Running on device: {device}", flush=True)
 
-    # load and preprocess data
-    print(f"Loading training set", flush=True)
-    train_loader,test_loader=get_loaders(args)
-    X_example, _, jet_example=format_input(next(iter(train_loader)), **helpers.format_input_args(args))
+        # load and preprocess data
+        print(f"Loading training set", flush=True)
+        train_loader,test_loader=get_loaders(args)
+        X_example, _, jet_example=format_input(next(iter(train_loader)), **helpers.format_input_args(args))
 
-    cond_shape=[0]
-    if args.conditional:
-        cond_shape=jet_example.shape
+        cond_shape=[0]
+        if args.conditional:
+            cond_shape=jet_example.shape
 
-    #load model
-    print(f"Loading model", flush=True)
-    model=load_checkpoint_model(args,X_example.shape,cond_shape,checkpoint_info)
+        #load model
+        print(f"Loading model", flush=True)
+        model=load_checkpoint_model(args, checkpoint_info)
 
-    '''
-    if args.architecture=="MDN":
-        output=model(X_example)
-        stop=None
-        if args.mixed_loss:
-            output,stop=output
+        '''
+        if args.architecture=="MDN":
+            output=model(X_example)
+            stop=None
+            if args.mixed_loss:
+                output,stop=output
 
-        #grabbing for first jet
-        alpha=F.softmax(output[0,:,:,0]) #[Nconst,Nmix]
-        mu=output[0,:,:,1:X_example.shape[-1]+1] #[Nconst,Nmix,Nfeatures]
-        sigma2 = torch.exp(output[0,:,:, X_example.shape[-1]+1:]) #[Nconst,Nmix,Nfeatures]
+            #grabbing for first jet
+            alpha=F.softmax(output[0,:,:,0]) #[Nconst,Nmix]
+            mu=output[0,:,:,1:X_example.shape[-1]+1] #[Nconst,Nmix,Nfeatures]
+            sigma2 = torch.exp(output[0,:,:, X_example.shape[-1]+1:]) #[Nconst,Nmix,Nfeatures]
 
-        #find max/min mixture compotnents for first and last const and print
-        argmax0=torch.argmax(alpha[0])
-        argmin0=torch.argmin(alpha[0])
-        argmaxn1=torch.argmax(alpha[-1])
-        argminn1=torch.argmin(alpha[-1])
-        print("\nalphas at 0\n",alpha[0].tolist())
-        print("\nargmax/min at 0:",argmax0.item(),argmin0.item())
-        print("alpha:",alpha[0,argmax0].item(),alpha[0,argmin0].item())
-        print("mu:",mu[0,argmax0].tolist(),mu[0,argmin0].tolist())
-        print("sigma2:",sigma2[0,argmax0].tolist(),sigma2[0,argmin0].tolist())
-        print("\nalphas at -1\n",alpha[-1].tolist())
-        print("\nargmax/min at -1:",argmaxn1.item(),argminn1.item())
-        print("alpha:",alpha[-1,argmaxn1].item(),alpha[-1,argminn1].item())
-        print("mu:",mu[-1,argmaxn1].tolist(),mu[-1,argminn1].tolist())
-        print("sigma2:",sigma2[-1,argmax0].tolist(),sigma2[-1,argminn1].tolist())
+            #find max/min mixture compotnents for first and last const and print
+            argmax0=torch.argmax(alpha[0])
+            argmin0=torch.argmin(alpha[0])
+            argmaxn1=torch.argmax(alpha[-1])
+            argminn1=torch.argmin(alpha[-1])
+            print("\nalphas at 0\n",alpha[0].tolist())
+            print("\nargmax/min at 0:",argmax0.item(),argmin0.item())
+            print("alpha:",alpha[0,argmax0].item(),alpha[0,argmin0].item())
+            print("mu:",mu[0,argmax0].tolist(),mu[0,argmin0].tolist())
+            print("sigma2:",sigma2[0,argmax0].tolist(),sigma2[0,argmin0].tolist())
+            print("\nalphas at -1\n",alpha[-1].tolist())
+            print("\nargmax/min at -1:",argmaxn1.item(),argminn1.item())
+            print("alpha:",alpha[-1,argmaxn1].item(),alpha[-1,argminn1].item())
+            print("mu:",mu[-1,argmaxn1].tolist(),mu[-1,argminn1].tolist())
+            print("sigma2:",sigma2[-1,argmax0].tolist(),sigma2[-1,argminn1].tolist())
 
-        #What is the min/max values in total
-        print("\nmax/min alpha:",torch.max(alpha).item(),torch.min(alpha).item())
-        print("max/min mu:",torch.max(mu).item(),torch.min(mu).item())
-        print("max/min sigma2:",torch.max(sigma2).item(),torch.min(sigma2).item())
-    '''
+            #What is the min/max values in total
+            print("\nmax/min alpha:",torch.max(alpha).item(),torch.min(alpha).item())
+            print("max/min mu:",torch.max(mu).item(),torch.min(mu).item())
+            print("max/min sigma2:",torch.max(sigma2).item(),torch.min(sigma2).item())
+        '''
 
-    #Make validation plots
-    validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"])
+        #Make validation plots
+        validate_unbinned_models( [model], test_loader, args, labels=["original", "generated"])
 
-    #Remake loss plots
-    training_info={
-        "best_loss":float("inf"),
-        "best_epoch":-1,
-        "patience_counter":0,
-        "test_losses":[],
-        "train_losses":[],
-        "lr_history":[],
-        "stopped_nonfinite":False,
-    }
-    load_checkpoint_losses_lr(args, checkpoint_info, training_info)
-    loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
-    lr_plot(training_info["lr_history"], out_dir=args.log_dir)
+        #Remake loss plots
+        training_info={
+            "best_loss":float("inf"),
+            "best_epoch":-1,
+            "patience_counter":0,
+            "test_losses":[],
+            "train_losses":[],
+            "lr_history":[],
+            "stopped_nonfinite":False,
+        }
+        load_checkpoint_losses_lr(args, checkpoint_info, training_info)
+        loss_plot(training_info["train_losses"],training_info["test_losses"],out_dir=args.log_dir)
+        lr_plot(training_info["lr_history"], out_dir=args.log_dir)
 
-    print("Done")
+        print("Done")
