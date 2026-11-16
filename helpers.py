@@ -315,33 +315,31 @@ class lundtree_dataset(torch.utils.data.Dataset):
       np.savez_compressed(temporary, tokens=self.tokens, mask=self.mask, jet=self.jet, stamp=stamp)
       os.replace(temporary, cache_path)
 
-  def _prepare(self, file_path, max_events):
-    f = h5py.File(file_path,'r')
-    tree=f["lund_tree"]
-    rows = slice(0, max_events)
-    stored_names=[name.strip() for name in tree.attrs["feature_order"].split(",")]
-    features=tree["features"][rows][..., [stored_names.index(name) for name in lund_tree_encoding.SPLIT_FEATURE_NAMES]]
-    splits=tree["split"][rows]
-    lengths=tree["length"][rows]
-
-    #Encode the split features into the unbounded model space, leaves stay zero.
-    #Each split's delta_R is bounded relative to its parent's (C/A angular ordering, see lund_tree_encoding.TreeWalker).
-    #The input-only context of the next node (depth, soft child, pT fraction) is stored with the current node since inputs are shifted by one
-    features, context = lund_tree_encoding.encode_trees(features, splits)
-    features, context = features.astype(np.float32), context.astype(np.float32)
-
-    #Padding is defined by the tree length (and marked by split flag -1), never by feature values: -1 is a valid encoded feature
-    self.mask = np.arange(features.shape[1])[None, :] >= lengths[:, None]
-    self.tokens = np.concatenate([features, context, splits[..., None].astype(np.float32)], axis=-1).astype(np.float32)
-    self.tokens[self.mask] = -1
-
-    #Jet conditioning
-    jet_px, jet_py, jet_pz = [f["jet"][name][rows].astype(np.float64) for name in ("PX", "PY", "PZ")]
-    eps=1e-12
-    jet_pt = np.hypot(jet_px, jet_py)
-    jet_eta = np.arcsinh(jet_pz / np.maximum(jet_pt, eps))
-    jet_phi = np.arctan2(jet_py, jet_px)
-    self.jet = np.stack([jet_pt, jet_eta, jet_phi], axis=-1).astype(np.float32)
+  def _prepare(self, file_path, max_events, chunk=100_000):
+    with h5py.File(file_path, "r") as f:          # the current code also never closes the file
+        tree = f["lund_tree"]
+        n = len(tree["length"]) if max_events is None else min(max_events, len(tree["length"]))
+        stored = [s.strip() for s in tree.attrs["feature_order"].split(",")]
+        cols = [stored.index(c) for c in lund_tree_encoding.SPLIT_FEATURE_NAMES]
+        nf, nc = len(cols), len(lund_tree_encoding.CONTEXT_NAMES)
+        n_nodes = tree["split"].shape[1]
+        self.tokens = np.empty((n, n_nodes, nf + nc + 1), np.float32)
+        self.mask = np.empty((n, n_nodes), bool)
+        for start in range(0, n, chunk):
+            stop = min(start + chunk, n)
+            splits = tree["split"][start:stop]
+            feats, ctx = lund_tree_encoding.encode_trees(tree["features"][start:stop][..., cols], splits)
+            mask = np.arange(n_nodes)[None] >= tree["length"][start:stop][:, None]
+            block = self.tokens[start:stop]
+            block[..., :nf], block[..., nf:-1], block[..., -1] = feats, ctx, splits
+            block[mask] = -1
+            self.mask[start:stop] = mask
+        jet_px, jet_py, jet_pz = (f["jet"][k][:n].astype(np.float64) for k in ("PX", "PY", "PZ"))
+        eps=1e-12
+        jet_pt = np.hypot(jet_px, jet_py)
+        jet_eta = np.arcsinh(jet_pz / np.maximum(jet_pt, eps))
+        jet_phi = np.arctan2(jet_py, jet_px)
+        self.jet = np.stack([jet_pt, jet_eta, jet_phi], axis=-1).astype(np.float32)
 
   def __getitem__(self, index):
     return [torch.from_numpy(self.tokens[index]), torch.from_numpy(self.jet[index]), torch.from_numpy(self.mask[index])]
@@ -413,6 +411,10 @@ def format_input_args(args):
         func_args["unpack_jet"]=True
     elif multi_loss:
         func_args["unpack_mask"]=True
+
+    if input_format=="lundtree": #FIXME
+        func_args["unpack_mask"]=True
+        func_args["unpack_jet"]=True
 
     return func_args
 

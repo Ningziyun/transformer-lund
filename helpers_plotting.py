@@ -632,7 +632,7 @@ def lund_plot_ratio(
     print(f"Plotting lund-plane diff to {out_dir}/{name}.pdf")
 
 
-def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicted"], out_dir="./Plots/",):
+def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicted"], out_dir="./Plots/", chunk_size=1000,):
     '''
     EEC(R) = 1/pt(jet) sum pt_i pt_j delta(R - R_ij)
     Drawn twice: linear R bins (EEC) and logarithmic R bins (EEC_logx), the latter divided by each bin's width in R.
@@ -644,44 +644,40 @@ def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicte
     eps=1e-12
     EEC=[]
     for ii,jets in enumerate(plot_inputs):
-        # slice 4-vectors   dim=[Njet, Nconst]
-        const_mask = (jets[..., 0] > -1) & np.all(np.isfinite(jets), axis=-1) & (np.max(np.abs(jets), axis=-1) < 1e6) # Set padded values to zero for numerical safety
-        E  = np.where(const_mask, jets[..., 0], 0.0)
-        px = np.where(const_mask, jets[..., 1], 0.0)
-        py = np.where(const_mask, jets[..., 2], 0.0)
-        pz = np.where(const_mask, jets[..., 3], 0.0)
-
-        pt = np.sqrt(px**2 + py**2)
-        p = np.sqrt(px**2 + py**2 + pz**2)
-        jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Njet]
-
-        # Protect against division by zero
-        eta = 0.5 * np.log((p + pz + eps)/(p - pz + eps)) # Protect against division by zero
-        phi = np.arctan2(py, px)
-
-        #Get DR     dim=[Njet, Nconst, Nconst]
-        deta = eta[:, :, None] - eta[:, None, :]
-        dphi = phi[:, :, None] - phi[:, None, :]
-        dphi = np.arctan2(np.sin(dphi), np.cos(dphi)) # Wrap into (-pi, pi]
-        DR = np.sqrt(deta**2 + dphi**2) 
-
-        #get the energy-weight part pt*pt/jet   dim=# [Njet, Nconst, Nconst]
-        e_weights = ( pt[:, :, None] * pt[:, None, :] / (jet_pt[:, None, None]**2+eps))
-
-        #Mask the upper-triangle and plot   dim=[Njet, Npairs]
+        #The pair arrays are [Njet, Nconst, Nconst], so accumulate the histograms over chunks of jets to bound memory
+        hists={name: np.zeros(len(edges)-1) for name, edges in binnings.items()}
         triangle_mask = np.triu(np.ones((jets.shape[1], jets.shape[1]), dtype=bool),k=1)
+        for start in range(0, len(jets), chunk_size):
+            chunk = jets[start:start+chunk_size]
 
-        #Mask the padded constituents [Njet, Nconst]
-        const_mask = jets[..., 0] > -1
+            # slice 4-vectors   dim=[Njet, Nconst], padded values set to zero for numerical safety
+            const_mask = (chunk[..., 0] > -1) & np.all(np.isfinite(chunk), axis=-1) & (np.max(np.abs(chunk), axis=-1) < 1e6)
+            px = np.where(const_mask, chunk[..., 1], 0.0)
+            py = np.where(const_mask, chunk[..., 2], 0.0)
+            pz = np.where(const_mask, chunk[..., 3], 0.0)
 
-        #make the combined mash with the
-        mask = ( const_mask[:, :, None] & const_mask[:, None, :] & triangle_mask[None, :, :])
+            pt = np.sqrt(px**2 + py**2)
+            p = np.sqrt(px**2 + py**2 + pz**2)
+            jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Njet]
+            eta = 0.5 * np.log((p + pz + eps)/(p - pz + eps)) # Protect against division by zero
+            phi = np.arctan2(py, px)
 
+            #Only the real pairs i<j are kept, so build them from the masked indices   dim=[Npairs]
+            mask = const_mask[:, :, None] & const_mask[:, None, :] & triangle_mask[None, :, :]
+            jet_idx, i_idx, j_idx = np.nonzero(mask)
+            deta = eta[jet_idx, i_idx] - eta[jet_idx, j_idx]
+            dphi = phi[jet_idx, i_idx] - phi[jet_idx, j_idx]
+            dphi = np.arctan2(np.sin(dphi), np.cos(dphi)) # Wrap into (-pi, pi]
+            DR = np.sqrt(deta**2 + dphi**2)
+            e_weights = pt[jet_idx, i_idx] * pt[jet_idx, j_idx] / (jet_pt[jet_idx]**2 + eps)
+
+            for name, edges in binnings.items():
+                hists[name] += np.histogram(DR, bins=edges, weights=e_weights)[0]
+
+        hists["EEC_logx"] = hists["EEC_logx"] / np.diff(binnings["EEC_logx"])
         for name, edges in binnings.items():
-            hist, _ = np.histogram(DR[mask].ravel(), bins=edges, weights=e_weights[mask].ravel())
-            if name == "EEC_logx": hist = hist / np.diff(edges)
-            figs[name][1].stairs(hist, edges, linestyle=linestyles[ii], label=labels[ii], color=f"C{ii}")
-            if name == "EEC": EEC.append(hist)
+            figs[name][1].stairs(hists[name], edges, linestyle=linestyles[ii], label=labels[ii], color=f"C{ii}")
+        EEC.append(hists["EEC"])
 
     if results: results["EEC_chi2_dof"]=np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC)
     print("EEC_chi2_dof",np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC))

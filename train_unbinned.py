@@ -47,12 +47,15 @@ def evaluate_loss(model,args,X,mask=None,c=None):
     return loss,w.sum()
 
   #Auto-regressive models
-  if args.architecture=="Transformer" or args.architecture=="MDN":
+  if args.architecture=="Transformer" or args.architecture=="MDN" or args.architecture=="MDN-tree":
     inputs = F.pad(input=X[:, :-1, :], pad=(0,0,1,0), mode='constant', value=0) #X[:, :-1, :]   # all but last, with a 0 start token at front #pad=pad(left, right, top, bottom))
     targets = X # the whole f-vector
     pred = model(inputs,c)       # (batch, seq_len-1, feature_dim)
 
-    if args.architecture=="MDN":
+    if args.architecture=="MDN-tree":
+        w = w*(~mask).float()  #Normalise by the real (unpadded) nodes, not all the padded slots of the max-length tree
+        loss = (model.nll_loss(pred, targets, mask)*w).sum()
+    elif args.architecture=="MDN":
         loss = (model.nll_loss(pred, targets, mask)*w).sum()
     else:
         loss = (model.mse_loss(pred, targets, mask)*w).sum()
@@ -176,7 +179,8 @@ if __name__ == "__main__":
     if args.conditional:
         cond_shape=jet_example.shape
         input_example["c"]=jet_example
-    if args.multi_loss and args.architecture!="Transformer" and args.architecture!="MDN": 
+    autoregressive = args.architecture in ("Transformer", "MDN", "MDN-tree")
+    if args.multi_loss and not autoregressive:
         input_example["pad_mask"]=mask_example
     if args.multi_loss:
         mask_shape=mask_example.shape
@@ -196,12 +200,12 @@ if __name__ == "__main__":
     print("Input shape,",X_shape, flush=True)
     if args.conditional: 
         print("Conditioning shape,", cond_shape, flush=True)
-    if args.multi_loss and args.architecture!="Transformer" and args.architecture!="MDN":
+    if args.multi_loss and not autoregressive:
         print("Mask shape,",mask_shape, flush=True)
     if args.architecture=="NF" or args.architecture=="Diffusion" or args.architecture=="SDE" or args.architecture=="CNF" or args.architecture=="FM":
       modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"], mode="train")
       print("Output shape,", model(**input_example).shape,flush=True)
-    elif args.architecture=="Transformer" or args.architecture=="MDN":
+    elif autoregressive:
       modelstats=summary(model, input_data=input_example, col_names=["input_size","output_size","num_params","params_percent","mult_adds","trainable"])
       if args.conditional:
           output_example=model(**input_example)
@@ -234,6 +238,7 @@ if __name__ == "__main__":
     # Training loop
     # ---------------------------------------------------------------------
     #Loop over epochs
+    train_time = test_time = None
     for epoch in range(start_epoch, args.epochs):
       print(f"\nEpoch {epoch+1}\n-------------------------------", flush=True)
       starttime=time.time()
@@ -253,7 +258,7 @@ if __name__ == "__main__":
         training_info["test_losses"].append(test_loss)
         test_time=(time.time()-starttime)/60
 
-      except NonFiniteLossError as err:
+      except (NonFiniteLossError, AssertionError) as err: #the MDN forward asserts its outputs are finite
         print(f"Stopping due to non-finite value: {err}", flush=True)
         training_info["stopped_nonfinite"] = True
         break
@@ -265,9 +270,9 @@ if __name__ == "__main__":
       if improved:
         training_info["best_loss"]=best_metric
         training_info["best_epoch"]=epoch
-        patience_counter=0
+        training_info["patience_counter"]=0
       else:
-        patience_counter+=1
+        training_info["patience_counter"]+=1
 
       #Step the scheduler
       helpers.step_scheduler(scheduler, args, metric=best_metric)
@@ -276,7 +281,7 @@ if __name__ == "__main__":
       helpers.save_checkpoint(args, model, epoch, improved, optimizer=optimizer, scheduler=scheduler, training_info=training_info)
 
       #early stopping
-      if patience_counter>=args.patience:
+      if training_info["patience_counter"]>=args.patience:
         print("Early stopping", flush=True)
         break
 
