@@ -1,4 +1,5 @@
 import os,sys
+import json
 import time
 import inspect
 #os.environ.setdefault("MPLCONFIGDIR", os.path.join("/tmp", f"matplotlib-{os.environ.get('USER', 'user')}"))
@@ -17,6 +18,7 @@ import fastjet
 import torch
 
 import helpers
+import helpers_lundtree
 
 # ---------------------------------------------------------------------
 # Support functions
@@ -221,8 +223,9 @@ def hist_with_ratio(ax, rax, data_list, labels, linestyles, bin_range, xlabel, b
     '''
     Histograms of data_list on ax, and their ratio to data_list[0] on rax (placed underneath).
     The grey band on the ratio panel is the Poisson uncertainty of the reference.
+    bins is a number of equal bins over bin_range, or an array of bin edges.
     '''
-    edges = np.linspace(bin_range[0], bin_range[1], bins + 1)
+    edges = np.asarray(bins, dtype=float) if np.ndim(bins) else np.linspace(bin_range[0], bin_range[1], bins + 1)
 
     #Make main histogram
     counts = [ax.hist(d, bins=edges, histtype="step", color=f"C{jj}", linestyle=linestyles[jj], label=labels[jj])[0] for jj, d in enumerate(data_list)]
@@ -319,7 +322,14 @@ def lr_plot(lr_history, out_dir=""):
 # ---------------------------------------------------------------------
 # Main plots
 # ---------------------------------------------------------------------
-def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="./Plots/", name="projection", unavailable_notes=None):
+# x-axis labels of each feature in the flat inputs, per input format
+PROJECTION_LABELS = {
+    "ktdr": [r"$\log(k_t)$", r"$\log(1/\Delta R)$"],
+    "4vec": [r"$E$ [GeV]", r"$p_x$ [GeV]", r"$p_y$ [GeV]", r"$p_z$ [GeV]"],
+    "relvec": [r"$p_T$ fraction", r"$\Delta\eta$", r"$\Delta\phi$"],
+}
+
+def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="./Plots/", name="projection", unavailable_notes=None, feature_labels=None):
 
     #Make ouput directory if needed
     if not os.path.exists(out_dir):
@@ -337,16 +347,65 @@ def projection_plot(inputs,labels=["original","generated","predicted"],out_dir="
             mins[ii]=min(mins[ii],np.min(inputs[jj][:,ii]))
             maxs[ii]=max(maxs[ii],np.max(inputs[jj][:,ii]))
 
-    #make plot
-    fig, axs = plt.subplots(Ndim,1,figsize=(8.0,8.0))
+    #make plot, one row per feature
+    fig, axs = plt.subplots(Ndim,1,figsize=(8.0,max(8.0,2.4*Ndim)),constrained_layout=True)
     if Ndim==1: axs=[axs]
     for ii in range(Ndim):
         for jj in range(Nin):
             axs[ii].hist(inputs[jj][:,ii],bins=20,range=[mins[ii],maxs[ii]],histtype="step",density=False,linestyle=linestyles[jj],label=labels[jj])
         if ii==0: axs[0].legend()
         axs[ii].set_yscale("log")
+        axs[ii].set_xlabel(feature_labels[ii] if feature_labels is not None and ii < len(feature_labels) else f"feature {ii}")
+        axs[ii].set_ylabel("Counts")
 
     #Add some notes if needed
+    if unavailable_notes:
+        note_text = "Unavailable:\n" + "\n".join(f"{label}: {reason}" for label, reason in unavailable_notes)
+        fig.text(0.98, 0.5, note_text, ha="right", va="center", fontsize=8)
+
+    fig.savefig(os.path.join(out_dir,name+".png"))
+    fig.savefig(os.path.join(out_dir,name+".pdf"))
+    plt.close(fig)
+    print(f"Plotting projections to {out_dir}/{name}.pdf")
+
+def lundtree_projection_plot(inputs, labels=["original","generated","predicted"], out_dir="./Plots/", name="projection", unavailable_notes=None):
+    """
+    Projections of flat physical lund-tree tokens [Ntokens, Nfeat+1]. Each feature is histogrammed over splitting nodes only
+    (leaves and padding carry placeholder values), and a separate panel compares the fraction of split, leaf and padding tokens.
+    """
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+
+    linestyles=["-","--","-.",":"]
+    Nfeat=len(helpers_lundtree.FEATURE_LABELS)
+    feature_labels=helpers_lundtree.FEATURE_LABELS
+    splits=[p[p[:,-1]==1] for p in inputs]
+
+    fig, axs = plt.subplots(Nfeat+1,1,figsize=(8.0,2.4*(Nfeat+1)),constrained_layout=True)
+
+    #Feature shapes of the splitting nodes, normalized per split (the node-type panel compares the number of splits)
+    for ii in range(Nfeat):
+        circular = ii == helpers_lundtree.VARPHI
+        lo,hi = (-np.pi,np.pi) if circular else (min(np.min(p[:,ii]) for p in splits), max(np.max(p[:,ii]) for p in splits))
+        for jj,p in enumerate(splits):
+            axs[ii].hist(p[:,ii],bins=40,range=[lo,hi],density=True,histtype="step",linestyle=linestyles[jj],label=labels[jj])
+        if circular:
+            axs[ii].set_ylim(bottom=0) #nearly flat, a log axis would exaggerate few-percent differences
+        else:
+            axs[ii].set_yscale("log")
+        axs[ii].set_xlabel(feature_labels[ii]+" (splitting nodes)")
+        axs[ii].set_ylabel("Density per split")
+    axs[0].legend()
+
+    #Node-type proportions over all tokens
+    ax=axs[-1]
+    for jj,p in enumerate(inputs):
+        ax.hist(p[:,-1],bins=[-1.5,-0.5,0.5,1.5],weights=np.full(len(p),1/len(p)),histtype="step",linestyle=linestyles[jj],label=labels[jj])
+    ax.set_xticks([-1,0,1],["padding","leaf","split"])
+    ax.set_xlabel("node type")
+    ax.set_ylabel("Fraction of tokens")
+    ax.legend()
+
     if unavailable_notes:
         note_text = "Unavailable:\n" + "\n".join(f"{label}: {reason}" for label, reason in unavailable_notes)
         fig.text(0.98, 0.5, note_text, ha="right", va="center", fontsize=8)
@@ -573,66 +632,154 @@ def lund_plot_ratio(
     print(f"Plotting lund-plane diff to {out_dir}/{name}.pdf")
 
 
-def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicted"], out_dir="./Plots/",):
+def EEC_plot(plot_inputs, results=None, labels=["original","generated","predicted"], out_dir="./Plots/", chunk_size=1000,):
     '''
     EEC(R) = 1/pt(jet) sum pt_i pt_j delta(R - R_ij)
+    Drawn twice: linear R bins (EEC) and logarithmic R bins (EEC_logx), the latter divided by each bin's width in R.
     '''
     linestyles=["-","--","-.",":"]
-
-    fig, ax = plt.subplots(1,figsize=(8.0,8.0))
+    binnings = {"EEC": np.linspace(0, 1.2, 101), "EEC_logx": np.geomspace(1e-4, 1.2, 101)}
+    figs = {name: plt.subplots(1,figsize=(8.0,8.0)) for name in binnings}
 
     eps=1e-12
     EEC=[]
     for ii,jets in enumerate(plot_inputs):
-        # slice 4-vectors   dim=[Njet, Nconst]
-        const_mask = (jets[..., 0] > -1) & np.all(np.isfinite(jets), axis=-1) & (np.max(np.abs(jets), axis=-1) < 1e6) # Set padded values to zero for numerical safety
-        E  = np.where(const_mask, jets[..., 0], 0.0)
-        px = np.where(const_mask, jets[..., 1], 0.0)
-        py = np.where(const_mask, jets[..., 2], 0.0)
-        pz = np.where(const_mask, jets[..., 3], 0.0)
-
-        pt = np.sqrt(px**2 + py**2)
-        p = np.sqrt(px**2 + py**2 + pz**2)
-        jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Njet]
-
-        # Protect against division by zero
-        eta = 0.5 * np.log((p + pz + eps)/(p - pz + eps)) # Protect against division by zero
-        phi = np.arctan2(py, px)
-
-        #Get DR     dim=[Njet, Nconst, Nconst]
-        deta = eta[:, :, None] - eta[:, None, :]
-        dphi = phi[:, :, None] - phi[:, None, :]
-        dphi = np.arctan2(np.sin(dphi), np.cos(dphi)) # Wrap into (-pi, pi]
-        DR = np.sqrt(deta**2 + dphi**2) 
-
-        #get the energy-weight part pt*pt/jet   dim=# [Njet, Nconst, Nconst]
-        e_weights = ( pt[:, :, None] * pt[:, None, :] / (jet_pt[:, None, None]**2+eps))
-
-        #Mask the upper-triangle and plot   dim=[Njet, Npairs]
+        #The pair arrays are [Njet, Nconst, Nconst], so accumulate the histograms over chunks of jets to bound memory
+        hists={name: np.zeros(len(edges)-1) for name, edges in binnings.items()}
         triangle_mask = np.triu(np.ones((jets.shape[1], jets.shape[1]), dtype=bool),k=1)
+        for start in range(0, len(jets), chunk_size):
+            chunk = jets[start:start+chunk_size]
 
-        #Mask the padded constituents [Njet, Nconst]
-        const_mask = jets[..., 0] > -1
+            # slice 4-vectors   dim=[Njet, Nconst], padded values set to zero for numerical safety
+            const_mask = (chunk[..., 0] > -1) & np.all(np.isfinite(chunk), axis=-1) & (np.max(np.abs(chunk), axis=-1) < 1e6)
+            px = np.where(const_mask, chunk[..., 1], 0.0)
+            py = np.where(const_mask, chunk[..., 2], 0.0)
+            pz = np.where(const_mask, chunk[..., 3], 0.0)
 
-        #make the combined mash with the
-        mask = ( const_mask[:, :, None] & const_mask[:, None, :] & triangle_mask[None, :, :])
+            pt = np.sqrt(px**2 + py**2)
+            p = np.sqrt(px**2 + py**2 + pz**2)
+            jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Njet]
+            eta = 0.5 * np.log((p + pz + eps)/(p - pz + eps)) # Protect against division by zero
+            phi = np.arctan2(py, px)
 
-        hist, edges, _ = ax.hist( DR[mask].ravel(), bins=100, range=(0,1.2), weights=e_weights[mask].ravel(),histtype="step",density=False,linestyle=linestyles[ii],label=labels[ii])
-        EEC.append(hist)
+            #Only the real pairs i<j are kept, so build them from the masked indices   dim=[Npairs]
+            mask = const_mask[:, :, None] & const_mask[:, None, :] & triangle_mask[None, :, :]
+            jet_idx, i_idx, j_idx = np.nonzero(mask)
+            deta = eta[jet_idx, i_idx] - eta[jet_idx, j_idx]
+            dphi = phi[jet_idx, i_idx] - phi[jet_idx, j_idx]
+            dphi = np.arctan2(np.sin(dphi), np.cos(dphi)) # Wrap into (-pi, pi]
+            DR = np.sqrt(deta**2 + dphi**2)
+            e_weights = pt[jet_idx, i_idx] * pt[jet_idx, j_idx] / (jet_pt[jet_idx]**2 + eps)
+
+            for name, edges in binnings.items():
+                hists[name] += np.histogram(DR, bins=edges, weights=e_weights)[0]
+
+        hists["EEC_logx"] = hists["EEC_logx"] / np.diff(binnings["EEC_logx"])
+        for name, edges in binnings.items():
+            figs[name][1].stairs(hists[name], edges, linestyle=linestyles[ii], label=labels[ii], color=f"C{ii}")
+        EEC.append(hists["EEC"])
 
     if results: results["EEC_chi2_dof"]=np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC)
     print("EEC_chi2_dof",np.divide((EEC[1]-EEC[0])**2, EEC[0], out=None, where= EEC[0]>0).sum()/len(EEC))
 
-    ax.set_xlabel("R")
-    ax.set_ylabel("EEC(R)")
-    ax.set_yscale("log")
-    ax.legend()
+    for name, (fig, ax) in figs.items():
+        ax.set_xlabel("R")
+        ax.set_ylabel("EEC(R)")
+        ax.set_yscale("log")
+        if name == "EEC_logx": ax.set_xscale("log")
+        ax.legend()
+        fig.savefig(os.path.join(out_dir,name+".png"))
+        fig.savefig(os.path.join(out_dir,name+".pdf"))
+        plt.close(fig)
+        print(f"Plotting EEC to {out_dir}/{name}.pdf")
 
-    name = "EEC"
-    fig.savefig(os.path.join(out_dir,name+".png"))
-    fig.savefig(os.path.join(out_dir,name+".pdf"))
-    plt.close(fig)
-    print(f"Plotting EEC to {out_dir}/{name}.pdf")
+    return
+
+def E3C_plot(plot_inputs, results=None, labels=["original","generated","predicted"], out_dir="./Plots/", max_triplets=2e7,):
+    '''
+    Projected 3-point energy correlator, same conventions as EEC_plot:
+    E3C(R_L) = 1/pt(jet)^3 sum_{i<j<k} pt_i pt_j pt_k delta(R_L - max(R_ij, R_ik, R_jk))
+    The triplets are [Njet, Nconst, Nconst, Nconst], so jets are processed in chunks of similar multiplicity,
+    trimmed to the largest multiplicity in the chunk and holding about max_triplets entries.
+    Drawn twice: linear R_L bins (E3C) and logarithmic R_L bins (E3C_logx), the latter divided by each bin's width in R_L.
+    '''
+    linestyles=["-","--","-.",":"]
+    binnings = {"E3C": np.linspace(0, 1.2, 101), "E3C_logx": np.geomspace(1e-4, 1.2, 101)}
+    figs = {name: plt.subplots(1,figsize=(8.0,8.0)) for name in binnings}
+
+    eps=1e-12
+    E3C={name: [] for name in binnings}
+    for ii,jets in enumerate(plot_inputs):
+        hists={name: np.zeros(len(edges)-1) for name, edges in binnings.items()}
+
+        #Move the valid constituents to the front of each jet and order the jets by multiplicity
+        valid = (jets[..., 0] > -1) & np.all(np.isfinite(jets), axis=-1) & (np.max(np.abs(jets), axis=-1) < 1e6)
+        front = np.argsort(~valid, axis=1, kind="stable")
+        jets = np.take_along_axis(jets, front[..., None], axis=1)
+        multiplicity = valid.sum(axis=1)
+        order = np.argsort(multiplicity)
+        jets, multiplicity = jets[order], multiplicity[order]
+
+        start = 0
+        while start < len(jets):
+            #Grow the chunk while it stays within the triplet budget at its largest multiplicity
+            stop = start + 1
+            while stop < len(jets) and (stop + 1 - start) * max(multiplicity[stop], 1)**3 <= max_triplets:
+                stop += 1
+            Nconst = max(int(multiplicity[stop-1]), 1)
+            chunk = jets[start:stop, :Nconst]
+            start = stop
+            triangle_mask = np.zeros((Nconst, Nconst, Nconst), dtype=bool) #i<j<k
+            ii_, jj_, kk_ = np.meshgrid(np.arange(Nconst), np.arange(Nconst), np.arange(Nconst), indexing="ij")
+            triangle_mask[(ii_ < jj_) & (jj_ < kk_)] = True
+
+            # slice 4-vectors   dim=[Njet, Nconst], padded values set to zero for numerical safety
+            const_mask = (chunk[..., 0] > -1) & np.all(np.isfinite(chunk), axis=-1) & (np.max(np.abs(chunk), axis=-1) < 1e6)
+            px = np.where(const_mask, chunk[..., 1], 0.0)
+            py = np.where(const_mask, chunk[..., 2], 0.0)
+            pz = np.where(const_mask, chunk[..., 3], 0.0)
+
+            pt = np.sqrt(px**2 + py**2)
+            p = np.sqrt(px**2 + py**2 + pz**2)
+            jet_pt = np.sqrt(px.sum(axis=1)**2 + py.sum(axis=1)**2) #dim=[Njet]
+            eta = 0.5 * np.log((p + pz + eps)/(p - pz + eps))
+            phi = np.arctan2(py, px)
+
+            #Get DR     dim=[Njet, Nconst, Nconst]
+            deta = eta[:, :, None] - eta[:, None, :]
+            dphi = np.arctan2(np.sin(phi[:, :, None] - phi[:, None, :]), np.cos(phi[:, :, None] - phi[:, None, :]))
+            DR = np.sqrt(deta**2 + dphi**2)
+
+            #Largest side of each triplet   dim=[Njet, Nconst, Nconst, Nconst]
+            RL = np.maximum(np.maximum(DR[:, :, :, None], DR[:, :, None, :]), DR[:, None, :, :])
+            weights = pt[:, :, None, None] * pt[:, None, :, None] * pt[:, None, None, :] / (jet_pt[:, None, None, None]**3 + eps)
+            mask = const_mask[:, :, None, None] & const_mask[:, None, :, None] & const_mask[:, None, None, :] & triangle_mask[None]
+
+            for name, edges in binnings.items():
+                hists[name] += np.histogram(RL[mask], bins=edges, weights=weights[mask])[0]
+
+        hists["E3C_logx"] /= np.diff(binnings["E3C_logx"])
+        for name, edges in binnings.items():
+            figs[name][1].stairs(hists[name], edges, linestyle=linestyles[ii], label=labels[ii], color=f"C{ii}")
+            E3C[name].append(hists[name])
+
+    peaks = {name: max(float(np.max(h)) for h in hs) for name, hs in E3C.items()}
+    E3C = E3C["E3C"]
+    if results: results["E3C_chi2_dof"]=np.divide((E3C[1]-E3C[0])**2, E3C[0], out=None, where= E3C[0]>0).sum()/len(E3C)
+    print("E3C_chi2_dof",np.divide((E3C[1]-E3C[0])**2, E3C[0], out=None, where= E3C[0]>0).sum()/len(E3C))
+
+    for name, (fig, ax) in figs.items():
+        ax.set_xlabel(r"$R_L$")
+        ax.set_ylabel(r"E3C($R_L$)")
+        ax.set_yscale("log")
+        if name == "E3C_logx": ax.set_xscale("log")
+        #Bins holding only vanishingly small triplet weights would otherwise stretch the log axis by tens of decades
+        if peaks[name] > 0: ax.set_ylim(bottom=peaks[name]*1e-6)
+        ax.legend()
+        fig.savefig(os.path.join(out_dir,name+".png"))
+        fig.savefig(os.path.join(out_dir,name+".pdf"))
+        plt.close(fig)
+        print(f"Plotting E3C to {out_dir}/{name}.pdf")
 
     return
 
@@ -643,7 +790,7 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
 
     linestyles=["-","--","-.",":"]
     Nplots=12
-    Ncols=3
+    Ncols=6
     Nrows = int(np.ceil(Nplots/Ncols))
 
     fig = plt.figure(figsize=(4.0*Ncols, 5.0*Nrows))
@@ -746,33 +893,30 @@ def highlevel_plot(plot_inputs, results=None, labels=["original","generated","pr
 
     #Plot stuff
     for ip, xlabel in zip(range(0,Nplots), [r"$p_{T}$", r"$m$",r"$\eta$",r"$\Delta\phi$",r"$\Delta\eta$",r"$\Delta R(Constituent, jet-axis)$",r"Multiplicity",r"$\tau_{21}$", r"$\tau_{32}$", r"$D_2^{(\beta=1)}$", r"$m_{SD}$", r"$log(m^2/p_{T}^2)$"]):
-        if xlabel==r"Multiplicity":
-            hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (0, maxs[ip]), xlabel, bins=int(np.round(maxs[ip])))
-        else:
-            hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel)
+        #Integer multiplicity gets one bin per value, equal-width bins would alternately catch one and two values
+        bins = np.arange(mins[ip]-0.5, maxs[ip]+1.5) if xlabel==r"Multiplicity" else 20
+        hist_with_ratio(axs_list[ip], rax_list[ip], plots[ip], labels, linestyles, (mins[ip], maxs[ip]), xlabel, bins=bins)
 
     name = "highlevel"
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir,name+".png"))
     fig.savefig(os.path.join(out_dir,name+".pdf"))
     plt.close(fig)
-    print(f"Plotting high-level to {out_dir}/{name}.pdf")
+    print(f"Plotting high-level observables to {out_dir}/{name}.pdf")
 
     return
 
 # ---------------------------------------------------------------------
 # Main validation function which runs all the plots
 # ---------------------------------------------------------------------
-def validate_unbinned_models(models, test_loader, args, results=None, labels=None, unavailable_model_reasons=None,):
+def generate_validation_samples(models, test_loader, args, results=None, unavailable_model_reasons=None,):
+  """
+  Generate up to args.validation_size samples with each model, conditioned on the test_loader jets.
+  Returns the original inputs, the generated samples per model (None if unavailable), the jet conditioning
+  (None without jets) and the reason each model is unavailable (None if available).
+  """
 
   device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device is None else args.device
-
-  if labels is None:
-    labels = ["original"]
-    if len(models) == 1:
-      labels.append("generated")
-    else:
-      labels.extend([f"generated_{ii}" for ii in range(len(models))])
 
   with torch.inference_mode():
       # ---------------------------------------------------------------------
@@ -844,10 +988,7 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
 
           #Generate the image
           try:
-              if args.conditional:
-                  generated_seq = model.generate(out_dimensions=X.shape,c=jet)
-              else:
-                  generated_seq = model.generate(out_dimensions=X.shape)
+              generated_seq = model.generate(out_dimensions=X.shape, c=jet) if args.conditional else model.generate(out_dimensions=X.shape)
 
           except (RuntimeError, ValueError) as err: #ValueError: e.g. VQGPT feature/conditioning mismatch with the tokenizer
             reason = f"generation failed: {err}"
@@ -897,148 +1038,243 @@ def validate_unbinned_models(models, test_loader, args, results=None, labels=Non
       if original is None:
           raise ValueError("No validation batches were plotted")
 
-      active_labels = [labels[0]]
-      active_labels.extend( labels[imodel + 1] for imodel, g in enumerate(generated) if g is not None and imodel + 1 < len(labels))
-      unavailable_notes = [ ( labels[imodel + 1] if imodel + 1 < len(labels) else f"generated_{imodel}", reason,) for imodel, reason in enumerate(unavailable_reasons) if reason is not None ]
+      jet_list = jet_list if "jet_list" in locals() else None
+      return original, generated, jet_list, unavailable_reasons
 
-      #Save some dim info
-      Njet=original.shape[0]
-      Nconst=original.shape[1]
+def validate_unbinned_models(models, test_loader, args, results=None, labels=None, unavailable_model_reasons=None,):
+  """Generate samples with each model, save them to the plot directory and make all validation plots."""
+  if labels is None:
+    labels = ["original"]
+    if len(models) == 1:
+      labels.append("generated")
+    else:
+      labels.extend([f"generated_{ii}" for ii in range(len(models))])
 
-      #Make flat lists for plots, now is of dimension [N plot, Njet*Nconst , N features]
-      original_np = original.numpy() #numpy shares memory but can delete original if want
-      generated_np = [g.numpy() for g in generated]
+  original, generated, jet_list, unavailable_reasons = generate_validation_samples(models, test_loader, args, results, unavailable_model_reasons)
+
+  #Keep the samples, so the plots can be remade with validate_unbinned.py --from-samples without regenerating
+  if not args.validation_samples: args.validation_samples="validation_samples.npz"
+  save_validation_samples(os.path.join(args.plot_dir, args.validation_samples), original, generated, jet_list, labels, unavailable_reasons, args)
+  plot_validation_samples(original, generated, jet_list, args, labels, unavailable_reasons, results)
+
+def save_validation_samples(path, original, generated, jet_list, labels, unavailable_reasons, args=None):
+  """Store the validation inputs, generated samples and run arguments of validate_unbinned_models in a compressed .npz file."""
+  os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+  arrays = {"original": original.numpy(), 
+            "labels": np.array(labels, dtype=object),
+            "args": np.array(json.dumps(vars(args) if args is not None else {}, default=str)),
+            "unavailable_reasons": np.array([r if r is not None else "" for r in unavailable_reasons], dtype=object)}
+  for imodel, g in enumerate(generated):
+    if g is not None: arrays[f"generated_{imodel}"] = g.numpy()
+  if jet_list is not None: arrays["jet_list"] = jet_list.numpy()
+  np.savez_compressed(path, **arrays)
+  print(f"Saved validation samples to {path}", flush=True)
+
+def load_validation_samples(path):
+  """Inverse of save_validation_samples, returns the keyword arguments of plot_validation_samples (except args/results)."""
+  data = np.load(path, allow_pickle=True)
+  reasons = [r if r else None for r in data["unavailable_reasons"].tolist()]
+  return {
+      "original": torch.from_numpy(data["original"]),
+      "generated": [torch.from_numpy(data[f"generated_{i}"]) if f"generated_{i}" in data else None for i in range(len(reasons))],
+      "jet_list": torch.from_numpy(data["jet_list"]) if "jet_list" in data else None,
+      "labels": data["labels"].tolist(),
+      "unavailable_reasons": reasons,
+      "saved_args": json.loads(str(data["args"])) if "args" in data else {},
+  }
+
+def lundtree_validation_plots(plot_inputs, jet_list, args, labels, results=None):
+  """
+  Lund-tree validation plots of physical tokens [Njet, Nnodes, Nfeat+1] per sample: reconstruct the constituents for the
+  EEC, E3C and high-level plots, and return the primary-plane [log(kt), log(1/DR)] points per sample.
+  """
+  #The jet direction and pT come from the conditioning jet
+  root_kinematics = jet_list.numpy().astype(np.float64)[:, :3]
+
+  #Reconstruct the constituent 4-vectors for the jet-level plots
+  summaries = [helpers_lundtree.summarize_trees(p, root_kinematics) for p in plot_inputs]
+  for summary, label in zip(summaries, labels):
+    print(f"{label}: {summary['failed']}/{len(summary['tokens'])} trees could not be reconstructed", flush=True)
+    if results and label != labels[0]: results["frac_unreconstructed"] = summary["failed"]/len(summary["tokens"])
+  constituent_inputs = [summary["constituents"] for summary in summaries]
+  EEC_plot(constituent_inputs, results, labels=labels, out_dir=args.plot_dir)
+  E3C_plot(constituent_inputs, results, labels=labels, out_dir=args.plot_dir)
+  highlevel_plot(constituent_inputs, results, labels=labels, out_dir=args.plot_dir)
+
+  return [summary["primary"] for summary in summaries]
+
+def plot_validation_samples(original, generated, jet_list, args, labels, unavailable_reasons, results=None):
+  """Make all validation plots from the original and generated samples, see validate_unbinned_models."""
+  with torch.inference_mode():
+    active_labels = [labels[0]]
+    active_labels.extend( labels[imodel + 1] for imodel, g in enumerate(generated) if g is not None and imodel + 1 < len(labels))
+    unavailable_notes = [ ( labels[imodel + 1] if imodel + 1 < len(labels) else f"generated_{imodel}", reason,) for imodel, reason in enumerate(unavailable_reasons) if reason is not None ]
+
+    #Save some dim info
+    Njet=original.shape[0]
+    Nconst=original.shape[1]
+
+    #Make flat lists for plots, now is of dimension [N plot, Njet*Nconst , N features]
+    original_np = original.numpy() #numpy shares memory but can delete original if want
+    generated_np = [g.numpy() for g in generated]
+    if args.input_format=="lundtree":
+      #Physical [features..., split] tokens without the context columns
+      to_physical = lambda t: helpers_lundtree.physical_tokens(t).astype(t.dtype)
+      original_np = to_physical(original_np)
+      generated_np = [to_physical(g) for g in generated_np]
+    plot_inputs = [original_np] + generated_np
+    if not args.preprocess: fix_badjets(args, plot_inputs, results) #if want to fix the badjets
+    flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
+
+    # ---------------------------------------------------------------------
+    # Undo pre-processing
+    # ---------------------------------------------------------------------
+    if args.preprocess:
+      #make plot of original regression
+      projection_plot(
+        flat_plot_inputs,
+        labels=active_labels,
+        out_dir=args.plot_dir,
+        name="projection_preprocess",
+        feature_labels=[f"{label} (preprocessed)" for label in PROJECTION_LABELS.get(args.input_format, [])],
+        unavailable_notes=unavailable_notes,
+      )
+
+      #Clear memory and remake
+      del original_np
+      for g in generated_np: del g
+      for p in plot_inputs: del p
+
+      original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
+      generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
       plot_inputs = [original_np] + generated_np
-      if not args.preprocess: fix_badjets(args, plot_inputs, results) #if want to fix the badjets
+      fix_badjets(args, plot_inputs, results) #if want to fix the badjets
       flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
 
-      # ---------------------------------------------------------------------
-      # Undo pre-processing
-      # ---------------------------------------------------------------------
-      if args.preprocess:
-        #make plot of original regression
-        projection_plot(
-          flat_plot_inputs,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          name="projection_preprocess",
-          unavailable_notes=unavailable_notes,
-        )
+      #make a quick dump
+      print("Input example removing preprocess")
+      print(original_np[0])
+      print("Generate example removing preprocess")
+      print(generated_np[0][0])
 
-        #Clear memory and remake
-        del original_np
-        for g in generated_np: del g
-        for p in plot_inputs: del p
-
-        original_np=helpers.undo_preprocess(original,args.input_format,args.preprocess).numpy()
-        generated_np = [helpers.undo_preprocess(g,args.input_format,args.preprocess).numpy() for g in generated]
-        plot_inputs = [original_np] + generated_np
-        fix_badjets(args, plot_inputs, results) #if want to fix the badjets
-        flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
-
-        #make a quick dump
-        print("Input example removing preprocess")
-        print(original_np[0])
-        print("Generate example removing preprocess")
-        print(generated_np[0][0])
-
-      # ---------------------------------------------------------------------
-      # Make the plots
-      # ---------------------------------------------------------------------
-      projection_plot(
+    # ---------------------------------------------------------------------
+    # Make the plots
+    # ---------------------------------------------------------------------
+    if args.input_format=="lundtree":
+      lundtree_projection_plot(
           flat_plot_inputs,
           labels=active_labels,
           out_dir=args.plot_dir,
           name="projection",
           unavailable_notes=unavailable_notes,
       )
-
-      if args.input_format=="relvec":
-
-        #Clear memory and remake
-        for p in plot_inputs: del p
-
-        original_np=helpers.make_absolute_constituents(original_np,jet_list.numpy())
-        generated_np = [helpers.make_absolute_constituents(g,jet_list.numpy()) for g in generated_np]
-        plot_inputs = [original_np] + generated_np
-        flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
-
-        projection_plot(
+    else:
+      projection_plot(
           flat_plot_inputs,
           labels=active_labels,
           out_dir=args.plot_dir,
-          name="projection_4vec",
+          name="projection",
+          feature_labels=PROJECTION_LABELS.get(args.input_format),
           unavailable_notes=unavailable_notes,
+      )
+
+    if args.input_format=="relvec":
+
+      #Clear memory and remake
+      for p in plot_inputs: del p
+
+      original_np=helpers.make_absolute_constituents(original_np,jet_list.numpy())
+      generated_np = [helpers.make_absolute_constituents(g,jet_list.numpy()) for g in generated_np]
+      plot_inputs = [original_np] + generated_np
+      flat_plot_inputs = [p.reshape(-1,p.shape[-1]) for p in plot_inputs]
+
+      projection_plot(
+        flat_plot_inputs,
+        labels=active_labels,
+        out_dir=args.plot_dir,
+        name="projection_4vec",
+        feature_labels=PROJECTION_LABELS["4vec"],
+        unavailable_notes=unavailable_notes,
+      )
+
+    if args.input_format=="4vec" or args.input_format=="relvec":
+        EEC_plot(
+          plot_inputs,
+          results,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+                )
+
+        E3C_plot(
+          plot_inputs,
+          results,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+                )
+
+        highlevel_plot(
+          plot_inputs,
+          results,
+          labels=active_labels,
+          out_dir=args.plot_dir,
+                )
+
+    #If 4-vec input recalculate the lund-plane
+    if args.input_format == "ktdr":
+      lund_inputs = flat_plot_inputs
+    elif args.input_format == "lundtree":
+      lund_inputs = lundtree_validation_plots(plot_inputs, jet_list, args, active_labels, results)
+    else:
+      #Free up some memory
+      for p in plot_inputs: del p
+      for p in flat_plot_inputs: del p
+
+      #remake lund-plane
+      starttime=time.time()
+      lund_original = helpers.make_lundplane(original_np) #return numpy array
+      lund_inputs = [lund_original.reshape(-1,2)]
+      print("Took %.2f min to make the lund-plane for %i jets"%((time.time()-starttime)/60,original_np.shape[0]), flush=True)
+      for generated in generated_np:
+        lund_generated = helpers.make_lundplane(generated) #FIXME missing chuncks maybe?
+        lund_inputs.append(lund_generated.reshape(-1,2))
+
+        #remake the projection plot
+        projection_plot(
+            lund_inputs,
+            labels=active_labels,
+            out_dir=args.plot_dir,
+            name="projection_lund",
+            feature_labels=PROJECTION_LABELS["ktdr"],
+            unavailable_notes=unavailable_notes,
         )
 
-      if args.input_format=="4vec" or args.input_format=="relvec":
-          EEC_plot(
-            plot_inputs,
-            results,
-            labels=active_labels,
-            out_dir=args.plot_dir,
-                  )
+      #Clear up more memory
+      del original_np
+      for g in generated_np: del g
 
-          highlevel_plot(
-            plot_inputs,
-            results,
-            labels=active_labels,
-            out_dir=args.plot_dir,
-                  )
+    lund_plot(
+        lund_inputs,
+        Njet=Njet,
+        labels=active_labels,
+        out_dir=args.plot_dir,
+        hist2d_xrange=args.hist2d_xrange,
+        hist2d_yrange=args.hist2d_yrange,
+        hist2d_bins=args.hist2d_bins,
+        hist2d_shape=args.hist2d_shape,
+        unavailable_notes=unavailable_notes,
+    )
 
-      #If 4-vec input recalculate the lund-plane
-      if args.input_format == "ktdr":
-        lund_inputs = flat_plot_inputs
-      else:
-        #Free up some memory
-        for p in plot_inputs: del p
-        for p in flat_plot_inputs: del p
-
-        #remake lund-plane
-        starttime=time.time()
-        lund_original = helpers.make_lundplane(original_np) #return numpy array
-        lund_inputs = [lund_original.reshape(-1,2)]
-        print("Took %.2f min to make the lund-plane for %i jets"%((time.time()-starttime)/60,original_np.shape[0]), flush=True)
-        for generated in generated_np:
-          lund_generated = helpers.make_lundplane(generated) #FIXME missing chuncks maybe?
-          lund_inputs.append(lund_generated.reshape(-1,2))
-
-          #remake the projection plot
-          projection_plot(
-              lund_inputs,
-              labels=active_labels,
-              out_dir=args.plot_dir,
-              name="projection_lund",
-              unavailable_notes=unavailable_notes,
-          )
-
-        #Clear up more memory
-        del original_np
-        for g in generated_np: del g
-
-      lund_plot(
-          lund_inputs,
-          Njet=Njet,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist2d_xrange=args.hist2d_xrange,
-          hist2d_yrange=args.hist2d_yrange,
-          hist2d_bins=args.hist2d_bins,
-          hist2d_shape=args.hist2d_shape,
-          unavailable_notes=unavailable_notes,
-      )
-
-      lund_plot_ratio(
-          lund_inputs,
-          results=results,
-          Njet=Njet,
-          labels=active_labels,
-          out_dir=args.plot_dir,
-          hist2d_xrange=args.hist2d_xrange,
-          hist2d_yrange=args.hist2d_yrange,
-          hist2d_bins=args.hist2d_bins,
-          hist2d_shape=args.hist2d_shape,
-          unavailable_notes=unavailable_notes,
-          min_reference_count=args.hist_ratio_min_count,
-          max_abs_diff=args.hist_ratio_vmax,
-      )
+    lund_plot_ratio(
+        lund_inputs,
+        results=results,
+        Njet=Njet,
+        labels=active_labels,
+        out_dir=args.plot_dir,
+        hist2d_xrange=args.hist2d_xrange,
+        hist2d_yrange=args.hist2d_yrange,
+        hist2d_bins=args.hist2d_bins,
+        hist2d_shape=args.hist2d_shape,
+        unavailable_notes=unavailable_notes,
+        min_reference_count=args.hist_ratio_min_count,
+        max_abs_diff=args.hist_ratio_vmax,
+    )

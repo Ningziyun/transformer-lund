@@ -10,6 +10,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 import fastjet
 import ljpHelpers
+import helpers_lundtree
 
 import models_generative
 
@@ -57,6 +58,32 @@ def make_lundplane(input_vec, pad_length=20):
   #pad the length
   lund_plane=np.asarray(lund_plane)
   return lund_plane
+
+# ---------------------------------------------------------------------
+# Make the full lund-tree
+# ---------------------------------------------------------------------
+def make_lundtree(input_vec, Nconst_max=100):
+  '''
+  Full Lund tree of the leading anti-kt jet, reclustered with C/A, see helpers_lundtree for the conventions.
+  Input is [Nevents, Nconstituents, 4-vecs] like make_lundplane, only the first Nconst_max constituents are used.
+  Returns the model tokens [Nevents, 2*Nconst_max-1, len(helpers_lundtree.TOKEN_NAMES)] padded with -1, and the
+  [Nevents, 4] jet [E, px, py, pz] the tree belongs to (its pt/eta/phi is the conditioning used for reconstruction).
+  '''
+
+  #Physical node features and split flags, padded out to the largest possible tree
+  Nnodes = 2*Nconst_max-1
+  features = np.zeros([input_vec.shape[0], Nnodes, len(helpers_lundtree.SPLIT_FEATURE_NAMES)], dtype=np.float32)
+  splits = np.full([input_vec.shape[0], Nnodes], -1, dtype=np.int8)
+  for ii in range(input_vec.shape[0]):
+    nodes = ljpHelpers.constituents_to_lund_tree(input_vec[ii][:Nconst_max])
+    features[ii, :len(nodes)] = [node[0] for node in nodes]
+    splits[ii, :len(nodes)] = [int(node[1]) for node in nodes]
+
+  #Encode into the model space and add the context of the next node, both need a walk over each tree
+  prepocessed, context = helpers_lundtree.preprocess__trees(features, splits)
+  tokens = np.concatenate([prepocessed, context, splits[..., None]], axis=-1).astype(np.float32)
+  tokens[splits == -1] = -1 #pad
+  return tokens
 
 # ---------------------------------------------------------------------
 # Converters between representations
@@ -283,6 +310,47 @@ class constit_relative_dataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.X)
 
+class lundtree_dataset(torch.utils.data.Dataset):
+    def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None, max_events=None):
+        super(lundtree_dataset, self).__init__()
+        self.n_features=len(helpers_lundtree.TOKEN_NAMES) #[split features, context of next node, split flag], see helpers_lundtree
+        self.pad_value=-1
+
+        self.add_mask=add_mask
+        self.preprocess=preprocess #NOTE: the tree is already preprocesses into the model space in lunddata.py
+        self.add_conditional=add_conditional
+
+        #NOTE: NConstituents is not used, a tree can't be truncated without breaking it. The size is set in lunddata.py
+        with h5py.File(file_path, "r") as f:
+            tree = f["lund_tree"]
+            self.X = np.stack([np.asarray(tree[k][:max_events], dtype=np.float32) for k in helpers_lundtree.TOKEN_NAMES], axis=-1)
+
+            #The jet the tree was built from (anti-kt R=1.0), not the constituent sum stored in "jet"
+            if self.add_conditional:
+                j = f["jet"]
+                jet = np.stack([np.asarray(j[k][:max_events], dtype=np.float64) for k in ["E","PX","PY","PZ"]], axis=-1)
+
+        #Mask which stores if padded. True/False=Padded/unpadded. Only the split flag is -1 for padding, -1 is a valid feature
+        if add_mask or self.add_conditional:
+            self.mask=self.X[...,-1]==self.pad_value
+
+        #Make the conditioning info, only [pt, eta, phi] since the tree fixes the mass and multiplicity
+        if self.add_conditional:
+            pt,eta,phi,m,_=jet_PtEtaPhiM(jet)
+            self.jet_data = np.concatenate([pt, eta, phi], axis=-1).astype(np.float32)
+
+    def __getitem__(self, index):
+        X = torch.from_numpy(self.X[index])
+        if self.add_mask and self.add_conditional:
+            return [X, torch.from_numpy(self.jet_data[index]), torch.from_numpy(self.mask[index])]
+        elif self.add_mask:
+            return [X, torch.from_numpy(self.mask[index])]
+        elif self.add_conditional:
+            return [X, torch.from_numpy(self.jet_data[index])]
+        return X
+
+    def __len__(self):
+        return len(self.X)
 
 def get_loader(filename, args):
     '''
@@ -311,8 +379,11 @@ def get_loader(filename, args):
     elif input_format=="relvec":
         add_conditional=True
         dataset = constit_relative_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
+    elif input_format=="lundtree":
+        add_conditional=True #like relvec, the jet is needed to reconstruct the constituents
+        dataset = lundtree_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
     else:
-       ValueError(f"No known input format {input_format}") 
+       raise ValueError(f"No known input format {input_format}")
 
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle)
     return loader
@@ -338,10 +409,11 @@ def format_input_args(args):
     multi_loss=config_get(args,"multi_loss",False)
     conditional=config_get(args,"conditional",False)
 
-    if (input_format=="relvec" and multi_loss) or (conditional and multi_loss):
+    needs_jet = input_format=="relvec" or input_format=="lundtree" #the loader always returns the jet for these
+    if (needs_jet and multi_loss) or (conditional and multi_loss):
         func_args["unpack_mask"]=True
         func_args["unpack_jet"]=True
-    elif input_format=="relvec" or conditional:
+    elif needs_jet or conditional:
         func_args["unpack_jet"]=True
     elif multi_loss:
         func_args["unpack_mask"]=True
@@ -930,7 +1002,7 @@ def save_argument_metadata(args):
 def common_training_args(parser):
 
     # data / io
-    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec","relvec"], default="relvec", help="What format of inputs we are using")
+    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec","relvec","lundtree"], default="relvec", help="What format of inputs we are using")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
     parser.add_argument("--preprocess", type=str, default=None, choices=["log","linear","standardize","logstd","shiftpad"], help="Preprocess the output (default: None")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",help="")
@@ -970,6 +1042,7 @@ def common_training_args(parser):
 
     # plotting options
     parser.add_argument("--validation-size",type=int, default=10000, help="How many images to generate and make plots for")
+    parser.add_argument("--validation-samples", type=str, default=None, help="NPZ file to write/use that stores the numpy arrays for the validation")
     parser.add_argument("--hist2d-xrange", type=float, nargs=2, default=[-1,10], help="2D Lund histogram x range: xmin xmax",)
     parser.add_argument("--hist2d-yrange", type=float, nargs=2, default=[-5,7], help="2D Lund histogram y range: ymin ymax",)
     parser.add_argument("--hist2d-bins", type=int, nargs=2, default=[20, 20], help="2D Lund histogram bins: xbins ybins",)

@@ -4,6 +4,7 @@ import torch
 import models_generative
 
 import helpers
+import helpers_lundtree
 
 # ---------------------------------------------------------------------
 # Load model
@@ -26,7 +27,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
         if preprocess=="standardize" or preprocess=="logstd":
             pad_value=-10
 
-    if architecture=="MDN":
+    if "MDN" in architecture:
         max_value=10
         if input_format=="4vec":
             if preprocess is None:
@@ -37,6 +38,22 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
                 max_value=1
             elif preprocess=="log":
                 max_value=11
+
+        if architecture=="MDN-tree":
+            return models_generative.model_autoregressive_tree_MDN(
+                input_dim=input_shape[2],
+                cond_dim=cond_shape[-1],
+                n_mix=helpers.as_int(helpers.config_get(args_or_dict,"MDN_nmix")),
+                embed_dim=helpers.as_int(helpers.config_get(args_or_dict,"embed_dim")),
+                num_heads=helpers.as_int(helpers.config_get(args_or_dict,"num_heads")),
+                num_layers=helpers.as_int(helpers.config_get(args_or_dict,"num_layers")),
+                ff_dim=helpers.as_int(helpers.config_get(args_or_dict,"ff_dim")),
+                n_register=helpers.as_int(helpers.config_get(args_or_dict,"registers"), 0),
+                max_range=max_value,
+                pad_value=pad_value,
+                #varphi is the same column whether or not the absolute node features follow the split ones
+                circular_dims=[helpers_lundtree.VARPHI],
+            )
 
         return models_generative.model_autoregressive_transformer_MDN(
             input_dim=input_shape[2],
@@ -133,7 +150,7 @@ def parse_input():
     parser.add_argument("--test-file", help="Path to testing .h5")
 
     # Architectures
-    parser.add_argument("--architecture","-a",type=str, choices=["Transformer","MDN","NF","CNF","Diffusion","SDE","FM"], help="Architecture to run")
+    parser.add_argument("--architecture","-a",type=str, choices=["Transformer","MDN","MDN-tree","NF","CNF","Diffusion","SDE","FM"], help="Architecture to run")
     parser.add_argument("--multi-loss", action="store_true", default=False, help="Use multile objective loss (default: False)")
     parser.add_argument("--conditional", action="store_true", default=False, help="Add conditional information (default: False)")
     parser.add_argument("--registers", type=int, default=0, help="Number of registers for transformers (default:0)")

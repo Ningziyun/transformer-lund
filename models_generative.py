@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -11,6 +12,7 @@ from torchviz import make_dot
 import normflows as nf
 from torchdiffeq import odeint_adjoint as odeint
 
+import helpers_lundtree
 import models_vqvae
 
 # ---------------------------------------------------------------------
@@ -390,13 +392,16 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
   """
   Exactly like the previous auto-regressive model, but models the next prediction as a gaussian mixture model as opposed to exact value. Seems to avoid mode collapse
   """
-  def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, max_range=None, pad_value=-1):
+  def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=4, multi_loss=False, max_range=None, pad_value=-1, circular_dims=None):
       config = _init_config(locals())  # constructor arguments: rebuild with build_model()
       super(model_autoregressive_transformer_MDN, self).__init__(input_dim, cond_dim, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register, multi_loss=multi_loss, pad_value=pad_value)
-      self.config = config
+      self.config = config #the parent constructors overwrite it with their own (reduced) arguments
 
       self.n_mix=n_mix
       self.max_range=max_range
+
+      #Angles in (-pi,pi] modelled with a von Mises instead of a gaussian, its log_sigma2 slot holds log(1/kappa)
+      self.circular_dims=list(circular_dims or [])
 
       #Final space is now a multi-D Gaussian mixture model: prod \alpha_i Gaus(\arrow\mu_i,\arrow\sigma_i) , where dimension=length of ouput (aka 4 for 4-vec)
       self.deembed = nn.Sequential(nn.Linear(self.embed_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim,self.n_mix*(1+input_dim+input_dim)))
@@ -432,9 +437,8 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       else:
           return torch.cat([alpha.unsqueeze(-1),mu,log_sigma2],dim=-1)
 
-  def nll_loss(self, inputs, targets, pad_mask=None, lambda_bce=1.0):
-    if self.multi_loss:
-         inputs,exists=inputs
+  def mixture_log_prob(self, inputs, targets):
+    """Log-likelihood of targets [Nbatch,NConst,Ninputs] under the mixture parameters, returns [Nbatch,NConst]"""
     ninputs=targets.shape[-1]
 
     alpha=inputs[..., 0] #[Nbatch,NConst,Nmix]
@@ -451,13 +455,27 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
     # Norm term: sum_{j=1}^{N_input} 0.5*log(det|covariance|)+N_input/2*log(2pi) #Assume diagonal and no const = 0.5*sum_{j=1}^{Ninput} sigma_j^2
     sig_term = 0.5*torch.sum(log_sig2+math.log(2*math.pi), dim=-1)  #[Nbatch,NConst,Nmix]
 
+    if self.circular_dims:
+      #Swap the gaussian terms of the circular dimensions for the von Mises: kappa*cos(x-mu) - log(2pi*I0(kappa))
+      circ = self.circular_dims
+      kappa = torch.exp(-log_sig2[..., circ])
+      Z_term = Z_term - torch.sum(((targets[..., circ] - mu[..., circ])**2 / (2*sig2[..., circ])), dim=-1)
+      sig_term = sig_term - 0.5*torch.sum(log_sig2[..., circ]+math.log(2*math.pi), dim=-1)
+      log_vm = kappa*torch.cos(targets[..., circ] - mu[..., circ]) - math.log(2*math.pi) - (torch.log(torch.special.i0e(kappa)) + kappa) #I0(k)=i0e(k)*exp(k)
+      Z_term = Z_term - torch.sum(log_vm, dim=-1)
+
     #the mixture term: log(alpha_i), al
     #alpha_term=torch.log(alpha)
     alpha_term=F.log_softmax(alpha, dim=-1) #more stable to log_softmax
 
     #Total log prob of the datapoint, sum over mixture: log(p_{sample})=log(sum_{i=1}^{N_mix} alpha,i*exp{-sig_term,i}*exp{-Z_term,i})
     #Make simpler and more stabler by doing the log-sum-exp: log(p_sample)=log(sum_{i=1}^{N_mix} exp{alpha_term,i - Z_term,i -exp{sig_term,i})
-    log_prob = torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
+    return torch.logsumexp(alpha_term - Z_term - sig_term, dim=-1) #[Nbatch,NConst]
+
+  def nll_loss(self, inputs, targets, pad_mask=None, lambda_bce=1.0):
+    if self.multi_loss:
+         inputs,exists=inputs
+    log_prob = self.mixture_log_prob(inputs, targets)
 
     # -log(p)= -log(prod {p_sample}) = -sum log(p_{sample})
     if self.multi_loss:
@@ -477,6 +495,30 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
     else:
       return -log_prob.sum() #Sum over all the training sample
 
+  def sample_mixture(self, pred, ninputs):
+      """Sample one element per batch entry from mixture parameters [Nbatch,Nmix,1+2*Ninput]"""
+      alpha=F.softmax(pred[:,:,0], dim=-1) # [Nbatch, Nmix]
+      mu=pred[:,:, 1:ninputs+1] #[Nbatch,Nmix,Ninput]
+      log_sig2=pred[:,:, ninputs+1:] #[Nbatch,Nmix,Ninput]
+      sig2 = torch.exp(log_sig2)
+      batch_idx=torch.arange(pred.shape[0],device=pred.device) #For some smoother slicing later
+
+      # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
+      comp = torch.multinomial(alpha, 1).squeeze(-1)  # (B,)
+
+      # Sample the whole MDN distribution by getting the mu and cov-matrix for this component and sample from it
+      loc=mu[batch_idx,comp,:] #(Nbatch,Ninput)
+      covmatrix = torch.diag_embed(sig2[batch_idx,comp,:]) # (Nbatch, Ninput, Ninput)
+      sample = MultivariateNormal(loc,covmatrix).sample()
+
+      #Circular dimensions are drawn from the von Mises instead, always in [-pi,pi)
+      if self.circular_dims:
+        circ = self.circular_dims
+        kappa = 1.0/sig2[batch_idx,comp][:, circ]
+        vm = torch.distributions.VonMises(loc[:, circ].cpu(), kappa.cpu()) #rejection sampler, run on cpu
+        sample[:, circ] = vm.sample().to(sample.device)
+      return sample
+
   @torch.no_grad()
   def generate(self, out_dimensions, c=None):
       device = next(self.parameters()).device
@@ -485,7 +527,6 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
       seq=torch.zeros(out_dimensions[0],1,out_dimensions[2],device=device)
       steps=out_dimensions[1]
       ninputs=out_dimensions[-1]
-      batch_idx=torch.arange(out_dimensions[0],device=device) #For some smoother slicing later
       active = torch.ones(out_dimensions[0], dtype=torch.bool, device=device) #which elements are active
 
       for _ in range(steps):
@@ -497,22 +538,87 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
             finished = stop_prob > torch.rand(out_dimensions[0], device=device) #stop jet if prob > random-uniform
             active = active & ~finished
 
-          #Take the last nconst and get the components
-          alpha=F.softmax(pred[:,-1,:,0], dim=-1) # [Nbatch, Nmix]
-          mu=pred[:,-1,:, 1:ninputs+1] #[Nbatch,Nmix,Ninput]
-          log_sig2=pred[:,-1,:, ninputs+1:] #[Nbatch,Nmix,Ninput]
-          sig2 = torch.exp(log_sig2)
-
-          # sample component index, grab the multi-nominal result, which returns the selected mix compoenent
-          comp = torch.multinomial(alpha, 1).squeeze(-1)  # (B,)
-
-          # Sample the whole MDN distribution by getting the mu and cov-matrix for this component and sample from it
-          loc=mu[batch_idx,comp,:] #(Nbatch,Ninput)
-          covmatrix = torch.diag_embed(sig2[batch_idx,comp,:]) # (Nbatch, Ninput, Ninput)
-          dist = MultivariateNormal(loc,covmatrix)
-          next_pred=dist.sample().unsqueeze(dim=1)
+          #Take the last nconst and sample it
+          next_pred=self.sample_mixture(pred[:,-1], ninputs).unsqueeze(dim=1)
           next_pred = torch.where(active[:, None, None], next_pred, torch.full_like(next_pred, self.pad_value)) #But first check if active, otherwise pad
           seq = torch.cat([seq, next_pred], dim=1) #append it
+
+      return seq[:,1:,:]
+
+class model_autoregressive_tree_MDN(model_autoregressive_transformer_MDN):
+  """
+  Auto-regressive MDN transformer over full Lund trees. Each token is a depth-first preorder node [features..., split],
+  see helpers_lundtree. The next node's features are a gaussian mixture (only learned for splitting nodes) and the
+  stop head predicts whether it splits. Generation follows the tree grammar: every node has zero or two children,
+  the root always splits, and no tree exceeds the sequence length.
+  The tokens are [features..., context..., split], where the context of the next node (helpers_lundtree.CONTEXT_NAMES)
+  is an input only. Generation tracks it, decoding each delta_R relative to its parent's bound.
+  """
+  def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=0, max_range=None, pad_value=-1, circular_dims=None):
+      #The mixture models the node features, the stop head becomes the split head
+      config = _init_config(locals())  # constructor arguments: rebuild with build_model()
+      n_context=len(helpers_lundtree.CONTEXT_NAMES)
+      super(model_autoregressive_tree_MDN, self).__init__(input_dim-1-n_context, cond_dim, n_mix=n_mix, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register, multi_loss=True, max_range=max_range, pad_value=pad_value, circular_dims=circular_dims)
+      self.config = config  #the parent constructors overwrite it with their own (reduced) arguments
+      self.n_context=n_context
+
+      #The input token also carries the split flag
+      self.embed = nn.Sequential(nn.Linear(input_dim, self.embed_dim), nn.SiLU(), nn.Linear(self.embed_dim, self.embed_dim))
+
+  def nll_loss(self, inputs, targets, pad_mask=None, lambda_bce=1.0):
+    params,split_logits=inputs
+    split=targets[..., -1]
+    if pad_mask is None:
+      pad_mask = split == self.pad_value
+
+    #Mixture nll only for splitting nodes, leaves carry no features
+    log_prob = self.mixture_log_prob(params, targets[..., :self.input_dim])
+    loss_reg = -log_prob.masked_fill(pad_mask | (split != 1), 0.0)
+
+    # BCE for the split flag of every real node
+    loss_fn2 = nn.BCEWithLogitsLoss(reduction='none') #expects logits
+    loss_bce = loss_fn2(split_logits, (split == 1).float()).masked_fill(pad_mask, 0.0)
+
+    return loss_reg + lambda_bce*loss_bce #[B,C]
+
+  @torch.no_grad()
+  def generate(self, out_dimensions, c=None):
+      device = next(self.parameters()).device
+      if c is not None:
+        c = c.to(device)
+      nbatch, steps, ntoken = out_dimensions
+      seq=torch.zeros(nbatch,1,ntoken,device=device)
+      pending=torch.ones(nbatch, dtype=torch.long, device=device) #open child slots per tree
+      trackers = [helpers_lundtree.TreeWalker(encoded=True) for _ in range(nbatch)]
+
+      for step in range(steps):
+          active = pending > 0
+          if not active.any():
+            pad = torch.full((nbatch, steps-step, ntoken), float(self.pad_value), device=device)
+            seq = torch.cat([seq, pad], dim=1)
+            break
+
+          params,split_logits = self.forward(seq, c)
+          features = self.sample_mixture(params[:,-1], self.input_dim)
+          split = torch.bernoulli(torch.sigmoid(split_logits[:,-1])).bool()
+
+          #The root always splits, a split needs room for the node budget: nodes so far + this one + open slots after it
+          if step == 0:
+            split = torch.ones_like(split)
+          split = split & (step + 1 + pending + 1 <= steps)
+
+          features = features*split[:,None]
+          #Context of each tree's next node, following its stack of open branches
+          features_np, split_np, active_np = features.cpu().numpy(), split.cpu().numpy(), active.cpu().numpy()
+          context = np.zeros((nbatch, self.n_context))
+          for row in np.flatnonzero(active_np):
+            trackers[row].step(features_np[row], split_np[row])
+            context[row] = trackers[row].context()
+          context = torch.as_tensor(context, dtype=features.dtype, device=device)
+          token = torch.cat([features, context, split[:,None].float()], dim=-1)
+          token = torch.where(active[:,None], token, torch.full_like(token, self.pad_value))
+          pending = torch.where(active, pending + 2*split.long() - 1, pending)
+          seq = torch.cat([seq, token[:,None,:]], dim=1) #append it
 
       return seq[:,1:,:]
 
@@ -1701,6 +1807,7 @@ def build_model(architecture, config):
     architectures_dict = {
         "Transformer": model_autoregressive_transformer,
         "MDN": model_autoregressive_transformer_MDN,
+        "MDN-tree":model_autoregressive_tree_MDN,
         "CNF": model_CNF,
         "FM": model_FM,
         "NF": model_normalizing_flow,
