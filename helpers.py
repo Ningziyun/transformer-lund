@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import LambdaLR
 
 import fastjet
 import ljpHelpers
-import lund_tree_encoding
+import helpers_lundtree
 
 import models_generative
 
@@ -58,6 +58,32 @@ def make_lundplane(input_vec, pad_length=20):
   #pad the length
   lund_plane=np.asarray(lund_plane)
   return lund_plane
+
+# ---------------------------------------------------------------------
+# Make the full lund-tree
+# ---------------------------------------------------------------------
+def make_lundtree(input_vec, Nconst_max=100):
+  '''
+  Full Lund tree of the leading anti-kt jet, reclustered with C/A, see helpers_lundtree for the conventions.
+  Input is [Nevents, Nconstituents, 4-vecs] like make_lundplane, only the first Nconst_max constituents are used.
+  Returns the model tokens [Nevents, 2*Nconst_max-1, len(helpers_lundtree.TOKEN_NAMES)] padded with -1, and the
+  [Nevents, 4] jet [E, px, py, pz] the tree belongs to (its pt/eta/phi is the conditioning used for reconstruction).
+  '''
+
+  #Physical node features and split flags, padded out to the largest possible tree
+  Nnodes = 2*Nconst_max-1
+  features = np.zeros([input_vec.shape[0], Nnodes, len(helpers_lundtree.SPLIT_FEATURE_NAMES)], dtype=np.float32)
+  splits = np.full([input_vec.shape[0], Nnodes], -1, dtype=np.int8)
+  for ii in range(input_vec.shape[0]):
+    nodes = ljpHelpers.constituents_to_lund_tree(input_vec[ii][:Nconst_max])
+    features[ii, :len(nodes)] = [node[0] for node in nodes]
+    splits[ii, :len(nodes)] = [int(node[1]) for node in nodes]
+
+  #Encode into the model space and add the context of the next node, both need a walk over each tree
+  prepocessed, context = helpers_lundtree.preprocess__trees(features, splits)
+  tokens = np.concatenate([prepocessed, context, splits[..., None]], axis=-1).astype(np.float32)
+  tokens[splits == -1] = -1 #pad
+  return tokens
 
 # ---------------------------------------------------------------------
 # Converters between representations
@@ -285,68 +311,46 @@ class constit_relative_dataset(torch.utils.data.Dataset):
         return len(self.X)
 
 class lundtree_dataset(torch.utils.data.Dataset):
-  """
-  Full Lund trees from prepare_jetclass_tree_sample.py as depth-first preorder token sequences [Nnodes, Nfeat+Ncontext+1]:
-  model-space node features (lund_tree_encoding), the input-only context of the next node and a split flag
-  (1=split, 0=leaf). Padded nodes are -1.
-  Always returns [tokens, jet, mask] with jet=[pt, eta, phi] and mask True for padded nodes.
-  The nodes carry only the split features, the jet fixes the absolute kinematics.
-  The prepared tokens are cached next to the HDF5 file, max_events reads only the first jets.
-  """
-  CACHE_VERSION = 6 #bump when the token preparation changes, to rebuild existing caches
+    def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None, max_events=None):
+        super(lundtree_dataset, self).__init__()
+        self.n_features=len(helpers_lundtree.TOKEN_NAMES) #[split features, context of next node, split flag], see helpers_lundtree
+        self.pad_value=-1
 
-  def __init__(self, file_path, max_events=None):
-    super(lundtree_dataset, self).__init__()
+        self.add_mask=add_mask
+        self.preprocess=preprocess #NOTE: the tree is already preprocesses into the model space in lunddata.py
+        self.add_conditional=add_conditional
 
-    cache_path = f"{file_path}.cache.npz"
-    source = os.stat(file_path)
-    stamp = np.array([self.CACHE_VERSION, source.st_size, source.st_mtime_ns], dtype=np.int64)
-    if os.path.exists(cache_path):
-      cache = np.load(cache_path)
-      if np.array_equal(cache["stamp"], stamp):
-        stop = max_events if max_events is not None else len(cache["tokens"])
-        self.tokens, self.mask, self.jet = cache["tokens"][:stop], cache["mask"][:stop], cache["jet"][:stop]
-        return
+        #NOTE: NConstituents is not used, a tree can't be truncated without breaking it. The size is set in lunddata.py
+        with h5py.File(file_path, "r") as f:
+            tree = f["lund_tree"]
+            self.X = np.stack([np.asarray(tree[k][:max_events], dtype=np.float32) for k in helpers_lundtree.TOKEN_NAMES], axis=-1)
 
-    self._prepare(file_path, max_events)
-    if max_events is None:
-      #Write to a temporary file first, so an interrupted run never leaves a partial cache
-      temporary = cache_path + ".tmp.npz"
-      np.savez_compressed(temporary, tokens=self.tokens, mask=self.mask, jet=self.jet, stamp=stamp)
-      os.replace(temporary, cache_path)
+            #The jet the tree was built from (anti-kt R=1.0), not the constituent sum stored in "jet"
+            if self.add_conditional:
+                j = f["jet"]
+                jet = np.stack([np.asarray(j[k][:max_events], dtype=np.float64) for k in ["E","PX","PY","PZ"]], axis=-1)
 
-  def _prepare(self, file_path, max_events, chunk=100_000):
-    with h5py.File(file_path, "r") as f:          # the current code also never closes the file
-        tree = f["lund_tree"]
-        n = len(tree["length"]) if max_events is None else min(max_events, len(tree["length"]))
-        stored = [s.strip() for s in tree.attrs["feature_order"].split(",")]
-        cols = [stored.index(c) for c in lund_tree_encoding.SPLIT_FEATURE_NAMES]
-        nf, nc = len(cols), len(lund_tree_encoding.CONTEXT_NAMES)
-        n_nodes = tree["split"].shape[1]
-        self.tokens = np.empty((n, n_nodes, nf + nc + 1), np.float32)
-        self.mask = np.empty((n, n_nodes), bool)
-        for start in range(0, n, chunk):
-            stop = min(start + chunk, n)
-            splits = tree["split"][start:stop]
-            feats, ctx = lund_tree_encoding.encode_trees(tree["features"][start:stop][..., cols], splits)
-            mask = np.arange(n_nodes)[None] >= tree["length"][start:stop][:, None]
-            block = self.tokens[start:stop]
-            block[..., :nf], block[..., nf:-1], block[..., -1] = feats, ctx, splits
-            block[mask] = -1
-            self.mask[start:stop] = mask
-        jet_px, jet_py, jet_pz = (f["jet"][k][:n].astype(np.float64) for k in ("PX", "PY", "PZ"))
-        eps=1e-12
-        jet_pt = np.hypot(jet_px, jet_py)
-        jet_eta = np.arcsinh(jet_pz / np.maximum(jet_pt, eps))
-        jet_phi = np.arctan2(jet_py, jet_px)
-        self.jet = np.stack([jet_pt, jet_eta, jet_phi], axis=-1).astype(np.float32)
+        #Mask which stores if padded. True/False=Padded/unpadded. Only the split flag is -1 for padding, -1 is a valid feature
+        if add_mask or self.add_conditional:
+            self.mask=self.X[...,-1]==self.pad_value
 
-  def __getitem__(self, index):
-    return [torch.from_numpy(self.tokens[index]), torch.from_numpy(self.jet[index]), torch.from_numpy(self.mask[index])]
+        #Make the conditioning info, only [pt, eta, phi] since the tree fixes the mass and multiplicity
+        if self.add_conditional:
+            pt,eta,phi,m,_=jet_PtEtaPhiM(jet)
+            self.jet_data = np.concatenate([pt, eta, phi], axis=-1).astype(np.float32)
 
-  def __len__(self):
-    return len(self.tokens)
+    def __getitem__(self, index):
+        X = torch.from_numpy(self.X[index])
+        if self.add_mask and self.add_conditional:
+            return [X, torch.from_numpy(self.jet_data[index]), torch.from_numpy(self.mask[index])]
+        elif self.add_mask:
+            return [X, torch.from_numpy(self.mask[index])]
+        elif self.add_conditional:
+            return [X, torch.from_numpy(self.jet_data[index])]
+        return X
 
+    def __len__(self):
+        return len(self.X)
 
 def get_loader(filename, args):
     '''
@@ -375,10 +379,11 @@ def get_loader(filename, args):
     elif input_format=="relvec":
         add_conditional=True
         dataset = constit_relative_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
-    elif args.input_format=="lundtree":
-        dataset = lundtree_dataset(filename)
+    elif input_format=="lundtree":
+        add_conditional=True #like relvec, the jet is needed to reconstruct the constituents
+        dataset = lundtree_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
     else:
-       ValueError(f"No known input format {input_format}") 
+       raise ValueError(f"No known input format {input_format}")
 
     loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle)
     return loader
@@ -404,17 +409,14 @@ def format_input_args(args):
     multi_loss=config_get(args,"multi_loss",False)
     conditional=config_get(args,"conditional",False)
 
-    if (input_format=="relvec" and multi_loss) or (conditional and multi_loss):
+    needs_jet = input_format=="relvec" or input_format=="lundtree" #the loader always returns the jet for these
+    if (needs_jet and multi_loss) or (conditional and multi_loss):
         func_args["unpack_mask"]=True
         func_args["unpack_jet"]=True
-    elif input_format=="relvec" or conditional:
+    elif needs_jet or conditional:
         func_args["unpack_jet"]=True
     elif multi_loss:
         func_args["unpack_mask"]=True
-
-    if input_format=="lundtree": #FIXME
-        func_args["unpack_mask"]=True
-        func_args["unpack_jet"]=True
 
     return func_args
 

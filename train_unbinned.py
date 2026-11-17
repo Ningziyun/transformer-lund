@@ -53,6 +53,7 @@ def evaluate_loss(model,args,X,mask=None,c=None):
     pred = model(inputs,c)       # (batch, seq_len-1, feature_dim)
 
     if args.architecture=="MDN-tree":
+        if mask is None: mask = X[..., -1]==model.pad_value #split flag is -1 only for padding
         w = w*(~mask).float()  #Normalise by the real (unpadded) nodes, not all the padded slots of the max-length tree
         loss = (model.nll_loss(pred, targets, mask)*w).sum()
     elif args.architecture=="MDN":

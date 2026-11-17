@@ -70,14 +70,11 @@ def jet_declusterings(jet_in):
 
   return result;
 
-
-
-
 def jet_full_declusterings(jet_in, leaves=None):
   """Return a depth-first serialization of every node in a C/A reclustering.
 
   Each item is ``(features, splits)``. Internal nodes have the features in
-  ``lund_tree_encoding.SPLIT_FEATURE_NAMES``: ``[log(1/delta_R), log(z), varphi]`` for the split,
+  ``helpers_lundtree.SPLIT_FEATURE_NAMES``: ``[log(1/delta_R), log(z), varphi]`` for the split,
   with ``z = pt_soft / (pt_hard + pt_soft)``. Terminal leaves have zero features and
   ``splits=False``. The hard branch is visited before the soft branch,
   matching the ordering used by ``jet_declusterings``. With a ``leaves`` list,
@@ -121,7 +118,7 @@ def constituents_to_lund_tree(vectors, jet_pt_min=25.0, radius=1.0, return_jet=F
 
   ``vectors`` is an ``(N, 4)`` array ordered as ``[E, px, py, pz]``.
   Constituents are made massless (E = |p|) before clustering, matching the
-  massless leaves of reconstruct_lund_tree.py, so a tree inverts exactly.
+  massless leaves of helpers_lundtree.reconstruct_tree, so a tree inverts exactly.
   Every internal node is followed by exactly two child subtrees; a leaf has
   no children. Each returned item is ``(features, split)``. With
   ``return_jet`` the jet ``[E, px, py, pz]`` (zeros without a jet) is also returned,

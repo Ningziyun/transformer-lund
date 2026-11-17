@@ -10,4 +10,4 @@ source discretize.sh inputFiles/top_benchmark
 python lunddata.py inputFiles/top_benchmark/rootified/originalJets_qcd_*.root --outname topbenchmark.h5 --format topbenchmark
 
 python download_jetclass.py
-./lunddata.py inputFiles/jetclass/ZJetsToNuNu* --outname jetclass.h5 --format jetclass
+./lunddata.py inputFiles/jetclass/ZJetsToNuNu* --outname jetclass.h5 --format jetclass --lundtree --preprocess

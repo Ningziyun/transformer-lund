@@ -12,7 +12,7 @@ from torchviz import make_dot
 import normflows as nf
 from torchdiffeq import odeint_adjoint as odeint
 
-import lund_tree_encoding
+import helpers_lundtree
 import models_vqvae
 
 # ---------------------------------------------------------------------
@@ -548,16 +548,16 @@ class model_autoregressive_transformer_MDN(model_autoregressive_transformer):
 class model_autoregressive_tree_MDN(model_autoregressive_transformer_MDN):
   """
   Auto-regressive MDN transformer over full Lund trees. Each token is a depth-first preorder node [features..., split],
-  see lund_tree_encoding. The next node's features are a gaussian mixture (only learned for splitting nodes) and the
+  see helpers_lundtree. The next node's features are a gaussian mixture (only learned for splitting nodes) and the
   stop head predicts whether it splits. Generation follows the tree grammar: every node has zero or two children,
   the root always splits, and no tree exceeds the sequence length.
-  The tokens are [features..., context..., split], where the context of the next node (lund_tree_encoding.CONTEXT_NAMES)
+  The tokens are [features..., context..., split], where the context of the next node (helpers_lundtree.CONTEXT_NAMES)
   is an input only. Generation tracks it, decoding each delta_R relative to its parent's bound.
   """
   def __init__(self, input_dim, cond_dim=0, n_mix=25, embed_dim=256, num_heads=2, num_layers=2, ff_dim=512, n_register=0, max_range=None, pad_value=-1, circular_dims=None):
       #The mixture models the node features, the stop head becomes the split head
       config = _init_config(locals())  # constructor arguments: rebuild with build_model()
-      n_context=len(lund_tree_encoding.CONTEXT_NAMES)
+      n_context=len(helpers_lundtree.CONTEXT_NAMES)
       super(model_autoregressive_tree_MDN, self).__init__(input_dim-1-n_context, cond_dim, n_mix=n_mix, embed_dim=embed_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, n_register=n_register, multi_loss=True, max_range=max_range, pad_value=pad_value, circular_dims=circular_dims)
       self.config = config  #the parent constructors overwrite it with their own (reduced) arguments
       self.n_context=n_context
@@ -589,7 +589,7 @@ class model_autoregressive_tree_MDN(model_autoregressive_transformer_MDN):
       nbatch, steps, ntoken = out_dimensions
       seq=torch.zeros(nbatch,1,ntoken,device=device)
       pending=torch.ones(nbatch, dtype=torch.long, device=device) #open child slots per tree
-      trackers = [lund_tree_encoding.TreeWalker(encoded=True) for _ in range(nbatch)]
+      trackers = [helpers_lundtree.TreeWalker(encoded=True) for _ in range(nbatch)]
 
       for step in range(steps):
           active = pending > 0

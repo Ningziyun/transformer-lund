@@ -10,8 +10,9 @@ import random
 import h5py
 
 import helpers
+import helpers_lundtree
 
-def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", train_test_split=0.8, seed=0, file_format="topbenchmark", preprocess=False):
+def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", train_test_split=0.8, seed=0, file_format="topbenchmark", preprocess=False, lundtree=False):
 
     #make the output file
     if not os.path.exists(outdir):
@@ -23,6 +24,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
     #Set the padding size
     Npad_const=100
     Npad_ljp=20
+    Npad_tree=2*Npad_const-1 #a full binary tree of Npad_const constituents has 2*Npad_const-1 nodes
     Ncount=0
 
     random.seed(seed)
@@ -170,6 +172,16 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_kt_test = grp_ljp_test.create_dataset("kt", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
           dset_dr_test = grp_ljp_test.create_dataset("dr", shape=(0,Npad_ljp), maxshape=(None, Npad_const), dtype="float32")
 
+          #Full lund-tree, one dataset per token column [Njet, Npad_tree] (already preprocesses for the model, see helpers_lundtree)
+          if lundtree:
+            dset_tree_train={}
+            dset_tree_test={}
+            for outfile, dset_tree in ((outfile_train, dset_tree_train), (outfile_test, dset_tree_test)):
+              grp_tree = outfile.create_group("lund_tree")
+              grp_tree.attrs["description"] = "model tokens of the full C/A Lund tree, depth-first preorder with harder child first, see helpers_lundtree.py"
+              for name in helpers_lundtree.TOKEN_NAMES:
+                dset_tree[name] = grp_tree.create_dataset(name, shape=(0,Npad_tree), maxshape=(None, Npad_tree), dtype="float32")
+
         #Loop over the input files in chunks via uproot
         chunk_size = 2**11
         batch=0
@@ -190,6 +202,11 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           for ii in range(Njet):
             for jj in range(min(len(unpacked_const["part_energy"][ii]),Npad_const)):
               constituents[ii,jj,:]=[unpacked_const["part_energy"][ii][jj],unpacked_const["part_px"][ii][jj],unpacked_const["part_py"][ii][jj],unpacked_const["part_pz"][ii][jj]]
+
+          #Make the full lund-tree from all the constituents, before the wide-angle masking below
+          #NOTE: moving this after the masking would build it from the same constituents as the lund-plane
+          if lundtree:
+            tree_tokens = helpers.make_lundtree(constituents, Npad_const)
 
           #Also load in the deta and dphi from JetClass, this seems to have buggy features with const delta_eta>>1
           part_deta=np.zeros([Njet,Npad_const])
@@ -296,6 +313,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
 
               dset_kt=dset_kt_train
               dset_dr=dset_dr_train
+              if lundtree: dset_tree=dset_tree_train
           else:
               dset_jetE=dset_jetE_test
               dset_jetPX=dset_jetPX_test
@@ -314,6 +332,7 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
 
               dset_kt=dset_kt_test
               dset_dr=dset_dr_test
+              if lundtree: dset_tree=dset_tree_test
 
           #Reshape the input with new inputs
           old_size = dset_jetE.shape[0]
@@ -360,6 +379,11 @@ def load_and_lundplane(files, treename, outdir="inputFiles/", outname="qcd.h5", 
           dset_kt[old_size:new_size,:] = ljp[:,:,0]
           dset_dr[old_size:new_size,:] = ljp[:,:,1]
 
+          if lundtree:
+            for ii, name in enumerate(helpers_lundtree.TOKEN_NAMES):
+              dset_tree[name].resize(new_size, axis=0)
+              dset_tree[name][old_size:new_size,:] = tree_tokens[:,:,ii]
+
           batch+=1
           Ncount+=stop_index-index
 
@@ -378,11 +402,10 @@ if __name__ == "__main__":
     parser.add_argument("--split",type=float, default=0.8, help="Train/test split fraction")
     parser.add_argument("--seed",type=float, default=99, help="Train/test split fraction")
     parser.add_argument("--preprocess", action="store_true", default=False, help="Apply some preprocessing to the inputs")
+    parser.add_argument("--lundtree", action="store_true", default=False, help="Also store the full lund-tree for --input_format lundtree (jetclass only, slower)")
     args = parser.parse_args()
 
     print(args.filepaths)
 
     #try:
-    load_and_lundplane(args.filepaths, args.treename, outdir=args.outdir, outname=args.outname, train_test_split=args.split, seed=args.seed, file_format=args.format, preprocess=args.preprocess)
-    #except Exception as e:
-    #    print(f"Failed to read file {args.filename}: \n{e}")
+    load_and_lundplane(args.filepaths, args.treename, outdir=args.outdir, outname=args.outname, train_test_split=args.split, seed=args.seed, file_format=args.format, preprocess=args.preprocess, lundtree=args.lundtree)

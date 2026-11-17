@@ -18,7 +18,7 @@ import fastjet
 import torch
 
 import helpers
-import lund_tree_encoding
+import helpers_lundtree
 
 # ---------------------------------------------------------------------
 # Support functions
@@ -377,15 +377,15 @@ def lundtree_projection_plot(inputs, labels=["original","generated","predicted"]
         os.makedirs(out_dir)
 
     linestyles=["-","--","-.",":"]
-    Nfeat=len(lund_tree_encoding.FEATURE_LABELS)
-    feature_labels=lund_tree_encoding.FEATURE_LABELS
+    Nfeat=len(helpers_lundtree.FEATURE_LABELS)
+    feature_labels=helpers_lundtree.FEATURE_LABELS
     splits=[p[p[:,-1]==1] for p in inputs]
 
     fig, axs = plt.subplots(Nfeat+1,1,figsize=(8.0,2.4*(Nfeat+1)),constrained_layout=True)
 
     #Feature shapes of the splitting nodes, normalized per split (the node-type panel compares the number of splits)
     for ii in range(Nfeat):
-        circular = ii == lund_tree_encoding.VARPHI
+        circular = ii == helpers_lundtree.VARPHI
         lo,hi = (-np.pi,np.pi) if circular else (min(np.min(p[:,ii]) for p in splits), max(np.max(p[:,ii]) for p in splits))
         for jj,p in enumerate(splits):
             axs[ii].hist(p[:,ii],bins=40,range=[lo,hi],density=True,histtype="step",linestyle=linestyles[jj],label=labels[jj])
@@ -1092,7 +1092,7 @@ def lundtree_validation_plots(plot_inputs, jet_list, args, labels, results=None)
   root_kinematics = jet_list.numpy().astype(np.float64)[:, :3]
 
   #Reconstruct the constituent 4-vectors for the jet-level plots
-  summaries = [lund_tree_encoding.summarize_trees(p, root_kinematics) for p in plot_inputs]
+  summaries = [helpers_lundtree.summarize_trees(p, root_kinematics) for p in plot_inputs]
   for summary, label in zip(summaries, labels):
     print(f"{label}: {summary['failed']}/{len(summary['tokens'])} trees could not be reconstructed", flush=True)
     if results and label != labels[0]: results["frac_unreconstructed"] = summary["failed"]/len(summary["tokens"])
@@ -1119,7 +1119,7 @@ def plot_validation_samples(original, generated, jet_list, args, labels, unavail
     generated_np = [g.numpy() for g in generated]
     if args.input_format=="lundtree":
       #Physical [features..., split] tokens without the context columns
-      to_physical = lambda t: lund_tree_encoding.physical_tokens(t).astype(t.dtype)
+      to_physical = lambda t: helpers_lundtree.physical_tokens(t).astype(t.dtype)
       original_np = to_physical(original_np)
       generated_np = [to_physical(g) for g in generated_np]
     plot_inputs = [original_np] + generated_np

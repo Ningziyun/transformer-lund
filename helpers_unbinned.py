@@ -4,7 +4,7 @@ import torch
 import models_generative
 
 import helpers
-import lund_tree_encoding
+import helpers_lundtree
 
 # ---------------------------------------------------------------------
 # Load model
@@ -52,7 +52,7 @@ def build_unbinned_model(args_or_dict, input_shape, cond_shape):
                 max_range=max_value,
                 pad_value=pad_value,
                 #varphi is the same column whether or not the absolute node features follow the split ones
-                circular_dims=[lund_tree_encoding.VARPHI],
+                circular_dims=[helpers_lundtree.VARPHI],
             )
 
         return models_generative.model_autoregressive_transformer_MDN(
