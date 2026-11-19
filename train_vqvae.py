@@ -31,8 +31,8 @@ def train(args):
 
     #Load the data
     train_loader, test_loader = helpers.get_loaders(args)
-    print("train:", len(train_loader.dataset))
-    print("test: ", len(test_loader.dataset))
+    print(f"train: {train_loader.dataset.n_jets} jets, {len(train_loader)} batches")
+    print(f"test:  {test_loader.dataset.n_jets} jets, {len(test_loader)} batches")
 
     #Load the model
     model = models_vqvae.ConstituentVQVAE(args.codebook_size, args.levels, args.code_dim, args.hidden, args.input_format, n_features=train_loader.dataset.n_features, pad_value=train_loader.dataset.pad_value).to(device)
@@ -146,7 +146,7 @@ def train(args):
               f"| codes used {codes_used}/{K} | {time.time() - starttime:.1f}s", flush=True)
 
         # save every epoch so a killed batch job keeps its progress
-        models_vqvae.save_tokenizer_checkpoint(model, args, training_history, args.output)
+        models_vqvae.save_tokenizer_checkpoint(model, args, training_history, args.out_dir+"/"+args.output)
         print(f"saved tokenizer -> {args.output}")
 
     # ---------------------------------------------------------------------
@@ -154,10 +154,11 @@ def train(args):
     # ---------------------------------------------------------------------
     # diagnostics on the test file; the full reference (code usage + quantisation-error quantiles,
     # used by later shift / OOD checks) is stored in the checkpoint
-    col = vq_diagnostics.collect(model, test_loader.dataset.X, test_loader.dataset.mask, jet=test_loader.dataset.jet_data, n_jets=args.diag_jets, device=args.device)
+    del train_loader  # nothing from the training data is needed any more
+    col = vq_diagnostics.collect_from_dataset(model, test_loader.dataset, n_jets=args.nval_jets, device=args.device)
  
-    vq_diagnostics.run_diagnostics(col, args.diag_dir, input_format=args.input_format, preprocess=args.preprocess,
-                                   history=training_history, plots=not args.no_plots, projections=args.projections, max_points=args.max_points,
+    vq_diagnostics.run_diagnostics(col, args.out_dir, input_format=args.input_format, preprocess=args.preprocess,
+                                   history=training_history, projections=args.projections, max_points=args.max_points,
                                    )
 
 def main():
@@ -174,10 +175,15 @@ def main():
     parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     parser.add_argument("--preprocess", type=str, default=None, choices=["log", "linear", "logit", "standardize", "logstd", "shiftpad"], help="Pre-processing ALREADY applied to the input files (not applied here); sets the pad value")
     parser.add_argument("--pad-value", type=float, default=None, help="Override the pad value (default: from --preprocess / --input_format)")
+    parser.add_argument("--block-size", type=int, default=None, help="Data streaming: jets per contiguous read from the .h5 (default: sized for a ~160 MB shuffle buffer)")
+    parser.add_argument("--blocks-per-buffer", type=int, default=32, help="Data streaming: random blocks mixed per shuffle buffer (RAM per worker ~ 2-3 x block-size x this x jet size)")
+    parser.add_argument("--max-jets", type=int, default=None, help="Use at most this many jets per file (quick tests)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",help="")
     parser.add_argument("--seed", type=int, default=0,help="")
 
+    parser.add_argument("--out-dir", default="tokenizers", help="directory to write tokenizers, plots, metrics.json (default <out>_diag)"))
     parser.add_argument("--output", default="tokenizers/tokenizer.pt")
+
     parser.add_argument("--codebook-size", type=int, default=512)
     parser.add_argument("--levels", type=int, default=2, help="residual VQ depth = tokens per constituent")
     parser.add_argument("--code-dim", type=int, default=16)
@@ -187,9 +193,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
 
     d = parser.add_argument_group("diagnostics")
-    d.add_argument("--diag-dir", default="tokenizers", help="where to write plots + metrics.json (default <out>_diag)")
-    d.add_argument("--diag-jets", type=int, default=10000, help="max validation jets used for diagnostics")
-    d.add_argument("--no-plots", action="store_true", help="compute and print metrics only")
+    d.add_argument("--nval-jets", type=int, default=10000, help="max validation jets used for diagnostics")
     d.add_argument("--projections", nargs="*", default=["pca", "tsne", "umap"], choices=["pca", "tsne", "umap"])
     d.add_argument("--max-points", type=int, default=5000, help="constituents in the latent projections")
     args = parser.parse_args()

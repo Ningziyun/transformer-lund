@@ -233,6 +233,12 @@ def collect(tok, X, mask, jet=None, n_jets=None, batch_size=4096, device="cpu"):
     }
 
 
+def collect_from_dataset(tok, dataset, n_jets=10000, device="cpu", batch_size=4096):
+    """collect() on ~n_jets jets read from blocks spread over the whole file (helpers.jet_stream_dataset.sample)"""
+    X, mask, jet = dataset.sample(n_jets)
+    return collect(tok, X, mask, jet=jet, n_jets=n_jets, batch_size=batch_size, device=device)
+
+
 def compute_reference(col):
     """Code usage and quantisation-error quantiles of a reference (training) sample. Pass the result as
     reference= to later run_diagnostics calls to get the shift / OOD metrics."""
@@ -1163,8 +1169,8 @@ def plot_token_stats(col, m, outdir, reference=None):
 # Driver
 # ---------------------------------------------------------------------
 def run_diagnostics(col, outdir, input_format, preprocess=None, history=None, reference=None, token_stats=False,
-                    plots=True, projections=("pca", "tsne"), max_points=5000, feature_keys=None):
-    """Compute metrics (always) and plots (if plots=True) from a collect() result.
+                    projections=("pca", "tsne", "umap"), max_points=5000, feature_keys=None):
+    """Compute metrics and plots from a collect() result.
     Returns the metrics dict; writes <outdir>/metrics.json. feature_keys optionally overrides the feature names."""
     t0 = time.time()
     outdir = Path(outdir)
@@ -1176,37 +1182,38 @@ def run_diagnostics(col, outdir, input_format, preprocess=None, history=None, re
     lat = latent_analysis(col)
     m["latent"] = latent_metrics(lat, names)
     m["input_format"], m["preprocess"] = input_format, preprocess
-    if plots:
-        with plt.rc_context(RC):
-            paths = [
-                plot_feature_closure(col["f_true"], col["f_rec"], names, m["preprocessed"], outdir,
-                                     "feature_closure.png", "Constituent features, pre-processed space"),
-                plot_feature_residuals(col, m, names, outdir),
-                plot_feature_correlations(m, names, outdir),
-                plot_resolution_vs_rank(m, names, outdir),
-                plot_codebook_usage(col, m, outdir),
-                *plot_codebook_geometry(col, lat, outdir),
-                plot_pca_vs_basis(col, lat, m["latent"], names, outdir),
-                plot_codebook_spacing(col, names, outdir),
-                plot_codebook_features(col, names, outdir),
-                plot_quantisation_error(col, m, outdir, reference),
-                plot_feature_closure(phys["p_true"], phys["p_rec"], names, m["physical"], outdir,
-                                     "feature_closure_physical.png",
-                                     f"Constituent features, physical space (inverse of '{preprocess}')",
-                                     log_scale_features=True),
-                plot_density_images(phys, m, outdir, "lund_plane.png" if phys["kind"] == "lund" else "jet_images.png"),
-            ]
-            if col["Q"] >= 2:
-                paths.append(plot_level_cooccurrence(col, m, outdir))
-            if phys["kind"] == "jets":
-                paths.append(plot_jet_closure(phys, m, outdir))
-            if history:
-                paths.append(plot_training_history(history, outdir))
-            if token_stats:
-                paths.append(plot_token_stats(col, m, outdir, reference))
-            for method in projections:
-                paths.extend(plot_latent_projection(col, names, outdir, method, max_points))
-        m["plots"] = paths
+
+    with plt.rc_context(RC):
+        paths = [
+            plot_feature_closure(col["f_true"], col["f_rec"], names, m["preprocessed"], outdir,
+                                 "feature_closure.png", "Constituent features, pre-processed space"),
+            plot_feature_residuals(col, m, names, outdir),
+            plot_feature_correlations(m, names, outdir),
+            plot_resolution_vs_rank(m, names, outdir),
+            plot_codebook_usage(col, m, outdir),
+            *plot_codebook_geometry(col, lat, outdir),
+            plot_pca_vs_basis(col, lat, m["latent"], names, outdir),
+            plot_codebook_spacing(col, names, outdir),
+            plot_codebook_features(col, names, outdir),
+            plot_quantisation_error(col, m, outdir, reference),
+            plot_feature_closure(phys["p_true"], phys["p_rec"], names, m["physical"], outdir,
+                                 "feature_closure_physical.png",
+                                 f"Constituent features, physical space (inverse of '{preprocess}')",
+                                 log_scale_features=True),
+            plot_density_images(phys, m, outdir, "lund_plane.png" if phys["kind"] == "lund" else "jet_images.png"),
+        ]
+        if col["Q"] >= 2:
+            paths.append(plot_level_cooccurrence(col, m, outdir))
+        if phys["kind"] == "jets":
+            paths.append(plot_jet_closure(phys, m, outdir))
+        if history:
+            paths.append(plot_training_history(history, outdir))
+        if token_stats:
+            paths.append(plot_token_stats(col, m, outdir, reference))
+        for method in projections:
+            paths.extend(plot_latent_projection(col, names, outdir, method, max_points))
+
+    m["plots"] = paths
     m["diagnostics_seconds"] = time.time() - t0
     with open(outdir / "metrics.json", "w") as f:
         json.dump(_py(m), f, indent=2)
@@ -1230,9 +1237,10 @@ def main():
     #Load the tokenizer, and the data exactly as during training
     model, train_args = models_vqvae.load_tokenizer_checkpoint(args.tokenizer, args.device)
     history = torch.load(args.tokenizer, map_location="cpu").get("training_history")
+    train_args = dict(train_args, shuffle=False)
     dataset = helpers.get_loader(args.data, train_args).dataset
 
-    col = collect(model, dataset.X, dataset.mask, dataset.jet_data, n_jets=args.n_jets, device=args.device)
+    col = collect_from_dataset(model, dataset, n_jets=args.n_jets, device=args.device)
     run_diagnostics(col, args.out, train_args["input_format"], train_args["preprocess"], history=history,
                     token_stats=args.token_stats, plots=not args.no_plots, projections=args.projections,
                     max_points=args.max_points)

@@ -183,178 +183,304 @@ def config_get(args_or_dict, key, default=None):
 # ---------------------------------------------------------------------
 # Data loaders / kinematics
 # ---------------------------------------------------------------------
-class ktdr_dataset(torch.utils.data.Dataset):
-    def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None):
-        super(ktdr_dataset, self).__init__()
-        self.n_features=2
-        self.pad_value=-1
+# All formats are streamed from the .h5 files written by lunddata.py: only a shuffle buffer is held in RAM,
+# never the whole file. Memory per DataLoader worker is ~2 x block_size x blocks_per_buffer jets
+# (~0.3-0.6 GB with the defaults, for any format), independent of the file size.
+#
+#   * the file is split into contiguous blocks of `block_size` jets
+#   * each epoch the block order is shuffled; each worker reads `blocks_per_buffer` random blocks into a
+#     buffer, shuffles the jets inside it and yields ready-made batches (DataLoader uses batch_size=None)
+#   * lunddata.py writes the JetClass ROOT files one after the other (one process class per region of the
+#     file), so mixing many random blocks per buffer is what keeps each batch class-mixed
+#
+# Batches have the same layout as the old in-memory datasets: X, or [X, jet], [X, mask], [X, jet, mask].
+# dataset.X / .mask / .jet_data still exist for old code, as disk-backed views: slicing them
+# (dataset.X[:10000], dataset.jet_data[idx]) only reads those rows. len(dataset) is the number of
+# BATCHES (what DataLoader needs); the number of jets is dataset.n_jets.
 
-        self.add_mask=add_mask
-        self.preprocess=preprocess
-        self.add_conditional=add_conditional
+def _format_spec(input_format):
+    '''(h5 group, feature datasets, default pad value, truncate to num_constituents, mask rule, jet conditioning)'''
+    if input_format=="ktdr":
+        return "lundplane", ["kt","dr"], -1.0, True, "all", "full"
+    elif input_format=="4vec":
+        return "constituents", ["E","PX","PY","PZ"], -10.0, True, "all", "full"
+    elif input_format=="relvec":
+        return "relative_constituents", ["ptfrac","deta","dphi"], -10.0, True, "all", "full"
+    elif input_format=="lundtree":
+        #NOTE: a tree can't be truncated without breaking it, its size is set in lunddata.py. Only the split flag
+        #(last token) is -1 for padding, -1 is a valid feature. The tree fixes the mass and multiplicity, so the
+        #conditioning is only the [pt, eta, phi] of the anti-kt R=1.0 jet it was built from
+        return "lund_tree", list(helpers_lundtree.TOKEN_NAMES), -1.0, False, "last", "ptetaphi"
+    raise ValueError(f"No known input format {input_format}")
 
-        #Claude says its faster to stack and index, since slicing the h5py still loads everything in memory anyways
-        with h5py.File(file_path, "r") as f:
-            const = f["lundplane"]
-            self.X = np.stack([np.asarray(const[k][:, :NConstituents], dtype=np.float32) for k in ["kt","dr"]], axis=-1)
-
-            if self.add_conditional:
-                j = f["jet"]
-                jet = np.stack([np.asarray(j[k][:], dtype=np.float64) for k in ["E","PX","PY","PZ"]], axis=-1)
-
-        #Mask which stores if padded. True/False=Padded/unpadded
-        if add_mask or self.add_conditional:
-            self.mask=np.all(self.X == np.float32(self.pad_value), axis=-1)
-            self.n_real = (~self.mask).sum(axis=1).reshape(-1,1)
-
-        #Make the conditioning info once we know masks
-        if self.add_conditional:
-            pt,eta,phi,m,_=jet_PtEtaPhiM(jet)
-            self.jet_data = np.stack([pt, eta, phi, m, self.n_real], axis=-1).astype(np.float32).reshape(self.mask.shape[0],-1)
-
-    def __getitem__(self, index):
-        X = torch.from_numpy(self.X[index])
-        if self.add_mask and self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index]), torch.from_numpy(self.mask[index])]
-        elif self.add_mask:
-            return [X, torch.from_numpy(self.mask[index])]
-        elif self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index])]
-        return X
-
-    def __len__(self):
-        return len(self.X)
-
-class constit_dataset(torch.utils.data.Dataset):
-    def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None):
-        super(constit_dataset, self).__init__()
-        self.n_features=4
-        self.pad_value=-10
-
-        self.add_mask=add_mask
-        self.preprocess=preprocess
-        self.add_conditional=add_conditional
-
-        #Claude says its faster to stack and index, since slicing the h5py still loads everything in memory anyways
-        with h5py.File(file_path, "r") as f:
-            const = f["constituents"]
-            self.X = np.stack([np.asarray(const[k][:, :NConstituents], dtype=np.float32) for k in ["E","PX","PY","PZ"]], axis=-1)
-
-            if self.add_conditional:
-                j = f["jet"]
-                jet = np.stack([np.asarray(j[k][:], dtype=np.float64) for k in ["E","PX","PY","PZ"]], axis=-1)
-
-        #Mask which stores if padded. True/False=Padded/unpadded
-        if add_mask or self.add_conditional:
-            self.mask=np.all(self.X == np.float32(self.pad_value), axis=-1)
-            self.n_real = (~self.mask).sum(axis=1).reshape(-1,1)
-
-        #Make the conditioning info once we know masks
-        if self.add_conditional:
-            pt,eta,phi,m,_=jet_PtEtaPhiM(jet)
-            self.jet_data = np.stack([pt, eta, phi, m, self.n_real], axis=-1).astype(np.float32).reshape(self.mask.shape[0],-1)
-
-    def __getitem__(self, index):
-        X = torch.from_numpy(self.X[index])
-        if self.add_mask and self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index]), torch.from_numpy(self.mask[index])]
-        elif self.add_mask:
-            return [X, torch.from_numpy(self.mask[index])]
-        elif self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index])]
-        return X
-
-    def __len__(self):
-        return len(self.X)
-
-class constit_relative_dataset(torch.utils.data.Dataset):
-    def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None):
-        super(constit_relative_dataset, self).__init__()
-        self.n_features=3
-        self.pad_value=-10
-
-        self.add_mask=add_mask
-        self.preprocess=preprocess
-        self.add_conditional=add_conditional
-
-        #Claude says its faster to stack and index, since slicing the h5py still loads everything in memory anyways
-        with h5py.File(file_path, "r") as f:
-            const = f["relative_constituents"]
-            self.X = np.stack([np.asarray(const[k][:, :NConstituents], dtype=np.float32) for k in ["ptfrac","deta","dphi"]], axis=-1)
-
-            if self.add_conditional:
-                j = f["jet"]
-                jet = np.stack([np.asarray(j[k][:], dtype=np.float64) for k in ["E","PX","PY","PZ"]], axis=-1)
-
-        #Mask which stores if padded. True/False=Padded/unpadded
-        if add_mask or self.add_conditional:
-            self.mask=np.all(self.X == np.float32(self.pad_value), axis=-1)
-            self.n_real = (~self.mask).sum(axis=1).reshape(-1,1)
-
-        #Make the conditioning info once we know masks
-        if self.add_conditional:
-            pt,eta,phi,m,_=jet_PtEtaPhiM(jet)
-            self.jet_data = np.stack([pt, eta, phi, m, self.n_real], axis=-1).astype(np.float32).reshape(self.mask.shape[0],-1)
-            #self.jet_data = np.concatenate([jet, self.n_real], axis=-1).astype(np.float32)
-
-    def __getitem__(self, index):
-        X = torch.from_numpy(self.X[index])
-        if self.add_mask and self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index]), torch.from_numpy(self.mask[index])]
-        elif self.add_mask:
-            return [X, torch.from_numpy(self.mask[index])]
-        elif self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index])]
-        return X
-
-    def __len__(self):
-        return len(self.X)
-
-class lundtree_dataset(torch.utils.data.Dataset):
-    def __init__(self, file_path, NConstituents=20, add_mask=False, add_conditional=False, preprocess=None, max_events=None):
-        super(lundtree_dataset, self).__init__()
-        self.n_features=len(helpers_lundtree.TOKEN_NAMES) #[split features, context of next node, split flag], see helpers_lundtree
-        self.pad_value=-1
-
-        self.add_mask=add_mask
-        self.preprocess=preprocess #NOTE: the tree is already preprocesses into the model space in lunddata.py
-        self.add_conditional=add_conditional
-
-        #NOTE: NConstituents is not used, a tree can't be truncated without breaking it. The size is set in lunddata.py
-        with h5py.File(file_path, "r") as f:
-            tree = f["lund_tree"]
-            self.X = np.stack([np.asarray(tree[k][:max_events], dtype=np.float32) for k in helpers_lundtree.TOKEN_NAMES], axis=-1)
-
-            #The jet the tree was built from (anti-kt R=1.0), not the constituent sum stored in "jet"
-            if self.add_conditional:
-                j = f["jet"]
-                jet = np.stack([np.asarray(j[k][:max_events], dtype=np.float64) for k in ["E","PX","PY","PZ"]], axis=-1)
-
-        #Mask which stores if padded. True/False=Padded/unpadded. Only the split flag is -1 for padding, -1 is a valid feature
-        if add_mask or self.add_conditional:
-            self.mask=self.X[...,-1]==self.pad_value
-
-        #Make the conditioning info, only [pt, eta, phi] since the tree fixes the mass and multiplicity
-        if self.add_conditional:
-            pt,eta,phi,m,_=jet_PtEtaPhiM(jet)
-            self.jet_data = np.concatenate([pt, eta, phi], axis=-1).astype(np.float32)
-
-    def __getitem__(self, index):
-        X = torch.from_numpy(self.X[index])
-        if self.add_mask and self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index]), torch.from_numpy(self.mask[index])]
-        elif self.add_mask:
-            return [X, torch.from_numpy(self.mask[index])]
-        elif self.add_conditional:
-            return [X, torch.from_numpy(self.jet_data[index])]
-        return X
-
-    def __len__(self):
-        return len(self.X)
-
-def get_loader(filename, args):
+class block_stream_dataset(torch.utils.data.IterableDataset):
     '''
-    Handles all the data-loader configurations
+    Generic block-shuffled streaming over the rows (jets) of an .h5 file. Subclasses implement
+        _read(f, blocks, **kw) -> tuple of numpy arrays (or None) with one row per jet, for the (start, stop) ranges
+        _pack(*arrays)         -> what one batch yields
+    and call super().__init__ with the number of jets and the bytes per jet (used to size the shuffle buffer).
+    '''
+    BUFFER_BYTES = 160 * 1024**2 #target size of one shuffle buffer (RAM per worker is ~2-3x this)
+
+    def __init__(self, file_path, n_jets, bytes_per_jet, batch_size=256, shuffle=True, block_size=None,
+                 blocks_per_buffer=32, drop_last=False, max_jets=None, num_workers=0):
+        super(block_stream_dataset, self).__init__()
+        self.file_path=file_path
+        self.batch_size=int(batch_size)
+        self.shuffle=shuffle
+        self.drop_last=drop_last #True for training: exact batch count per epoch (e.g. for OneCycleLR)
+        self.num_workers=num_workers
+        self.n_jets = n_jets if max_jets is None else min(n_jets, int(max_jets))
+
+        #Shuffle buffer = blocks_per_buffer random blocks of block_size contiguous jets. By default the block size
+        #is chosen so a buffer is ~BUFFER_BYTES whatever the jet size (lund trees are ~3x bigger than relvec jets)
+        self.blocks_per_buffer = int(blocks_per_buffer)
+        if block_size is None:
+            block_size = int(np.clip(self.BUFFER_BYTES // (self.blocks_per_buffer * max(bytes_per_jet, 1)), 256, 16384))
+        self.block_size = int(block_size)
+        self.blocks = [(s, min(s+self.block_size, self.n_jets)) for s in range(0, self.n_jets, self.block_size)]
+
+    def _read(self, f, blocks, **kw):
+        raise NotImplementedError
+
+    def _pack(self, *arrays):
+        raise NotImplementedError
+
+    def __len__(self):
+        '''
+        number of BATCHES per epoch, an upper bound: each worker drops (drop_last) or yields a partial
+        last batch, so with several workers there can be up to num_workers-1 batches fewer
+        '''
+        if self.drop_last:
+            return self.n_jets // self.batch_size
+        return math.ceil(self.n_jets / self.batch_size) + max(self.num_workers - 1, 0)
+
+    def _plan(self):
+        '''block order for this epoch (shared by all workers) and this worker's share of it'''
+        info = torch.utils.data.get_worker_info()
+        if info is None:
+            base, wid, nw = int(torch.randint(0, 2**62, ()).item()), 0, 1
+        else: #info.seed = base_seed + id, base_seed changes every epoch and follows torch.manual_seed
+            base, wid, nw = info.seed - info.id, info.id, info.num_workers
+        if self.shuffle:
+            order = np.random.default_rng(base).permutation(len(self.blocks))
+        else:
+            order = np.arange(len(self.blocks))
+        return order[wid::nw], np.random.default_rng(base + 1 + wid)
+
+    def __iter__(self):
+        '''
+        Without shuffling and with at most one worker the jets come out in file order. With several workers
+        each worker reads its own blocks and their batches arrive interleaved.
+        '''
+        my_blocks, rng = self._plan()
+        bs = self.batch_size
+        take = lambda arrays, sel: tuple(None if a is None else a[sel] for a in arrays)
+        n_buffers = max(1, math.ceil(len(my_blocks) / self.blocks_per_buffer))
+        with h5py.File(self.file_path, "r") as f:
+            carry = None
+            for buffer_blocks in np.array_split(my_blocks, n_buffers): #equal-sized buffers, so the last one is mixed too
+                if len(buffer_blocks)==0:
+                    continue
+                blocks = [self.blocks[b] for b in buffer_blocks]
+                if not self.shuffle:
+                    blocks.sort()
+                arrays = self._read(f, blocks)
+                if carry is not None:
+                    arrays = tuple(None if a is None else np.concatenate([c, a]) for c, a in zip(carry, arrays))
+                n = len(arrays[0])
+                if self.shuffle:
+                    arrays = take(arrays, rng.permutation(n))
+                n_full = n // bs * bs
+                for s in range(0, n_full, bs):
+                    yield self._pack(*take(arrays, slice(s, s+bs)))
+                carry = take(arrays, slice(n_full, None))
+                del arrays
+            if carry is not None and len(carry[0]) and not self.drop_last:
+                yield self._pack(*carry)
+
+    def _slices(self, n_jets, n_slices=128):
+        '''n_slices short row ranges spread evenly over the file, n_jets rows in total'''
+        n_jets = min(int(n_jets), self.n_jets)
+        n_slices = max(1, min(n_slices, n_jets))
+        length = math.ceil(n_jets / n_slices)
+        if length * n_slices >= self.n_jets:
+            return [(0, n_jets)]
+        starts = np.linspace(0, self.n_jets - length, n_slices).astype(int)
+        return [(int(s), int(s) + length) for s in starts]
+
+    def sample(self, n_jets, n_slices=128, **kw):
+        '''
+        Load n_jets jets for validation/diagnostics, from n_slices short slices spread evenly over the file
+        (the first n jets would all come from the first ROOT file = one process class).
+        '''
+        n_jets = min(int(n_jets), self.n_jets)
+        with h5py.File(self.file_path, "r") as f:
+            arrays = self._read(f, self._slices(n_jets, n_slices), **kw)
+        return tuple(None if a is None else a[:n_jets] for a in arrays)
+
+    def read_rows(self, rows, **kw):
+        '''read arbitrary jet indices (int array, any order, repeats allowed) from disk, returned in that order'''
+        rows = np.asarray(rows, dtype=np.int64).reshape(-1)
+        rows = np.where(rows < 0, rows + self.n_jets, rows)
+        if len(rows) and (rows.min() < 0 or rows.max() >= self.n_jets):
+            raise IndexError(f"jet index out of range for {self.n_jets} jets")
+        uniq, inverse = np.unique(rows, return_inverse=True)
+        #group sorted indices into contiguous runs, then read each run in one go
+        breaks = np.flatnonzero(np.diff(uniq) != 1) + 1
+        runs = [(int(r[0]), int(r[-1])+1) for r in np.split(uniq, breaks) if len(r)]
+        with h5py.File(self.file_path, "r") as f:
+            arrays = self._read(f, runs, **kw)
+        return tuple(None if a is None else a[inverse] for a in arrays)
+
+    def stream_all(self, **kw):
+        '''iterate over the whole file in file order as tuples of numpy arrays (one block at a time), e.g. for statistics'''
+        with h5py.File(self.file_path, "r") as f:
+            for block in self.blocks:
+                yield self._read(f, [block], **kw)
+
+class jet_stream_dataset(block_stream_dataset):
+    '''Jets in one of the lunddata.py formats (ktdr, 4vec, relvec, lundtree), see the notes above.'''
+
+    def __init__(self, file_path, input_format, NConstituents=20, batch_size=256, shuffle=True, add_mask=False,
+                 add_conditional=False, preprocess=None, pad_value=None, block_size=None, blocks_per_buffer=32,
+                 drop_last=False, max_jets=None, num_workers=0):
+        self.input_format=input_format
+        self.group, self.keys, default_pad, truncate, self.mask_rule, self.jet_rule = _format_spec(input_format)
+        self.pad_value=float(default_pad if pad_value is None else pad_value)
+        self.n_features=len(self.keys)
+        self.add_mask=add_mask
+        self.add_conditional=add_conditional
+        self.preprocess=preprocess #NOTE: pre-processing is applied in lunddata.py, stored only as metadata
+
+        #Only metadata is read here, the file is opened inside each worker (h5py handles don't survive a fork)
+        with h5py.File(file_path, "r") as f:
+            shape = f[self.group][self.keys[0]].shape
+            self.has_jet = "jet" in f
+        if add_conditional and not self.has_jet:
+            raise KeyError(f"{file_path} has no 'jet' group, needed for the conditioning")
+        self.width = min(shape[1], int(NConstituents)) if truncate and NConstituents else shape[1]
+
+        super(jet_stream_dataset, self).__init__(file_path, shape[0], self.width*self.n_features*4, batch_size=batch_size,
+            shuffle=shuffle, block_size=block_size, blocks_per_buffer=blocks_per_buffer, drop_last=drop_last,
+            max_jets=max_jets, num_workers=num_workers)
+
+    def _mask(self, X):
+        #Mask which stores if padded. True/False=Padded/unpadded
+        if self.mask_rule=="last":
+            return X[..., -1]==np.float32(self.pad_value)
+        return np.all(X==np.float32(self.pad_value), axis=-1)
+
+    def _jet(self, E4, mask):
+        pt, eta, phi, m, _ = jet_PtEtaPhiM(E4)
+        if self.jet_rule=="ptetaphi":
+            return np.concatenate([pt, eta, phi], axis=-1).astype(np.float32)
+        n_real = (~mask).sum(axis=1).reshape(-1,1)
+        return np.concatenate([pt, eta, phi, m, n_real], axis=-1).astype(np.float32)
+
+    def _read(self, f, blocks, need_jet=None):
+        '''read a list of (start, stop) row ranges -> X [n, C, F] float32, mask [n, C] bool, jet [n, J] float32 or None'''
+        need_jet = self.add_conditional if need_jet is None else need_jet
+        n = sum(e-s for s, e in blocks)
+        X = np.empty((n, self.width, self.n_features), dtype=np.float32)
+        E4 = np.empty((n, 4), dtype=np.float64) if need_jet else None
+        grp = f[self.group]
+        pos = 0
+        for s, e in blocks:
+            for j, k in enumerate(self.keys):
+                X[pos:pos+e-s, :, j] = grp[k][s:e, :self.width]
+            if E4 is not None:
+                for j, k in enumerate(["E","PX","PY","PZ"]):
+                    E4[pos:pos+e-s, j] = f["jet"][k][s:e]
+            pos += e-s
+        mask = self._mask(X)
+        jet = self._jet(E4, mask) if E4 is not None else None
+        return X, mask, jet
+
+    def _pack(self, X, mask, jet):
+        X = torch.from_numpy(np.ascontiguousarray(X))
+        mask = torch.from_numpy(np.ascontiguousarray(mask))
+        jet = None if jet is None else torch.from_numpy(np.ascontiguousarray(jet))
+        if self.add_mask and self.add_conditional:
+            return [X, jet, mask]
+        elif self.add_mask:
+            return [X, mask]
+        elif self.add_conditional:
+            return [X, jet]
+        return X
+
+    def sample(self, n_jets, n_slices=128):
+        '''-> X [n, C, F] float32, mask [n, C] bool, jet [n, J] float32 (always computed if the file has a jet group)'''
+        return super(jet_stream_dataset, self).sample(n_jets, n_slices, need_jet=self.has_jet)
+
+    @property
+    def X(self):
+        return _disk_view(self, "X")
+
+    @property
+    def mask(self):
+        return _disk_view(self, "mask")
+
+    @property
+    def jet_data(self):
+        return _disk_view(self, "jet")
+
+class _disk_view:
+    '''
+    Array-like stand-in for the old in-memory dataset.X / .mask / .jet_data. Indexing reads only the requested
+    jets from disk, e.g. dataset.X[:10000], dataset.jet_data[idx], dataset.mask[5]. np.asarray(view) on the
+    full X or mask loads the whole file (the old behaviour) and warns, so avoid it on big files.
+    '''
+    _WARN_BYTES = 2 * 1024**3
+
+    def __init__(self, dataset, field):
+        self.ds, self.field = dataset, field
+        if field=="X":
+            self.shape = (dataset.n_jets, dataset.width, dataset.n_features)
+            self.dtype = np.dtype(np.float32)
+        elif field=="mask":
+            self.shape = (dataset.n_jets, dataset.width)
+            self.dtype = np.dtype(bool)
+        else:
+            self.shape = (dataset.n_jets, 3 if dataset.jet_rule=="ptetaphi" else 5)
+            self.dtype = np.dtype(np.float32)
+        self.ndim = len(self.shape)
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, key):
+        rows, rest = (key[0], key[1:]) if isinstance(key, tuple) else (key, ())
+        if isinstance(rows, (int, np.integer)):
+            out = self._rows(np.array([rows]))[0]
+            return out[rest] if rest else out
+        else:
+            if isinstance(rows, slice):
+                rows = np.arange(*rows.indices(self.shape[0]))
+            elif isinstance(rows, torch.Tensor):
+                rows = rows.cpu().numpy()
+            rows = np.asarray(rows)
+            if rows.dtype == bool:
+                rows = np.flatnonzero(rows)
+            out = self._rows(rows)
+        return out[(slice(None),) + rest] if rest else out #rows already selected, apply the rest to the other axes
+
+    def _rows(self, rows):
+        X, mask, jet = self.ds.read_rows(rows, need_jet=(self.field=="jet"))
+        return {"X": X, "mask": mask, "jet": jet}[self.field]
+
+    def __array__(self, dtype=None, copy=None):
+        nbytes = int(np.prod(self.shape)) * self.dtype.itemsize
+        if nbytes > self._WARN_BYTES:
+            print(f"WARNING: loading the full dataset.{self.field} of {self.ds.file_path} into RAM "
+                  f"({nbytes/1024**3:.1f} GB); slice it instead, e.g. dataset.{self.field}[:N]", flush=True)
+        out = self[:]
+        return out if dtype is None else out.astype(dtype)
+
+def get_loader(filename, args, train=True):
+    '''
+    Handles all the data-loader configurations. train=True drops each worker's last partial batch
+    (fixed number of optimiser steps per epoch); the test loader keeps every jet
     '''
 
     #Interface for differnt argparser setups between vqvae and generative training
@@ -365,27 +491,31 @@ def get_loader(filename, args):
         add_conditional=True
 
     input_format=config_get(args, "input_format","")
-    num_constituents=config_get(args, "num_constituents", 0)
-    preprocess=config_get(args, "preprocess", False)
+    if input_format=="relvec" or input_format=="lundtree":
+        add_conditional=True #the jet is needed to reconstruct the constituents
+
     batch_size=config_get(args, "batch_size", 0)
     num_workers=config_get(args, "num_workers", 0)
     shuffle=config_get(args, "shuffle", True)
+    dataset = jet_stream_dataset(
+        filename, input_format,
+        NConstituents=config_get(args, "num_constituents", 0),
+        batch_size=batch_size,
+        shuffle=shuffle,
+        add_mask=add_mask,
+        add_conditional=add_conditional,
+        preprocess=config_get(args, "preprocess", False),
+        pad_value=config_get(args, "pad_value", None),
+        block_size=config_get(args, "block_size", None),
+        blocks_per_buffer=config_get(args, "blocks_per_buffer", 32) or 32,
+        max_jets=config_get(args, "max_jets", None),
+        drop_last=train and shuffle,
+        num_workers=num_workers,
+    )
 
-    #Actually load info
-    if input_format=="ktdr":
-        dataset = ktdr_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
-    elif input_format=="4vec":
-        dataset = constit_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
-    elif input_format=="relvec":
-        add_conditional=True
-        dataset = constit_relative_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
-    elif input_format=="lundtree":
-        add_conditional=True #like relvec, the jet is needed to reconstruct the constituents
-        dataset = lundtree_dataset(filename, NConstituents=num_constituents, add_mask=add_mask, add_conditional=add_conditional, preprocess=preprocess)
-    else:
-       raise ValueError(f"No known input format {input_format}")
-
-    loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=shuffle)
+    #batch_size=None: the dataset already yields whole batches
+    use_cuda = str(config_get(args, "device", "") or "").startswith("cuda") or torch.cuda.is_available()
+    loader = DataLoader(dataset, batch_size=None, num_workers=num_workers, pin_memory=use_cuda)
     return loader
 
 def get_loaders(args):
@@ -394,7 +524,7 @@ def get_loaders(args):
     '''
 
     train_loader=get_loader(args.train_file, args)
-    test_loader=get_loader(args.test_file, args)
+    test_loader=get_loader(args.test_file, args, train=False)
 
     return train_loader, test_loader
 
@@ -1002,7 +1132,7 @@ def save_argument_metadata(args):
 def common_training_args(parser):
 
     # data / io
-    parser.add_argument("--input_format", type=str, choices=["ktdr","4vec","relvec","lundtree"], default="relvec", help="What format of inputs we are using")
+    parser.add_argument("--input-format", type=str, choices=["ktdr","4vec","relvec","lundtree"], default="relvec", help="What format of inputs we are using")
     parser.add_argument("--num-constituents", type=int, default=20, help="Number of constituents")
     parser.add_argument("--preprocess", type=str, default=None, choices=["log","linear","standardize","logstd","shiftpad"], help="Preprocess the output (default: None")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",help="")
@@ -1012,6 +1142,9 @@ def common_training_args(parser):
     parser.add_argument("--shuffle", action="store_true", default=True, help="Shuffle training loader (default: True)")
     parser.add_argument("--no-shuffle", dest="shuffle", action="store_false", help="Disable shuffle")
     parser.add_argument("--seed", type=int, default=0,help="")
+    parser.add_argument("--block-size", type=int, default=None, help="Data streaming: jets per contiguous read from the .h5 (default: sized for a ~160 MB shuffle buffer)")
+    parser.add_argument("--blocks-per-buffer", type=int, default=32, help="Data streaming: random blocks mixed per shuffle buffer (RAM per worker ~ 2-3 x block-size x this x jet size)")
+    parser.add_argument("--max-jets", type=int, default=None, help="Use at most this many jets per file (quick tests)")
 
      # logging / checkpointing
     parser.add_argument("--log-dir", dest="log_dir", type=str, default="models/test",help="Logging directory")

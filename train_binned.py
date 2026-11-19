@@ -133,8 +133,8 @@ if __name__ == "__main__":
 
     #If continuing
     if args.model_checkpoint:
-        checkpoint_info = load_checkpoint_args(args, sys.argv[1:])
-    for name in ("tokenizer", "train_codes", "test_codes"):
+        checkpoint_info = helpers.load_checkpoint_args(args, sys.argv[1:])
+    for name in ("tokenizer", "train_codes", "test_codes", "val_file"):
         if getattr(args, name) is None:
             raise ValueError(f"--{name.replace('_', '-')} is required")
 
@@ -142,12 +142,6 @@ if __name__ == "__main__":
     print(f"Loading training set", flush=True)
     train_loader,test_loader=helpers_binned.get_code_loaders(args)
     codes_example, jet_example=helpers_binned.format_codes(next(iter(train_loader)), args, device)
-
-    #Number of constituents comes from the codes; the validation loader must use the same
-    n_const=train_loader.dataset.n_const
-    if args.num_constituents!=n_const:
-        print(f"Setting --num-constituents {n_const} (from the codes file, was {args.num_constituents})", flush=True)
-        args.num_constituents=n_const
 
     #Shape for later
     X_shape=codes_example.shape
@@ -157,7 +151,7 @@ if __name__ == "__main__":
 
     # construct model
     if args.model_checkpoint:
-        model = load_checkpoint_model(args, X_shape, cond_shape, checkpoint_info)
+        model = helpers.load_checkpoint_model(args, checkpoint_info) #rebuilt from the stored config (tokenizer included)
     else:
         model = helpers_binned.build_binned_model(args, X_shape, cond_shape)
         if args.conditional:
@@ -186,7 +180,7 @@ if __name__ == "__main__":
     scheduler = helpers.make_scheduler(args, optimizer)
     start_epoch = 0
     if args.model_checkpoint:
-        start_epoch=load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler)
+        start_epoch=helpers.load_checkpoint_scheduler_optimizer(args, checkpoint_info, optimizer, scheduler)
 
     #Store loss and etc for per-epoch loop
     training_info={
@@ -268,15 +262,15 @@ if __name__ == "__main__":
     results["checkpoint"]="checkpoints/best.pt"
     results["train_time"]=train_time
     results["test_time"]=test_time
-    results["train_N"]=len(train_loader.dataset)
-    results["test_N"]=len(test_loader.dataset)
+    results["train_N"]=train_loader.dataset.n_jets
+    results["test_N"]=test_loader.dataset.n_jets
     results["train_losses"]=training_info["train_losses"]
     results["test_losses"]=training_info["test_losses"]
     results["lr_history"]=training_info["lr_history"]
 
     #Make validation plots against the ORIGINAL validation file, same as for the other architectures
     print(f"Loading original-format validation set {args.val_file}", flush=True)
-    val_loader=helpers.get_loader(args.val_file,args)
+    val_loader=helpers.get_loader(args.val_file, args, train=False)
     if training_info["stopped_nonfinite"]:
       print("Training stopped on a non-finite value; final generated validation plots will be marked unavailable.", flush=True)
       helpers_plotting.validate_unbinned_models([model], val_loader, args, results=results, labels=["original", "generated"], unavailable_model_reasons=["training stopped on nan/inf loss or parameters"],)

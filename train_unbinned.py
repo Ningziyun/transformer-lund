@@ -301,8 +301,8 @@ if __name__ == "__main__":
     results["checkpoint"]="checkpoints/best.pt"
     results["train_time"]=train_time
     results["test_time"]=test_time
-    results["train_N"]=len(train_loader.dataset)
-    results["test_N"]=len(test_loader.dataset)
+    results["train_N"]=train_loader.dataset.n_jets
+    results["test_N"]=test_loader.dataset.n_jets
     results["train_losses"]=training_info["train_losses"]
     results["test_losses"]=training_info["test_losses"]
     results["lr_history"]=training_info["lr_history"]
